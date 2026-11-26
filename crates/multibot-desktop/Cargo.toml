@@ -1,0 +1,26 @@
+[package]
+name = "multibot-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "multibot"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+multibot-core.workspace = true
+multibot-gpu.workspace = true
+multibot-proto.workspace = true
+sysinfo.workspace = true
+tokio.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui-kit = { version = "0.11.0", default-features = false, features = ["component", "assets"] }
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+gpui-kit = { version = "0.11.0", default-features = false, features = ["component", "assets", "x11"] }
+
+[dev-dependencies]
+gpui-kit = { version = "0.11.0", default-features = false, features = ["component", "assets", "test-support"] }

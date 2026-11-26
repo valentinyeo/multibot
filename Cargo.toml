@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/multibot-proto",
+    "crates/multibot-gpu",
+    "crates/multibot-core",
+    "crates/multibotd",
+    "crates/multibot-desktop",
+]
+exclude = ["patches/gpui-pre-windows"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+dirs = "6.0"
+notify = "8.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sysinfo = { version = "0.35", default-features = false, features = ["system"] }
+tokio = { version = "1.44", features = ["rt-multi-thread", "macros", "io-util", "io-std", "process", "sync", "time", "fs"] }
+walkdir = "2.5"
+
+multibot-proto = { path = "crates/multibot-proto" }
+multibot-gpu = { path = "crates/multibot-gpu" }
+multibot-core = { path = "crates/multibot-core" }
+
+[patch.crates-io]
+gpui-pre-windows = { path = "patches/gpui-pre-windows" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

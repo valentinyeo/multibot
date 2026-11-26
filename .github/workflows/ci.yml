@@ -1,0 +1,77 @@
+name: CI & Milestone 0 Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux Test & Build multibotd
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux GPUI dev libs
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libfontconfig1-dev libwayland-dev pkg-config libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run workspace unit & UI tests
+        run: cargo test --workspace
+
+      - name: Build release multibotd (Linux x86_64)
+        run: cargo build --release -p multibotd
+
+      - name: Stage multibotd binary
+        run: |
+          mkdir -p dist
+          cp target/release/multibotd dist/multibotd-linux-x86_64
+          ls -lh dist/multibotd-linux-x86_64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: multibotd-linux-x86_64
+          path: dist/multibotd-linux-x86_64
+
+  windows:
+    name: Windows Test & Build multibot.exe
+    needs: linux
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run workspace tests on Windows
+        run: cargo test --workspace
+
+      - name: Build release multibot.exe (iGPU-locked DXGI patch)
+        run: cargo build --release -p multibot-desktop
+
+      - name: Download multibotd-linux-x86_64 for auto-deploy bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: multibotd-linux-x86_64
+          path: dist
+
+      - name: Stage Windows portable bundle
+        shell: pwsh
+        run: |
+          Copy-Item target/release/multibot.exe dist/multibot.exe
+          Get-ChildItem dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: multibot-windows-x64
+          path: dist/
