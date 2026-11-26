@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/multibot-proto",
     "crates/multibot-gpu",
+    "crates/multibot-keys",
     "crates/multibot-core",
     "crates/multibotd",
     "crates/multibot-desktop",
@@ -27,6 +28,7 @@ walkdir = "2.5"
 
 multibot-proto = { path = "crates/multibot-proto" }
 multibot-gpu = { path = "crates/multibot-gpu" }
+multibot-keys = { path = "crates/multibot-keys" }
 multibot-core = { path = "crates/multibot-core" }
 
 [patch.crates-io]
@@ -34,6 +36,6 @@ gpui-pre-windows = { path = "patches/gpui-pre-windows" }
 
 [profile.release]
 lto = "thin"
-codegen-units = 1
+codegen-units = 16
 strip = "symbols"
 panic = "abort"

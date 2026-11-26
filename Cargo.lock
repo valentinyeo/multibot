@@ -2625,7 +2625,6 @@ dependencies = [
  "gpui-component",
  "gpui-fast",
  "gpui-fast-platform",
- "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-macros",
  "gpui-pre-platform",
@@ -4313,6 +4312,7 @@ dependencies = [
  "gpui-kit",
  "multibot-core",
  "multibot-gpu",
+ "multibot-keys",
  "multibot-proto",
  "sysinfo 0.35.2",
  "tokio",
@@ -4324,6 +4324,10 @@ version = "0.1.0"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "multibot-keys"
+version = "0.1.0"
 
 [[package]]
 name = "multibot-proto"

@@ -4,10 +4,15 @@
 )]
 
 mod app;
+mod theme;
 
-use app::{MultibotView, NewWindow, ToggleSettings, ToggleSidebar};
+use app::{
+    CloseOverlay, JumpSession1, JumpSession2, JumpSession3, JumpSession4, JumpSession5,
+    JumpSession6, JumpSession7, JumpSession8, JumpSession9, MultibotView, NewWindow, NextSession,
+    OpenInbox, OpenPalette, OpenShortcuts, PrevSession, ToggleInbox, ToggleSettings, ToggleSidebar,
+};
 use gpui_kit::{
-    AppContext, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px, size,
+    App, AppContext, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px, size,
 };
 use multibot_core::MultibotSettings;
 use multibot_gpu::{ENV_GPU_LUID, ENV_GPU_MODE, ENV_GPU_REPORT_PATH, GpuPreference};
@@ -44,6 +49,31 @@ fn configure_gpu_env_before_gpui(settings: &MultibotSettings) {
     }
 }
 
+pub fn bind_multibot_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("ctrl-k", OpenPalette, None),
+        KeyBinding::new("ctrl-shift-k", OpenPalette, None),
+        KeyBinding::new("alt-i", OpenInbox, None),
+        KeyBinding::new("ctrl-shift-i", ToggleInbox, None),
+        KeyBinding::new("ctrl-,", ToggleSettings, None),
+        KeyBinding::new("ctrl-shift-b", ToggleSidebar, None),
+        KeyBinding::new("ctrl-n", NewWindow, None),
+        KeyBinding::new("f1", OpenShortcuts, None),
+        KeyBinding::new("escape", CloseOverlay, None),
+        KeyBinding::new("ctrl-tab", NextSession, None),
+        KeyBinding::new("ctrl-shift-tab", PrevSession, None),
+        KeyBinding::new("ctrl-1", JumpSession1, None),
+        KeyBinding::new("ctrl-2", JumpSession2, None),
+        KeyBinding::new("ctrl-3", JumpSession3, None),
+        KeyBinding::new("ctrl-4", JumpSession4, None),
+        KeyBinding::new("ctrl-5", JumpSession5, None),
+        KeyBinding::new("ctrl-6", JumpSession6, None),
+        KeyBinding::new("ctrl-7", JumpSession7, None),
+        KeyBinding::new("ctrl-8", JumpSession8, None),
+        KeyBinding::new("ctrl-9", JumpSession9, None),
+    ]);
+}
+
 fn main() {
     let settings = MultibotSettings::load();
     configure_gpu_env_before_gpui(&settings);
@@ -58,13 +88,10 @@ fn main() {
 
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
-        cx.bind_keys([
-            KeyBinding::new("ctrl-,", ToggleSettings, None),
-            KeyBinding::new("ctrl-shift-b", ToggleSidebar, None),
-            KeyBinding::new("ctrl-n", NewWindow, None),
-        ]);
+        theme::apply_multibot_dark_theme(cx);
+        bind_multibot_keys(cx);
 
-        let bounds = Bounds::centered(None, size(px(1220.0), px(780.0)), cx);
+        let bounds = Bounds::centered(None, size(px(1260.0), px(800.0)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
