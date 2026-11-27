@@ -2591,6 +2591,20 @@ impl MultibotView {
         cx.notify();
     }
 
+    #[cfg(windows)]
+    pub(crate) fn stage_browser_screenshot(
+        &mut self,
+        path: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.stage_dropped_paths(&[path.to_path_buf()], window, cx);
+        self.chat_state
+            .pending_attachments
+            .iter()
+            .any(|attachment| attachment.path == path)
+    }
+
     pub(crate) fn stage_dropped_paths(
         &mut self,
         paths: &[PathBuf],

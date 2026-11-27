@@ -134,6 +134,9 @@ actions!(
         InboxPrevSplit,
         // Slice 5 — built-in native terminal pane (`Alt+C`)
         ToggleTerminal,
+        ToggleBrowserPane,
+        FocusBrowserPane,
+        CaptureBrowserPane,
     ]
 );
 
@@ -318,6 +321,8 @@ pub struct MultibotView {
     pub(crate) table_modal_state: TableModalState,
     /// Built-in native GPU terminal pane (`Alt+C`). Owns no PTY while closed.
     pub(crate) terminal: TerminalPaneState,
+    #[cfg(windows)]
+    pub(crate) browser: crate::browser_pane::DesktopBrowserPane,
     pub(crate) shell_host: crate::shell_host::ShellHost,
     /// Lazy-loaded Computer View pane (MBRU-7). Owns no webview while closed.
     pub(crate) computer: ComputerViewState,
@@ -690,6 +695,8 @@ impl MultibotView {
             slash_picker_state: SlashPickerState::default(),
             table_modal_state: TableModalState::default(),
             terminal: TerminalPaneState::default(),
+            #[cfg(windows)]
+            browser: Default::default(),
             shell_host: crate::shell_host::ShellHost::default(),
             computer: ComputerViewState::default(),
             last_computer_url: None,
@@ -1221,6 +1228,10 @@ impl MultibotView {
         self.sidebar_state.workspace_menu_open = false;
         self.chat_state.composer_menu_open = false;
         if self.main_surface != next {
+            #[cfg(windows)]
+            if next != MainSurface::Chat {
+                self.hide_browser_pane();
+            }
             self.voice.cancel();
             self.sidebar_state.rename = None;
             self.sidebar_state.new_workspace_draft = None;
@@ -5148,6 +5159,8 @@ impl Render for MultibotView {
             self.sidebar_state.rename = None;
             self.sidebar_state.new_workspace_draft = None;
         }
+        #[cfg(windows)]
+        self.sync_browser_pane(window, cx);
         self.sync_embedded_shell(window, cx);
         let current_sig = self.focus_layout_signature();
         let prev_sig = self.last_focus_layout_sig.replace(current_sig.clone());
@@ -5168,6 +5181,8 @@ impl Render for MultibotView {
         {
             self.focus_active_surface_default(window, cx);
         }
+        #[cfg(windows)]
+        let browser_pane = self.render_browser_pane(cx);
         div()
             .id("multibot-root")
             .track_focus(&self.root_focus_handle)
@@ -5286,6 +5301,15 @@ impl Render for MultibotView {
                     this.focus_active_surface_default(window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &ToggleBrowserPane, window, cx| {
+                this.toggle_browser_pane(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusBrowserPane, window, cx| {
+                this.focus_browser_pane(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CaptureBrowserPane, window, cx| {
+                this.capture_browser_pane(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 // Modals own the keyboard; the pane never opens over one.
                 if this.active_modal != ActiveModal::None || this.table_modal_state.is_open() {
@@ -5313,6 +5337,10 @@ impl Render for MultibotView {
                     ActiveModal::Shortcuts => ActiveModal::None,
                     _ => ActiveModal::Shortcuts,
                 };
+                #[cfg(windows)]
+                if this.active_modal == ActiveModal::Shortcuts {
+                    this.hide_browser_pane();
+                }
                 this.focus_active_surface_default(window, cx);
                 cx.notify();
             }))
@@ -6032,18 +6060,33 @@ impl Render for MultibotView {
                     .when(self.sidebar_rendered(), |el| {
                         el.child(self.render_sidebar(cx))
                     })
-                    .child(match self.main_surface {
-                        MainSurface::Chat
-                            if self
-                                .selected_session
-                                .as_ref()
-                                .is_some_and(|s| s.agent == AgentKind::Shell) =>
-                        {
-                            self.render_shell_panel(cx).into_any_element()
-                        }
-                        MainSurface::Chat => self.render_chat_panel(cx).into_any_element(),
-                        MainSurface::Inbox => self.render_inbox_panel(cx).into_any_element(),
-                        MainSurface::Settings => self.render_chat_panel(cx).into_any_element(),
+                    .child({
+                        let surface = match self.main_surface {
+                            MainSurface::Chat
+                                if self
+                                    .selected_session
+                                    .as_ref()
+                                    .is_some_and(|s| s.agent == AgentKind::Shell) =>
+                            {
+                                self.render_shell_panel(cx).into_any_element()
+                            }
+                            MainSurface::Chat => self.render_chat_panel(cx).into_any_element(),
+                            MainSurface::Inbox => self.render_inbox_panel(cx).into_any_element(),
+                            MainSurface::Settings => self.render_chat_panel(cx).into_any_element(),
+                        };
+                        #[cfg(windows)]
+                        let surface = if let Some(pane) = browser_pane {
+                            h_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .child(surface)
+                                .child(pane)
+                                .into_any_element()
+                        } else {
+                            surface
+                        };
+                        surface
                     })
                     // Slice 5 — Computer View docks as a right-hand split beside the chat.
                     // Mounted only while open, so a closed pane adds no layout node, no

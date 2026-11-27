@@ -53,6 +53,8 @@ impl MultibotView {
         if self.table_modal_state.is_open() {
             self.table_modal_state.close();
         }
+        #[cfg(windows)]
+        self.hide_browser_pane();
         self.active_modal = ActiveModal::Palette;
         self.palette_state.tab_context_session_key = None;
         self.palette_state.reminder_target = None;
@@ -76,6 +78,8 @@ impl MultibotView {
         if self.table_modal_state.is_open() {
             self.table_modal_state.close();
         }
+        #[cfg(windows)]
+        self.hide_browser_pane();
         self.active_modal = ActiveModal::Palette;
         self.palette_state.reminder_target = None;
         self.palette_state.directory_picker = None;
@@ -583,7 +587,7 @@ impl MultibotView {
                 tab_context: true,
                 global: true,
             },
-            // Browser (Phase 2 placeholders)
+            // Docked browser pane
             PaletteCommandSpec {
                 id: "pal-cmd-browser-toggle".into(),
                 label: "Toggle Browser Pane".into(),
@@ -1039,6 +1043,16 @@ impl MultibotView {
                     "pal-cmd-toggle-terminal" => {
                         self.toggle_terminal_pane(cx);
                         return;
+                    }
+                    "pal-cmd-browser-toggle" => {
+                        if let Some(win) = window {
+                            self.toggle_browser_pane(win, cx);
+                        }
+                    }
+                    "pal-cmd-browser-swap" => {
+                        if let Some(win) = window {
+                            self.focus_browser_pane(win, cx);
+                        }
                     }
                     "pal-cmd-toggle-computer-view" => {
                         // The palette runs over the chat surface; the pane docks beside it.
