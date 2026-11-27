@@ -326,6 +326,9 @@ pub fn discover_all_sessions_with_ctx(
         HashSet::new()
     } else {
         ctx.held_open_ids()
+            // Archiving a Multibot-hosted chat keeps its `metadata.json` record, so the id
+            // stays held open. Archived chats are history: they must not become a candidate.
+            .filter(|id| !ctx.is_archived_id(id.as_str()))
             .map(|id| antigravity::hosted_history_path(home, id))
             .collect()
     };
@@ -339,10 +342,10 @@ pub fn discover_all_sessions_with_ctx(
             let summary = summarize_session(provider.as_ref(), &path, mtime_ms, ctx);
             // A daemon-owned history file is named after a hash, so the id it parses to is not
             // the session this daemon knows it by. Its exact path is the proof it is ours.
-            if !ctx.include_archived
-                && !ctx.is_shown(&summary)
-                && !history_candidates.contains(&path)
-            {
+            // An archived chat is never shown by default, candidates or not.
+            let shown = !summary.archived
+                && (ctx.is_shown(&summary) || history_candidates.contains(&path));
+            if !ctx.include_archived && !shown {
                 continue;
             }
             if seen_ids.insert((summary.agent, summary.id.clone())) {
@@ -373,10 +376,9 @@ pub fn discover_all_sessions_with_ctx(
                 .unwrap_or(meta.updated_at_ms);
             let provider = provider_for(agent);
             let summary = summarize_session(provider.as_ref(), path, mtime_ms, ctx);
-            if !ctx.include_archived
-                && !ctx.is_shown(&summary)
-                && !history_candidates.contains(path)
-            {
+            let shown = !summary.archived
+                && (ctx.is_shown(&summary) || history_candidates.contains(path));
+            if !ctx.include_archived && !shown {
                 continue;
             }
             if seen_ids.insert((summary.agent, summary.id.clone())) {
@@ -415,8 +417,13 @@ pub fn discover_all_sessions_with_ctx(
 impl DiscoveryContext<'_> {
     /// Multibot's own archive plus the legacy desktop's, which stays read-only (Invariant #2).
     pub fn is_archived(&self, session_id: &str, source_path: &Path) -> bool {
+        self.is_archived_id(session_id) || self.live.is_legacy_archived(session_id, source_path)
+    }
+
+    /// Archived by id alone, for ids whose transcript path is not known yet.
+    fn is_archived_id(&self, session_id: &str) -> bool {
         self.archive.is_archived(session_id)
-            || self.live.is_legacy_archived(session_id, source_path)
+            || self.live.legacy_archived_ids.contains(session_id)
     }
 
     /// Whether an already-summarized session belongs in the default list.
@@ -3174,6 +3181,85 @@ mod tests {
         assert!(
             !ids.contains(dead),
             "an ended Antigravity conversation leaked: {ids:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archived_multibot_hosted_antigravity_chat_leaves_the_default_list() {
+        let dir = unique_temp_dir("agy-archived");
+        let sid = "7a1c9e2d-1111-4222-8333-944455556666";
+        let live = "4d5d5535-249c-4f10-90d9-7ec49c2eeb53";
+
+        // Two Multibot-hosted chats: one stays open, one gets archived.
+        for (id, title) in [(sid, "Archived agy"), (live, "Open agy")] {
+            let path = antigravity::hosted_history_path(&dir, id);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(
+                &path,
+                format!(
+                    "{{\"type\":\"multibot_meta\",\"session_id\":\"{id}\",\"agent\":\"antigravity\",\"cwd\":\"/repo\",\"title\":\"{title}\"}}\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        let mut meta = MetadataStore::default();
+        for id in [sid, live] {
+            meta.sessions.insert(
+                id.to_string(),
+                SessionMetaEntry {
+                    title: None,
+                    cwd: Some("/repo".into()),
+                    agent: Some(AgentKind::Antigravity),
+                    source_path: Some(
+                        antigravity::hosted_history_path(&dir, id)
+                            .to_string_lossy()
+                            .to_string(),
+                    ),
+                    native_session_id: None,
+                    updated_at_ms: 1,
+                },
+            );
+        }
+        meta.save(&dir).unwrap();
+
+        // Before archiving, both chats are listed.
+        let before = discover_all_sessions_owned(&dir, 50, false);
+        let ids: HashSet<&str> = before.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(sid) && ids.contains(live), "both chats should list: {ids:?}");
+
+        // Archiving keeps `metadata.json`, so the id stays held open. It must still leave
+        // the default list, and stay reachable only with `include_archived`.
+        let mut archive = ArchiveStore::default();
+        archive.archived.insert(
+            sid.to_string(),
+            ArchivedEntry {
+                archived_at_ms: 2,
+                agent: Some(AgentKind::Antigravity),
+                source_path: Some(
+                    antigravity::hosted_history_path(&dir, sid)
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+            },
+        );
+        archive.save(&dir).unwrap();
+
+        let after = discover_all_sessions_owned(&dir, 50, false);
+        let ids: HashSet<&str> = after.iter().map(|s| s.id.as_str()).collect();
+        assert!(
+            !ids.contains(sid),
+            "an archived Multibot-hosted Antigravity chat leaked into the default list: {ids:?}"
+        );
+        assert!(ids.contains(live), "the open chat must stay listed: {ids:?}");
+
+        let all = discover_all_sessions_owned(&dir, 50, true);
+        let ids: HashSet<&str> = all.iter().map(|s| s.id.as_str()).collect();
+        assert!(
+            ids.contains(sid),
+            "an archived chat must stay reachable with include_archived: {ids:?}"
         );
 
         let _ = fs::remove_dir_all(&dir);
