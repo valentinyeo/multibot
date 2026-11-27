@@ -288,7 +288,12 @@ impl AgentProvider for CodexProvider {
         AgentKind::Codex
     }
 
-    fn discover_paths(&self, home: &Path, limit: usize) -> Vec<(PathBuf, i64)> {
+    fn discover_paths(
+        &self,
+        home: &Path,
+        limit: usize,
+        keep: &dyn Fn(&Path, i64) -> bool,
+    ) -> Vec<(PathBuf, i64)> {
         let mut rollout_files = Vec::new();
         let mut other_files = Vec::new();
         for root in codex_discovery_roots(home) {
@@ -297,13 +302,15 @@ impl AgentProvider for CodexProvider {
                 if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                     continue;
                 }
-                if !is_safe_transcript_path(path, &root) {
-                    continue;
-                }
                 if let Ok(meta) = fs::metadata(path)
                     && let Ok(modified) = meta.modified()
                 {
                     let ts = system_time_ms(modified);
+                    // Cheapest check first: a symlink escaping the root is rare, a stale
+                    // transcript is the common case on a long-lived home directory.
+                    if !keep(path, ts) || !is_safe_transcript_path(path, &root) {
+                        continue;
+                    }
                     let is_rollout = path
                         .file_name()
                         .and_then(|n| n.to_str())

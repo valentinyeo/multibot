@@ -139,6 +139,14 @@ def test_workflow_multi_agent_morning_triage() -> None:
             f".multibot/history/{agy_fname}",
             mtime_offset_sec=-10.0,
         )
+        # The triage inbox lists only chats that are still live, so mark all three live.
+        sb.stage_live_legacy_chat(tmux="live-claude-triage", sid="claude-triage")
+        sb.stage_live_legacy_chat(
+            tmux="live-codex-triage", sid="codex-rich-001", provider="codex"
+        )
+        sb.stage_live_legacy_chat(
+            tmux="live-agy-triage", sid="agy-triage-001", provider="antigravity"
+        )
 
         with DaemonDriver(sb) as dmn:
             sessions = dmn.request({"op": "list_sessions", "limit": 20}, "sessions")["sessions"]

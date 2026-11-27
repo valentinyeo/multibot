@@ -102,6 +102,7 @@ def test_legacy_zigshel_and_multiprompt_immutability() -> None:
             "claude/basic_slice1.jsonl",
             ".claude/projects/-tmp-proj-basic/claude-basic-001.jsonl",
         )
+        sb.stage_live_legacy_chat(tmux="live-basic-001", sid="claude-basic-001")
         with DaemonDriver(sb) as dmn:
             dmn.request({"op": "hello", "client_version": "0.1.0"}, "hello_ack")
             dmn.request({"op": "list_sessions", "limit": 10}, "sessions")

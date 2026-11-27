@@ -137,8 +137,9 @@ async fn multibotd_stdio_full_wire_roundtrip() {
         other => panic!("expected Pong, got {other:?}"),
     }
 
-    // 3. ListSessions -> all 3 agents discovered with rich metadata
-    send_req(&mut stdin, &ClientRequest::ListSessions { limit: Some(20) }).await;
+    // 3. ListSessions -> all 3 agents discovered with rich metadata. This fixture has no
+    // legacy host behind it, so it asks for the full listing, the way the archive view will.
+    send_req(&mut stdin, &ClientRequest::ListSessions { limit: Some(20), include_archived: Some(true) }).await;
     match next_ev(&mut reader).await {
         ServerEvent::Sessions { sessions } => {
             assert_eq!(sessions.len(), 3);
@@ -558,7 +559,7 @@ async fn multibotd_stdio_huge_base64_and_20mib_non_base64_stay_under_10mb_vmhwm(
     send_req(&mut stdin, &ClientRequest::UnwatchSession { session_id: None }).await;
 
     // 3. ListSessions + full ReadHistory pagination + SearchHistory on 20 MiB non-base64 transcript
-    send_req(&mut stdin, &ClientRequest::ListSessions { limit: Some(20) }).await;
+    send_req(&mut stdin, &ClientRequest::ListSessions { limit: Some(20), include_archived: Some(true) }).await;
     loop {
         let (_, ev) = next_raw_and_ev(&mut reader).await;
         match ev {

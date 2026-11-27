@@ -300,6 +300,10 @@ pub enum ClientRequest {
     ListSessions {
         #[serde(default)]
         limit: Option<usize>,
+        /// When omitted or `false`, only live and recently active sessions come back.
+        /// `true` also returns archived and historical transcripts (the slow, full listing).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_archived: Option<bool>,
     },
     ReadHistory {
         session_id: String,
@@ -602,10 +606,32 @@ mod tests {
         assert_eq!(ping, ClientRequest::Ping { nonce: 1 });
 
         let list1: ClientRequest = decode_line(r#"{"op":"list_sessions","limit":50}"#).unwrap();
-        assert_eq!(list1, ClientRequest::ListSessions { limit: Some(50) });
+        assert_eq!(
+            list1,
+            ClientRequest::ListSessions {
+                limit: Some(50),
+                include_archived: None
+            }
+        );
 
         let list2: ClientRequest = decode_line(r#"{"op":"list_sessions"}"#).unwrap();
-        assert_eq!(list2, ClientRequest::ListSessions { limit: None });
+        assert_eq!(
+            list2,
+            ClientRequest::ListSessions {
+                limit: None,
+                include_archived: None
+            }
+        );
+
+        let list3: ClientRequest =
+            decode_line(r#"{"op":"list_sessions","include_archived":true}"#).unwrap();
+        assert_eq!(
+            list3,
+            ClientRequest::ListSessions {
+                limit: None,
+                include_archived: Some(true)
+            }
+        );
 
         let read: ClientRequest = decode_line(
             r#"{"op":"read_history","session_id":"s1","source_path":"/p.jsonl","agent":"claude","tail":50}"#,

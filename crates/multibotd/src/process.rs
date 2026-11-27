@@ -3,8 +3,8 @@ use crate::providers::antigravity::{
 };
 use crate::providers::claude::sanitize_claude_project_dir;
 use crate::providers::{
-    ArchiveStore, ArchivedEntry, DiscoveryContext, MetadataStore, SessionMetaEntry, now_ms,
-    sha256_hex, strip_base64_cow, summarize_session_by_agent, system_time_ms,
+    ArchiveStore, ArchivedEntry, DiscoveryContext, LiveActivity, MetadataStore, SessionMetaEntry,
+    now_ms, sha256_hex, strip_base64_cow, summarize_session_by_agent, system_time_ms,
 };
 use anyhow::{Context, Result, anyhow};
 use multibot_proto::{
@@ -98,6 +98,15 @@ impl ProcessManager {
             .filter(|(_, p)| p.busy)
             .map(|(k, _)| k.clone())
             .collect()
+    }
+
+    /// Sessions this daemon holds open, busy or idle-connected.
+    ///
+    /// A chat nobody is prompting is still a chat the person has open. The desktop lists these,
+    /// so leaving them out would hide live work while the transcript history stays on disk.
+    pub fn connected_session_ids(&self) -> HashSet<String> {
+        let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        guard.active.keys().cloned().collect()
     }
 
     pub fn is_session_busy(&self, session_id: &str) -> bool {
@@ -841,11 +850,16 @@ impl ProcessManager {
         }
 
         let archive = ArchiveStore::load(&self.home);
+        let live = LiveActivity::load(&self.home);
         let active_ids = self.active_session_ids();
+        let connected_ids = self.connected_session_ids();
         let ctx = DiscoveryContext {
             active_session_ids: &active_ids,
+            connected_session_ids: &connected_ids,
             metadata: &meta,
             archive: &archive,
+            live: &live,
+            include_archived: true,
         };
 
         let path = Path::new(&source_path);
