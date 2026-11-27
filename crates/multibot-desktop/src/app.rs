@@ -1885,6 +1885,8 @@ impl MultibotView {
             entry.connected = false;
             entry.status = "Disconnected".into();
             entry.sessions.clear();
+            let history_prefix = format!("{}:{host_label}", host_label.len());
+            store.pending_older_page_before.retain(|key, _| !key.starts_with(&history_prefix));
             store.rebuild_merged_sessions();
             store.refresh_connection_summary();
             store.bump_revision();
@@ -2027,6 +2029,8 @@ impl MultibotView {
         // Legacy fields remain available to single-host callers.
         store.connection_gen = store.connection_gen.wrapping_add(1);
         store.connection_shutdown_tx = None;
+        let history_prefix = format!("{}:{label}", label.len());
+        store.pending_older_page_before.retain(|key, _| !key.starts_with(&history_prefix));
         store.rebuild_merged_sessions();
         store.refresh_connection_summary();
         store.bump_revision();
@@ -2152,6 +2156,7 @@ impl MultibotView {
             UiBridgeEvent::Disconnected(reason) => {
                 let store = cx.global_mut::<SharedAppStore>();
                 let entry = store.host_connections.get_mut(host_label).unwrap();
+                if !entry.connected && entry.shutdown_tx.is_none() { return false; }
                 entry.daemon_tx = None;
                 entry.shutdown_tx = None;
                 entry.connected = false;
@@ -2519,7 +2524,6 @@ impl MultibotView {
         true
     }
 
-    #[cfg(not(test))]
     #[allow(dead_code)]
     pub(crate) fn apply_daemon_bridge_event_to_app(
         conn_gen: u64,
@@ -2527,11 +2531,13 @@ impl MultibotView {
         runtime: &Arc<tokio::runtime::Runtime>,
         cx: &mut App,
     ) -> bool {
-        let host = cx
-            .global::<SharedAppStore>()
-            .connected_host
-            .clone()
-            .unwrap_or_else(|| "local".into());
+        if !cx.has_global::<SharedAppStore>() { return false; }
+        let store = cx.global::<SharedAppStore>();
+        let host = store.connected_host.clone().unwrap_or_else(|| "local".into());
+        #[cfg(test)]
+        if store.host_connections.get(&host).is_none_or(|h| h.connection_gen != store.connection_gen) {
+            return Self::apply_legacy_bridge_event_to_app(conn_gen, event, runtime, cx);
+        }
         Self::apply_host_bridge_event_to_app(&host, conn_gen, event, runtime, cx)
     }
 
@@ -2540,7 +2546,7 @@ impl MultibotView {
     /// `store.connection_gen == conn_gen` and `store.window_count > 0`, and broadcasts
     /// [`ServerEvent`]s uniformly to all open windows via `SharedAppStore.daemon_event_tx`.
     /// Returns `false` if this connection generation is stale or all windows have closed.
-    pub(crate) fn apply_daemon_bridge_event_to_app(
+    fn apply_legacy_bridge_event_to_app(
         conn_gen: u64,
         event: UiBridgeEvent,
         runtime: &Arc<tokio::runtime::Runtime>,
@@ -3992,9 +3998,12 @@ impl MultibotView {
         session: SessionSummary,
         cx: &mut Context<Self>,
     ) {
+        if self.selected_session_host.as_deref().is_some_and(|h| h != host) {
+            self.pending_switch_tokens.clear();
+            self.pending_older_page_before.clear();
+            self.chat_state.session_todos.clear();
+        }
         self.selected_session_host = Some(host.clone());
-        self.pending_switch_tokens.clear();
-        self.pending_older_page_before.clear();
         self.chat_state.composer_menu_open = false;
         // Reset per-session transient Chat View overlays, active inline rename & stale pagination
         self.sidebar_state.rename = None;
@@ -4095,7 +4104,9 @@ impl MultibotView {
                 }
             };
             if tx.send(req).is_ok() {
-                self.last_dispatched_prompt = Some((msg_id, text));
+                if self.host_statuses.is_empty() || (host == self.active_session_host() && self.selected_session.as_ref().is_some_and(|s| s.id == session.id && s.agent == session.agent)) {
+                    self.last_dispatched_prompt = Some((msg_id, text));
+                }
                 return;
             }
         }
@@ -5276,12 +5287,13 @@ impl Render for MultibotView {
                 let Some(sess) = this.selected_session.clone() else {
                     return;
                 };
+                let session_key = this.session_key_for(&sess);
                 let confirmed = this
                     .pending_archive_confirm
                     .as_ref()
-                    .is_some_and(|(id, at)| id == &sess.id && at.elapsed() <= Duration::from_secs(3));
+                    .is_some_and(|(id, at)| id == &session_key && at.elapsed() <= Duration::from_secs(3));
                 if !confirmed {
-                    this.pending_archive_confirm = Some((sess.id.clone(), Instant::now()));
+                    this.pending_archive_confirm = Some((session_key, Instant::now()));
                     this.notice = Some(format!(
                         "Press Ctrl+Shift+E again to archive \"{}\".",
                         sess.title
@@ -6099,6 +6111,32 @@ mod tests {
             shutdown_b.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
+    }
+
+    #[gpui_kit::test]
+    fn multi_host_connect_and_reconnect_replace_only_the_requested_host(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let rt = cx.update_window(handle, |_, _, cx| view.read(cx).runtime.clone()).unwrap();
+        let (_rx_a, mut shutdown_a) = cx.update(|cx| install_test_host(cx, "host-a"));
+        let (_rx_b, mut shutdown_b) = cx.update(|cx| install_test_host(cx, "host-b"));
+        cx.update(|cx| {
+            let generation = MultibotView::connect_host_on_app(rt.clone(), "host-b".into(),
+                DaemonTarget::LocalBinary("/unused-in-headless-tests".into()), false, cx);
+            assert_eq!(generation, 2);
+            let store = cx.global::<SharedAppStore>();
+            assert_eq!(store.host_connections["host-a"].connection_gen, 1);
+            assert!(store.host_connections["host-a"].connected);
+            assert!(store.host_connections["host-a"].daemon_tx.is_some());
+            assert_eq!(store.connection_status, "1/2 hosts · 0 sessions");
+            assert!(!MultibotView::apply_host_bridge_event_to_app("host-b", 1,
+                UiBridgeEvent::Disconnected("stale".into()), &rt, cx));
+            let generation = MultibotView::connect_host_on_app(rt.clone(), "host-b".into(),
+                DaemonTarget::LocalBinary("/unused-in-headless-tests".into()), false, cx);
+            assert_eq!(generation, 3);
+            assert_eq!(cx.global::<SharedAppStore>().host_connections["host-a"].connection_gen, 1);
+        });
+        assert!(matches!(shutdown_a.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        assert!(matches!(shutdown_b.try_recv(), Err(oneshot::error::TryRecvError::Closed)));
     }
 
     #[gpui_kit::test]

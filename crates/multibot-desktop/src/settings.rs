@@ -331,7 +331,7 @@ impl MultibotView {
                         .host_statuses
                         .iter()
                         .find(|s| s.host_label == host.name);
-                    let active = snapshot.is_some_and(|s| s.connected);
+                    let active = snapshot.is_some_and(|s| s.connected || s.status.starts_with("Connecting to "));
                     let status = snapshot
                         .map(|s| {
                             if s.connected {
