@@ -103,8 +103,11 @@ pub(crate) fn should_show_embedded_shell(
 
 #[cfg(any(windows, test))]
 fn forwarded_shortcut(key: u32, ctrl: bool, alt: bool, shift: bool) -> Option<&'static str> {
-    // App overlays hide the console, so Escape belongs to the terminal while visible.
-    if (ctrl && alt) || key == 0x1B {
+    // Keep interrupt, EOF, suspend, and Escape terminal-owned even if the app binds them.
+    if (ctrl && alt)
+        || (ctrl && !alt && !shift && matches!(key, 0x43 | 0x44 | 0x5A))
+        || key == 0x1B
+    {
         return None;
     }
     let name = match key {
@@ -658,10 +661,8 @@ mod tests {
         assert!(forwarded_shortcut(0x4B, false, true, false).is_some());
         assert!(forwarded_shortcut(0x70, false, false, false).is_some());
         assert!(forwarded_shortcut(0x43, true, false, false).is_none());
-        assert_eq!(
-            forwarded_shortcut(0x44, true, false, false).is_some(),
-            multibot_keys::by_gpui_key("ctrl-d").is_some_and(|spec| spec.wired)
-        );
+        assert!(forwarded_shortcut(0x44, true, false, false).is_none());
+        assert!(forwarded_shortcut(0x5A, true, false, false).is_none());
         assert!(forwarded_shortcut(0x41, false, false, false).is_none());
         assert!(forwarded_shortcut(0x1B, false, false, false).is_none());
         assert!(forwarded_shortcut(0x4B, true, true, false).is_none());
