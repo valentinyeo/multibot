@@ -321,6 +321,7 @@ async fn multibotd_stdio_full_wire_roundtrip() {
             cwd: workdir.to_string_lossy().into(),
             title: Some("Spawned Agy".into()),
             initial_prompt: None,
+            options: None,
         },
     )
     .await;

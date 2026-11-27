@@ -263,6 +263,7 @@ impl DaemonConnection {
             agent,
             cwd,
             text: text.into(),
+            options: None,
         })
     }
 
@@ -327,6 +328,7 @@ impl DaemonConnection {
             agent,
             cwd,
             text: text.into(),
+            options: None,
         })
     }
 
@@ -353,6 +355,7 @@ impl DaemonConnection {
             cwd: cwd.into(),
             title,
             initial_prompt,
+            options: None,
         })
     }
 

@@ -8,6 +8,39 @@ pub fn build_version() -> &'static str {
     option_env!("MULTIBOT_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SessionOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<EffortLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<PermissionLevel>,
+}
+
+impl SessionOptions {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffortLevel {
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionLevel {
+    Ask,
+    Auto,
+    FullAccess,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentKind {
@@ -298,6 +331,8 @@ pub enum ClientRequest {
         #[serde(default)]
         cwd: Option<String>,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<SessionOptions>,
     },
     InterruptSession {
         session_id: String,
@@ -309,6 +344,8 @@ pub enum ClientRequest {
         #[serde(default)]
         cwd: Option<String>,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<SessionOptions>,
     },
     CancelQueuedPrompt {
         session_id: String,
@@ -321,6 +358,8 @@ pub enum ClientRequest {
         title: Option<String>,
         #[serde(default)]
         initial_prompt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<SessionOptions>,
     },
     RenameSession {
         session_id: String,
@@ -461,6 +500,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn composer_options_roundtrip_and_legacy_requests() {
+        let options = SessionOptions {
+            model: Some("opus".into()),
+            effort: Some(EffortLevel::High),
+            permission: Some(PermissionLevel::Auto),
+        };
+        for request in [
+            ClientRequest::SendPrompt {
+                session_id: "s1".into(),
+                agent: AgentKind::Claude,
+                cwd: None,
+                text: "hello".into(),
+                options: Some(options.clone()),
+            },
+            ClientRequest::SteerSession {
+                session_id: "s1".into(),
+                agent: AgentKind::Claude,
+                cwd: None,
+                text: "hello".into(),
+                options: Some(options.clone()),
+            },
+            ClientRequest::SpawnSession {
+                agent: AgentKind::Claude,
+                cwd: ".".into(),
+                title: None,
+                initial_prompt: Some("hello".into()),
+                options: Some(options.clone()),
+            },
+        ] {
+            let wire = encode_line(&request).unwrap();
+            assert_eq!(decode_line::<ClientRequest>(&wire).unwrap(), request);
+            let mut legacy = serde_json::from_str::<serde_json::Value>(&wire).unwrap();
+            legacy.as_object_mut().unwrap().remove("options");
+            let request = decode_line::<ClientRequest>(&legacy.to_string()).unwrap();
+            let options = match &request {
+                ClientRequest::SendPrompt { options, .. }
+                | ClientRequest::SteerSession { options, .. }
+                | ClientRequest::SpawnSession { options, .. } => options,
+                _ => unreachable!(),
+            };
+            assert_eq!(*options, None);
+            assert!(!encode_line(&request).unwrap().contains("options"));
+        }
+        let partial: SessionOptions = serde_json::from_str(r#"{"model":"sonnet"}"#).unwrap();
+        assert_eq!(partial.effort, None);
+        assert_eq!(partial.permission, None);
+        assert!(serde_json::from_str::<SessionOptions>(r#"{"permission":"turbo"}"#).is_err());
+    }
+
+    #[test]
     fn build_version_falls_back_to_pkg_version() {
         let ver = build_version();
         assert!(!ver.is_empty());
@@ -585,6 +674,7 @@ mod tests {
                 agent: AgentKind::Antigravity,
                 cwd: None,
                 text: "hi".into(),
+                options: None,
             }
         );
     }
@@ -750,6 +840,7 @@ mod tests {
                 agent: AgentKind::Codex,
                 cwd: Some("/repo".into()),
                 text: "focus on tests".into(),
+                options: None,
             },
             ClientRequest::CancelQueuedPrompt {
                 session_id: "s1".into(),
@@ -760,6 +851,7 @@ mod tests {
                 cwd: "/repo".into(),
                 title: Some("New chat".into()),
                 initial_prompt: Some("hello".into()),
+                options: None,
             },
             ClientRequest::RenameSession {
                 session_id: "s1".into(),

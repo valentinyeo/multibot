@@ -10,7 +10,7 @@ use gpui_kit::{
     StatefulInteractiveElement, Styled, TestSupportExt, Window,
     base::text::CodeBlock,
     component::{
-        Sizable,
+        Disableable, Selectable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         input::{self, Input},
@@ -27,8 +27,9 @@ use multibot_core::settings::{
     DEFAULT_CHAT_FONT_SIZE_PT, MAX_CHAT_FONT_SIZE_PT, MIN_CHAT_FONT_SIZE_PT, MultibotSettings,
 };
 use multibot_proto::{
-    ChatMessage, ClientRequest, DiffBlock, MessageBlock, MessageRole, PromptQuestion,
-    SessionSummary, TodoItem, TodoStatus, ToolStatus,
+    AgentKind, ChatMessage, ClientRequest, DiffBlock, EffortLevel, MessageBlock, MessageRole,
+    PermissionLevel, PromptQuestion, SessionOptions, SessionSummary, TodoItem, TodoStatus,
+    ToolStatus,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -270,6 +271,9 @@ pub(crate) struct ChatViewState {
     pub font_size_pt: u16,
     pub slash_sync_pending: bool,
     pub composer_menu_open: bool,
+    pub composer_options: HashMap<String, SessionOptions>,
+    pub draft_options: SessionOptions,
+    pub pending_spawn_options: Option<SessionOptions>,
     pub queued_prompts: HashMap<String, Vec<(String, String)>>,
     pub focus_handle: Option<FocusHandle>,
 }
@@ -305,6 +309,9 @@ impl Default for ChatViewState {
             font_size_pt: DEFAULT_CHAT_FONT_SIZE_PT,
             slash_sync_pending: false,
             composer_menu_open: false,
+            composer_options: HashMap::new(),
+            draft_options: SessionOptions::default(),
+            pending_spawn_options: None,
             queued_prompts: HashMap::new(),
             focus_handle: None,
         }
@@ -2096,6 +2103,7 @@ impl MultibotView {
         };
         let sent = tx
             .send(ClientRequest::SendPrompt {
+                options: self.composer_options_for(&session),
                 session_id: session.id,
                 agent: session.agent,
                 cwd: session.cwd,
@@ -2171,25 +2179,192 @@ impl MultibotView {
         }
     }
 
-    fn prepare_composer_control(
+    pub(crate) fn composer_options_for(&self, session: &SessionSummary) -> Option<SessionOptions> {
+        self.chat_state
+            .composer_options
+            .get(&self.session_key_for(session))
+            .filter(|options| !options.is_default())
+            .cloned()
+    }
+
+    pub(crate) fn spawn_composer_options(&self, agent: AgentKind) -> Option<SessionOptions> {
+        let options = match &self.selected_session {
+            Some(session) if session.agent == agent => self.composer_options_for(session),
+            Some(_) => None,
+            None if agent == AgentKind::Claude => Some(self.chat_state.draft_options.clone()),
+            None => None,
+        };
+        options.filter(|options| agent != AgentKind::Antigravity && !options.is_default())
+    }
+
+    fn active_composer_options(&self) -> SessionOptions {
+        self.selected_session
+            .as_ref()
+            .and_then(|s| self.composer_options_for(s))
+            .unwrap_or_else(|| {
+                if self.selected_session.is_none() {
+                    self.chat_state.draft_options.clone()
+                } else {
+                    SessionOptions::default()
+                }
+            })
+    }
+
+    fn update_composer_options(
         &mut self,
-        command: &str,
-        window: &mut Window,
+        update: impl FnOnce(&mut SessionOptions),
         cx: &mut Context<Self>,
     ) {
-        self.chat_state.composer_menu_open = false;
-        if self.selected_session.is_none() {
-            self.notice = Some("Select a session first.".into());
-        } else if !self.prompt_input.read(cx).value().trim().is_empty() {
-            self.notice =
-                Some("Send or clear your draft before preparing an agent command.".into());
+        if let Some(session) = &self.selected_session {
+            let key = self.session_key_for(session);
+            update(self.chat_state.composer_options.entry(key).or_default());
         } else {
-            self.prompt_input
-                .update(cx, |input, cx| input.set_value(command, window, cx));
-            self.sync_slash_picker_from_composer(cx);
-            window.focus(&self.prompt_input.read(cx).focus_handle(cx), cx);
+            update(&mut self.chat_state.draft_options);
         }
         cx.notify();
+    }
+
+    fn render_composer_options(&self, cx: &mut Context<Self>) -> AnyElement {
+        let agent = self
+            .selected_session
+            .as_ref()
+            .map_or(AgentKind::Claude, |s| s.agent);
+        let options = self.active_composer_options();
+        let supported = agent != AgentKind::Antigravity;
+        let mut menu = v_flex()
+            .id("composer-options")
+            .test_support()
+            .w(px(390.0))
+            .p_3()
+            .gap_2()
+            .rounded(RADIUS_ROW)
+            .bg(theme::bg_surface())
+            .border_1()
+            .border_color(theme::border_subtle())
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::text_secondary())
+                    .child("AI model"),
+            );
+        let models: &[(&str, Option<&str>)] = match agent {
+            AgentKind::Claude => &[
+                ("Default", None),
+                ("Opus", Some("opus")),
+                ("Sonnet", Some("sonnet")),
+            ],
+            AgentKind::Codex => &[
+                ("Default", None),
+                ("GPT-5.4", Some("gpt-5.4")),
+                ("Codex", Some("gpt-5.3-codex")),
+            ],
+            AgentKind::Antigravity => &[("Default", None)],
+        };
+        let mut row = h_flex().gap_1();
+        for (index, &(label, model)) in models.iter().enumerate() {
+            let selected = options.model.as_deref() == model;
+            let model = model.map(String::from);
+            row = row.child(
+                Button::new(format!("composer-model-{index}"))
+                    .small()
+                    .label(format!("{}{label}", if selected { "✓ " } else { "" }))
+                    .selected(selected)
+                    .when(selected, |b| b.primary())
+                    .disabled(!supported)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.update_composer_options(|o| o.model = model.clone(), cx);
+                    })),
+            );
+        }
+        menu = menu.child(row).child(
+            div()
+                .text_xs()
+                .text_color(theme::text_secondary())
+                .child("Effort level"),
+        );
+        let mut row = h_flex().gap_1();
+        for (index, (label, effort)) in [
+            ("Default", None),
+            ("Low", Some(EffortLevel::Low)),
+            ("Medium", Some(EffortLevel::Medium)),
+            ("High", Some(EffortLevel::High)),
+            ("Max", Some(EffortLevel::Max)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if effort == Some(EffortLevel::Max) && agent != AgentKind::Codex {
+                continue;
+            }
+            let selected = options.effort == effort;
+            row = row.child(
+                Button::new(format!("composer-effort-{index}"))
+                    .small()
+                    .label(format!("{}{label}", if selected { "✓ " } else { "" }))
+                    .selected(selected)
+                    .when(selected, |b| b.primary())
+                    .disabled(!supported)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.update_composer_options(|o| o.effort = effort, cx);
+                    })),
+            );
+        }
+        menu = menu.child(row).child(
+            div()
+                .text_xs()
+                .text_color(theme::text_secondary())
+                .child("Permission level"),
+        );
+        let mut row = h_flex().gap_1();
+        for (index, (label, permission)) in [
+            ("Default", None),
+            ("Ask", Some(PermissionLevel::Ask)),
+            ("Auto", Some(PermissionLevel::Auto)),
+            ("Full access", Some(PermissionLevel::FullAccess)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let selected = options.permission == permission;
+            row = row.child(
+                Button::new(format!("composer-permission-{index}"))
+                    .small()
+                    .label(format!("{}{label}", if selected { "✓ " } else { "" }))
+                    .selected(selected)
+                    .when(selected, |b| b.primary())
+                    .disabled(!supported)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.update_composer_options(|o| o.permission = permission, cx);
+                    })),
+            );
+        }
+        menu.child(row)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .child(if !supported {
+                        "Antigravity uses agent defaults; overrides are not supported."
+                    } else if options.permission == Some(PermissionLevel::FullAccess) {
+                        "Full access bypasses approval checks. Applies on the next turn."
+                    } else {
+                        "Applies on the next turn. Auto allows workspace edits."
+                    }),
+            )
+            .child(
+                Button::new("composer-attach")
+                    .small()
+                    .label("Attach from clipboard")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.chat_state.composer_menu_open = false;
+                        if !this.handle_paste_from_clipboard(window, cx) {
+                            this.notice =
+                                Some("Drop files or paste images/files with Ctrl+V.".into());
+                        }
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
     }
 
     pub(crate) fn send_current_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2405,6 +2580,7 @@ impl MultibotView {
                 (self.selected_session.clone(), self.daemon_tx.as_ref())
         {
             let _ = tx.send(ClientRequest::SendPrompt {
+                options: self.composer_options_for(&session),
                 session_id: session.id,
                 agent: session.agent,
                 cwd: session.cwd,
@@ -3959,6 +4135,18 @@ impl MultibotView {
             Some(s) => format!("{}  {}", s.agent.glyph(), s.title),
             None => "Multibot · Ready".to_string(),
         };
+        let options = self.active_composer_options();
+        let options_summary = [
+            options.model.clone(),
+            options.effort.map(|effort| match effort {
+                EffortLevel::Low => "Low", EffortLevel::Medium => "Medium",
+                EffortLevel::High => "High", EffortLevel::Max => "Max",
+            }.to_string()),
+            options.permission.map(|permission| match permission {
+                PermissionLevel::Ask => "Ask", PermissionLevel::Auto => "Auto",
+                PermissionLevel::FullAccess => "Full access",
+            }.to_string()),
+        ].into_iter().flatten().collect::<Vec<_>>().join(" · ");
         let is_working = self.selected_session.as_ref().is_some_and(|s| s.working);
         let busy_phase = self.chat_state.busy_tick_phase % 3;
         let visible_messages = project_visible_messages_with_overrides(
@@ -4859,23 +5047,7 @@ impl MultibotView {
             .when_some(self.render_slash_picker(cx), |el, picker| el.child(picker))
             .when(self.chat_state.composer_menu_open, |el| el.child(
                 div().w_full().max_w(px(760.0)).mx_auto().px_5().child(
-                    v_flex().id("composer-options").test_support().w(px(300.0)).p_3().gap_2()
-                        .rounded(RADIUS_ROW).bg(theme::bg_surface()).border_1().border_color(theme::border_subtle())
-                        .child(div().text_xs().text_color(theme::text_secondary()).child("Agent controls · prepare a command"))
-                        .child(Button::new("composer-model").small().label(format!("AI model · {}", self.selected_session.as_ref().and_then(|s| s.model.as_deref()).unwrap_or("Agent default")))
-                            .on_click(cx.listener(|this, _, window, cx| this.prepare_composer_control("/model ", window, cx))))
-                        .child(Button::new("composer-effort").small().label("Effort level…")
-                            .on_click(cx.listener(|this, _, window, cx| this.prepare_composer_control("/effort ", window, cx))))
-                        .child(Button::new("composer-permissions").small().label("Permission level…")
-                            .on_click(cx.listener(|this, _, window, cx| this.prepare_composer_control("/permissions ", window, cx))))
-                        .child(Button::new("composer-attach").small().label("Attach from clipboard")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.chat_state.composer_menu_open = false;
-                                if !this.handle_paste_from_clipboard(window, cx) {
-                                    this.notice = Some("Drop files or paste images/files with Ctrl+V.".into());
-                                }
-                                cx.notify();
-                            })))
+                    self.render_composer_options(cx)
                 )
             ))
             .child(
@@ -4918,6 +5090,10 @@ impl MultibotView {
                                 )
                                 .child("+"),
                         )
+                        .when(!options_summary.is_empty(), |el| el.child(
+                            div().id("composer-options-summary").test_support().text_xs()
+                                .text_color(theme::text_muted()).child(options_summary)
+                        ))
                         .child(
                             div().flex_1().child(
                                 Input::new(&self.prompt_input)
@@ -5511,6 +5687,178 @@ mod tests {
             })
             .unwrap()
         })
+    }
+
+    #[gpui_kit::test]
+    fn composer_options_clicks_preserve_draft_and_forward_send_queue_and_spawn(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = open_test_chat_window(cx);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let session = SessionSummary {
+            id: "composer-controls".into(),
+            agent: AgentKind::Claude,
+            ..Default::default()
+        };
+        let expected = SessionOptions {
+            model: Some("opus".into()),
+            effort: Some(EffortLevel::High),
+            permission: Some(PermissionLevel::Auto),
+        };
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.daemon_tx = Some(tx.clone());
+                v.sessions = vec![session.clone()];
+                v.selected_session = Some(session.clone());
+                v.prompt_input.update(cx, |input, cx| input.set_value("my draft", window, cx));
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("composer-options").is_none());
+            assert!(window.try_find("composer-options-summary").is_none());
+            window.click("attach-file-btn", cx);
+            window.render_frame(cx);
+            assert!(window.find("composer-options").visible());
+            for id in ["composer-model-1", "composer-effort-3", "composer-permission-2"] {
+                window.click(id, cx);
+                window.render_frame(cx);
+                assert_eq!(window.find(id).selected(), Some(true));
+            }
+            assert!(window.try_find("composer-options-summary").is_some());
+            view.update(cx, |v, cx| {
+                assert_eq!(v.active_composer_options(), expected);
+                assert_eq!(v.prompt_input.read(cx).value().as_ref(), "my draft");
+                assert!(!v.slash_picker_state.open);
+            });
+            window.click("attach-file-btn", cx);
+            window.click("send-prompt", cx);
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, options: Some(ref o), .. }) if text == "my draft" && o == &expected));
+            view.update(cx, |v, cx| {
+                let mut working = session.clone();
+                working.working = true;
+                v.settings.queue_while_working = true;
+                v.send_or_queue_prompt(&working, "q1".into(), "queued".into());
+                assert!(matches!(rx.try_recv(), Ok(ClientRequest::SteerSession { options: Some(ref o), .. }) if o == &expected));
+                assert!(v.spawn_new_session(AgentKind::Claude, ".".into(), None, Some("new chat".into()), cx));
+                assert!(matches!(rx.try_recv(), Ok(ClientRequest::SpawnSession { options: Some(ref o), .. }) if o == &expected));
+                let spawned = SessionSummary { id: "new-composer-session".into(), agent: AgentKind::Claude, ..Default::default() };
+                v.handle_daemon_server_event(multibot_proto::ServerEvent::SessionSpawned { session: spawned.clone() }, cx);
+                assert_eq!(v.composer_options_for(&spawned), Some(expected.clone()));
+                assert_eq!(v.spawn_composer_options(AgentKind::Codex), None, "Never send Claude model overrides to Codex");
+            });
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn composer_options_are_session_and_host_scoped_and_reset_to_defaults(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_chat_window(cx);
+        let session = SessionSummary {
+            id: "same-id".into(),
+            agent: AgentKind::Codex,
+            ..Default::default()
+        };
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.selected_session = Some(session.clone());
+                v.connected_host = Some("host-a".into());
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.click("attach-file-btn", cx);
+            for id in [
+                "composer-model-2",
+                "composer-effort-4",
+                "composer-permission-3",
+            ] {
+                window.click(id, cx);
+            }
+            let selected = SessionOptions {
+                model: Some("gpt-5.3-codex".into()),
+                effort: Some(EffortLevel::Max),
+                permission: Some(PermissionLevel::FullAccess),
+            };
+            view.update(cx, |v, cx| {
+                assert_eq!(v.active_composer_options(), selected);
+                assert!(v.prompt_input.read(cx).value().is_empty());
+                v.selected_session.as_mut().unwrap().id = "another-session".into();
+                assert!(v.active_composer_options().is_default());
+                v.selected_session = Some(session.clone());
+                v.connected_host = Some("host-b".into());
+                assert!(v.active_composer_options().is_default());
+                v.connected_host = Some("host-a".into());
+                assert_eq!(v.active_composer_options(), selected);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            for id in [
+                "composer-model-0",
+                "composer-effort-0",
+                "composer-permission-0",
+            ] {
+                window.click(id, cx);
+            }
+            window.render_frame(cx);
+            assert!(window.try_find("composer-options-summary").is_none());
+            view.update(cx, |v, cx| {
+                assert_eq!(v.composer_options_for(&session), None);
+                assert!(v.prompt_input.read(cx).value().is_empty());
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn composer_options_without_a_session_apply_to_new_claude_chats(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_chat_window(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("attach-file-btn", cx);
+            window.click("composer-model-2", cx);
+            window.click("composer-effort-1", cx);
+            window.click("composer-permission-1", cx);
+            view.update(cx, |v, cx| {
+                let expected = SessionOptions { model: Some("sonnet".into()), effort: Some(EffortLevel::Low), permission: Some(PermissionLevel::Ask) };
+                assert_eq!(v.spawn_composer_options(AgentKind::Claude), Some(expected));
+                assert_eq!(v.spawn_composer_options(AgentKind::Codex), None);
+                assert_eq!(v.spawn_composer_options(AgentKind::Antigravity), None);
+                assert!(v.prompt_input.read(cx).value().is_empty());
+            });
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn composer_options_offline_snapshot_and_unsupported_provider(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_chat_window(cx);
+        let session = SessionSummary {
+            id: "offline-controls".into(),
+            agent: AgentKind::Claude,
+            ..Default::default()
+        };
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.selected_session = Some(session.clone());
+                v.sessions = vec![session.clone()];
+                v.daemon_tx = None;
+                v.persist_outbox_to_disk = false;
+                v.shared_chat_outbox.lock().unwrap().persist_to_disk = false;
+                v.update_composer_options(|o| o.model = Some("sonnet".into()), cx);
+                v.send_or_queue_prompt(&session, "offline-message".into(), "offline draft".into());
+                v.update_composer_options(|o| o.model = Some("opus".into()), cx);
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                v.daemon_tx = Some(tx);
+                assert_eq!(v.flush_outbox_for_current_host(), 1);
+                assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { options: Some(SessionOptions { model: Some(ref m), .. }), .. }) if m == "sonnet"));
+                v.selected_session = Some(SessionSummary { id: "agy-controls".into(), agent: AgentKind::Antigravity, ..Default::default() });
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.click("attach-file-btn", cx);
+            window.render_frame(cx);
+            for id in ["composer-model-0", "composer-effort-1", "composer-permission-3"] {
+                assert_eq!(window.find(id).disabled(), Some(true));
+            }
+            view.update(cx, |v, _| assert!(v.active_composer_options().is_default()));
+        }).unwrap();
     }
 
     #[gpui_kit::test]
