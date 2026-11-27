@@ -153,6 +153,18 @@ pub fn bind_multibot_keys(cx: &mut App) {
     ]);
 }
 
+fn window_title() -> String {
+    format!("Multibot v{}", multibot_proto::build_version())
+}
+
+#[test]
+fn window_title_includes_current_build_version() {
+    assert_eq!(
+        window_title(),
+        format!("Multibot v{}", multibot_proto::build_version())
+    );
+}
+
 fn main() {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     if raw_args.iter().any(|a| a == "--version" || a == "-V") {
@@ -197,7 +209,7 @@ fn main() {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some("Multibot".into()),
+                title: Some(window_title().into()),
                 ..Default::default()
             }),
             ..Default::default()

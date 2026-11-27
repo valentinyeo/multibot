@@ -789,7 +789,7 @@ impl MultibotView {
                     self.inbox_state
                         .rename
                         .as_ref()
-                        .map(|r| format!("{}|", r.draft))
+                        .map(InlineRenameState::render_text)
                 } else {
                     None
                 };

@@ -4722,7 +4722,7 @@ impl MultibotView {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some("Multibot — Workspace".into()),
+                title: Some(format!("{} — Workspace", crate::window_title()).into()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -4799,7 +4799,10 @@ impl MultibotView {
     ) -> impl IntoElement {
         let header_rename_draft =
             if self.sidebar_state.mode != SidebarMode::Open && self.is_sidebar_rename_mounted() {
-                self.sidebar_state.rename.as_ref().map(|r| r.draft.clone())
+                self.sidebar_state
+                    .rename
+                    .as_ref()
+                    .map(InlineRenameState::render_text)
             } else {
                 None
             };
@@ -4830,7 +4833,7 @@ impl MultibotView {
                             .border_color(theme::accent_blue())
                             .text_sm()
                             .text_color(theme::text_primary())
-                            .child(format!("{draft}|"))
+                            .child(draft)
                     } else {
                         div()
                             .id("header-title-pill")
@@ -10597,7 +10600,7 @@ mod tests {
             assert!(view.read(cx).chat_state.reply_quote.is_none());
             assert_eq!(view.read(cx).chat_state.focused_message_idx, None);
 
-            // Real Backspace must edit rename draft ("Origina"), NOT composer ("hello")
+            // Backspace clears the selected name, not the composer.
             window.press("backspace", cx);
             window.render_frame(cx);
             assert_eq!(
@@ -10611,10 +10614,11 @@ mod tests {
                     .rename
                     .as_ref()
                     .map(|r| r.draft.as_str()),
-                Some("Origina")
+                Some("")
             );
 
             // Real Enter must commit rename, NOT send "hello" as a chat message!
+            window.press("x", cx);
             window.press("enter", cx);
             window.render_frame(cx);
             assert!(view.read(cx).sidebar_state.rename.is_none());
@@ -10628,7 +10632,7 @@ mod tests {
                     .sidebar_state
                     .workspace_store
                     .effective_title(&key, "Original"),
-                "Origina"
+                "x"
             );
 
             // Also verify Ctrl+K -> Rename session in Hidden sidebar mode with focused composer
@@ -10657,6 +10661,7 @@ mod tests {
             assert!(view.read(cx).sidebar_state.rename.is_some());
 
             window.press("backspace", cx);
+            window.press("y", cx);
             window.press("enter", cx);
             window.render_frame(cx);
             assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "keepme");
@@ -10666,7 +10671,7 @@ mod tests {
                     .sidebar_state
                     .workspace_store
                     .effective_title(&key, "Original"),
-                "Origin"
+                "y"
             );
         })
         .unwrap();
@@ -12891,6 +12896,83 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn f2_rename_selects_all_and_typing_replaces_name(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let session = make_session("rename-select-all", AgentKind::Claude, "Old 日 name", false);
+
+        cx.update_window(handle, |_, window, cx| {
+            for (surface, mode) in [
+                (MainSurface::Chat, SidebarMode::Open),
+                (MainSurface::Chat, SidebarMode::Collapsed),
+                (MainSurface::Chat, SidebarMode::Hidden),
+                (MainSurface::Inbox, SidebarMode::Open),
+            ] {
+                view.update(cx, |v, cx| {
+                    v.sessions = vec![session.clone()];
+                    v.selected_session = Some(session.clone());
+                    v.main_surface = surface;
+                    v.sidebar_state.mode = mode;
+                    v.settings.sidebar_mode = mode;
+                    v.sidebar_state.workspace_store = WorkspaceStore::new();
+                    v.inbox_state.active_split = multibot_core::workspaces::InboxSplit::All;
+                    v.inbox_state.selected_row = 0;
+                    v.prompt_input.update(cx, |input, cx| {
+                        input.set_value("composer untouched", window, cx);
+                        input.focus(window, cx);
+                    });
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                window.press("f2", cx);
+                window.render_frame(cx);
+
+                let v = view.read(cx);
+                let (rename, focused) = if surface == MainSurface::Inbox {
+                    (
+                        v.inbox_state.rename.as_ref().unwrap(),
+                        v.inbox_state.focus_handle.as_ref().unwrap().is_focused(window),
+                    )
+                } else {
+                    (
+                        v.sidebar_state.rename.as_ref().unwrap(),
+                        if mode == SidebarMode::Open {
+                            v.sidebar_state
+                                .focus_handle
+                                .as_ref()
+                                .unwrap()
+                                .is_focused(window)
+                        } else {
+                            v.root_focus_handle.is_focused(window)
+                        },
+                    )
+                };
+                assert!(focused, "F2 must focus the mounted rename editor");
+                assert_eq!(rename.draft, session.title);
+                assert!(rename.all_selected, "F2 must select the entire name");
+
+                window.press("n", cx);
+                window.press("e", cx);
+                window.press("w", cx);
+                window.press("enter", cx);
+                window.render_frame(cx);
+                let v = view.read(cx);
+                let key = v.session_key_for(&session);
+                assert_eq!(
+                    v.sidebar_state
+                        .workspace_store
+                        .effective_title(&key, &session.title),
+                    "new",
+                    "Typing after F2 must replace the entire name on {surface:?}/{mode:?}"
+                );
+                assert_eq!(v.prompt_input.read(cx).value().as_ref(), "composer untouched");
+                assert!(v.sidebar_state.rename.is_none());
+                assert!(v.inbox_state.rename.is_none());
+            }
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
     fn test_round6b_focus_restored_to_sidebar_rename_after_modals_and_palette_expand(
         cx: &mut TestAppContext,
     ) {
@@ -12982,7 +13064,7 @@ mod tests {
                     .sidebar_state
                     .workspace_store
                     .effective_title(&k1, "Alpha"),
-                "Alphax",
+                "x",
                 "Typing + Enter after Ctrl+K/F1 -> Esc on Inbox must commit renamed title"
             );
             assert!(
@@ -13071,7 +13153,7 @@ mod tests {
                     .sidebar_state
                     .workspace_store
                     .effective_title(&k2, "Beta"),
-                "Betay",
+                "y",
                 "Typing + Enter after Ctrl+K/F1 -> Esc on Chat must commit renamed title"
             );
 
@@ -13123,7 +13205,7 @@ mod tests {
                     .sidebar_state
                     .workspace_store
                     .effective_title(&k2, "Beta"),
-                "Betayz",
+                "z",
                 "Typing + Enter after Ctrl+K -> Sidebar: Expand must commit renamed title"
             );
         })

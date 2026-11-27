@@ -24,6 +24,7 @@ pub(crate) struct InlineRenameState {
     pub session_id: String,
     pub original: String,
     pub draft: String,
+    pub all_selected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +42,23 @@ impl InlineRenameState {
             session_id,
             draft: original.clone(),
             original,
+            all_selected: true,
         }
+    }
+
+    pub(crate) fn render_text(&self) -> gpui_kit::StyledText {
+        let text = if self.all_selected {
+            self.draft.clone()
+        } else {
+            format!("{}|", self.draft)
+        };
+        gpui_kit::StyledText::new(text).with_highlights(self.all_selected.then_some((
+            0..self.draft.len(),
+            gpui_kit::HighlightStyle {
+                background_color: Some(theme::accent_blue()),
+                ..Default::default()
+            },
+        )))
     }
 
     pub(crate) fn handle_key(
@@ -56,8 +73,13 @@ impl InlineRenameState {
         if key.eq_ignore_ascii_case("escape") {
             return RenameKeyOutcome::Cancel;
         }
-        if key.eq_ignore_ascii_case("backspace") {
-            self.draft.pop();
+        if key.eq_ignore_ascii_case("backspace") || key.eq_ignore_ascii_case("delete") {
+            if self.all_selected {
+                self.draft.clear();
+                self.all_selected = false;
+            } else if key.eq_ignore_ascii_case("backspace") {
+                self.draft.pop();
+            }
             return RenameKeyOutcome::Consumed;
         }
         if modifiers.control || modifiers.alt || modifiers.platform {
@@ -68,6 +90,10 @@ impl InlineRenameState {
             for ch in ch_str.chars() {
                 if !ch.is_control() {
                     saw_printable = true;
+                    if self.all_selected {
+                        self.draft.clear();
+                        self.all_selected = false;
+                    }
                     if self.draft.chars().count() < MAX_SESSION_TITLE_CHARS {
                         self.draft.push(ch);
                     }
@@ -79,6 +105,10 @@ impl InlineRenameState {
         } else if key.chars().count() == 1 {
             let ch = key.chars().next().unwrap();
             if !ch.is_control() {
+                if self.all_selected {
+                    self.draft.clear();
+                    self.all_selected = false;
+                }
                 if self.draft.chars().count() < MAX_SESSION_TITLE_CHARS {
                     let to_push = if modifiers.shift {
                         ch.to_ascii_uppercase()
@@ -1010,7 +1040,7 @@ impl MultibotView {
                     self.sidebar_state
                         .rename
                         .as_ref()
-                        .map(|r| format!("{}|", r.draft))
+                        .map(InlineRenameState::render_text)
                 } else {
                     None
                 };
@@ -1118,7 +1148,9 @@ impl MultibotView {
                                         })
                                         .text_color(theme::text_primary())
                                         .truncate()
-                                        .child(rename_draft.unwrap_or_else(|| row.title.clone())),
+                                        .child(rename_draft.unwrap_or_else(|| {
+                                            gpui_kit::StyledText::new(row.title.clone())
+                                        })),
                                 ),
                         ),
                 );
@@ -1496,7 +1528,7 @@ impl MultibotView {
             self.sidebar_state
                 .rename
                 .as_ref()
-                .map(|r| format!("{}|", r.draft))
+                .map(InlineRenameState::render_text)
         } else {
             None
         };
@@ -2105,12 +2137,12 @@ mod tests {
             r.handle_key("backspace", None, Modifiers::default()),
             RenameKeyOutcome::Consumed
         );
-        assert_eq!(r.draft, "Ol");
+        assert_eq!(r.draft, "");
         assert_eq!(
             r.handle_key("k", Some("k"), Modifiers::default()),
             RenameKeyOutcome::Consumed
         );
-        assert_eq!(r.draft, "Olk");
+        assert_eq!(r.draft, "k");
         assert_eq!(
             r.handle_key("enter", None, Modifiers::default()),
             RenameKeyOutcome::Commit
@@ -2353,8 +2385,35 @@ mod tests {
     }
 
     #[test]
+    fn inline_rename_select_all_replacement_and_deletion() {
+        for key_char in [Some("日"), None] {
+            let mut r = InlineRenameState::new("k".into(), "s1".into(), "a".repeat(63));
+            assert!(r.all_selected);
+            assert_eq!(
+                r.handle_key("shift", None, Modifiers::default()),
+                RenameKeyOutcome::Ignored
+            );
+            r.handle_key("x", key_char, Modifiers::default());
+            assert_eq!(r.draft, key_char.unwrap_or("x"));
+            assert!(!r.all_selected);
+            r.handle_key("y", Some("y"), Modifiers::default());
+            assert_eq!(r.draft, format!("{}y", key_char.unwrap_or("x")));
+        }
+        for key in ["backspace", "delete"] {
+            let mut r = InlineRenameState::new("k".into(), "s1".into(), "Old 日".into());
+            assert_eq!(
+                r.handle_key(key, None, Modifiers::default()),
+                RenameKeyOutcome::Consumed
+            );
+            assert!(r.draft.is_empty());
+            assert!(!r.all_selected);
+        }
+    }
+
+    #[test]
     fn inline_rename_consumes_printable_keys_at_63_char_cap() {
-        let mut r = InlineRenameState::new("k".into(), "s1".into(), "a".repeat(63));
+        let mut r = InlineRenameState::new("k".into(), "s1".into(), "Old".into());
+        r.handle_key("a", Some(&"a".repeat(63)), Modifiers::default());
         assert_eq!(
             r.handle_key("q", Some("q"), Modifiers::default()),
             RenameKeyOutcome::Consumed
