@@ -59,7 +59,8 @@ opt-level = "s"
 opt-level = 3
 
 [profile.release]
-lto = "thin"
+# Favor rapid pre-beta iteration over link-time optimization.
+lto = false
 codegen-units = 16
 strip = "symbols"
 panic = "abort"

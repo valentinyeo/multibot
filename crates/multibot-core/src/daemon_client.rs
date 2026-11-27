@@ -536,7 +536,7 @@ pub fn build_remote_launch_command() -> &'static str {
 }
 
 /// Returns `true` when `event` is `ServerEvent::HelloAck` and `daemon_deploy::needs_remote_upgrade`
-/// reports a version or binary-hash mismatch against `(expected_version, expected_hash)`.
+/// requests an upgrade against `(expected_version, expected_hash)`, preserving newer daemons.
 pub fn hello_ack_needs_upgrade(
     event: &ServerEvent,
     expected_version: &str,

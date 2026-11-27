@@ -4563,6 +4563,7 @@ dependencies = [
  "dirs 6.0.0",
  "multibot-gpu",
  "multibot-proto",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",

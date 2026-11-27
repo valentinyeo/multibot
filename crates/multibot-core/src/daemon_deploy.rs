@@ -252,15 +252,23 @@ pub fn build_atomic_upload_command(spec: &DaemonDeploySpec) -> Result<String> {
     ))
 }
 
-/// Returns `true` when the remote daemon version or non-empty expected binary hash differs.
+/// Upgrades older daemons but never downgrades newer ones.
+/// Equal or unparseable versions fall back to the non-empty expected binary hash.
 pub fn needs_remote_upgrade(
     remote_version: &str,
     remote_hash: &str,
     expected_version: &str,
     expected_hash: &str,
 ) -> bool {
-    remote_version != expected_version
-        || (!expected_hash.is_empty() && remote_hash != expected_hash)
+    if let (Ok(remote_ver), Ok(expected_ver)) = (
+        semver::Version::parse(remote_version),
+        semver::Version::parse(expected_version),
+    ) {
+        if remote_ver != expected_ver {
+            return remote_ver < expected_ver;
+        }
+    }
+    !expected_hash.is_empty() && remote_hash != expected_hash
 }
 
 /// Inspects a wire `ServerEvent::HelloAck` to determine whether the remote `multibotd` needs upgrading.
@@ -628,6 +636,36 @@ mod tests {
         assert!(needs_remote_upgrade("0.1.4", "2cf24dba5fb0", "0.1.5", "2cf24dba5fb0"));
         assert!(needs_remote_upgrade("0.1.5", "aaaaaaaaaaaa", "0.1.5", "2cf24dba5fb0"));
         assert!(!needs_remote_upgrade("0.1.5", "", "0.1.5", ""));
+    }
+
+    #[test]
+    fn newer_remote_daemon_is_not_downgraded() {
+        assert!(!needs_remote_upgrade("0.1.48", "aaaaaaaaaaaa", "0.1.47", "2cf24dba5fb0"));
+    }
+
+    #[test]
+    fn older_remote_daemon_is_upgraded_even_with_matching_hash() {
+        assert!(needs_remote_upgrade("0.1.46", "2cf24dba5fb0", "0.1.47", "2cf24dba5fb0"));
+        assert!(needs_remote_upgrade("0.1.9", "2cf24dba5fb0", "0.1.47", "2cf24dba5fb0"));
+    }
+
+    #[test]
+    fn same_version_daemon_is_refreshed_when_hash_differs() {
+        assert!(needs_remote_upgrade("0.1.47", "aaaaaaaaaaaa", "0.1.47", "2cf24dba5fb0"));
+    }
+
+    #[test]
+    fn same_version_daemon_is_kept_when_hash_matches() {
+        assert!(!needs_remote_upgrade("0.1.47", "2cf24dba5fb0", "0.1.47", "2cf24dba5fb0"));
+    }
+
+    #[test]
+    fn invalid_versions_fall_back_to_hash_comparison() {
+        for (remote, expected) in [("invalid", "0.1.47"), ("0.1.47", "invalid"), ("invalid", "other")] {
+            assert!(needs_remote_upgrade(remote, "aaaaaaaaaaaa", expected, "2cf24dba5fb0"));
+            assert!(!needs_remote_upgrade(remote, "2cf24dba5fb0", expected, "2cf24dba5fb0"));
+            assert!(!needs_remote_upgrade(remote, "aaaaaaaaaaaa", expected, ""));
+        }
     }
 
     #[test]
