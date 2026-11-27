@@ -232,16 +232,16 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         display: "Ctrl+H",
         gpui_key: "ctrl-h",
         category: ShortcutCategory::Navigation,
-        description: "Remind Me: snooze active session",
-        wired: false,
+        description: "Remind Me: schedule or clear a chat reminder",
+        wired: true,
     },
     ShortcutSpec {
         id: "session.remind_me_alt",
         display: "Alt+H",
         gpui_key: "alt-h",
         category: ShortcutCategory::Navigation,
-        description: "Remind Me: hide active session until due",
-        wired: false,
+        description: "Remind Me: schedule or clear a chat reminder",
+        wired: true,
     },
     ShortcutSpec {
         id: "room.new",
@@ -1298,6 +1298,8 @@ mod tests {
             "inbox.unread_only",
             "session.mark_unread",
             "session.waiting",
+            "session.remind_me",
+            "session.remind_me_alt",
             "session.undo_waiting",
             "session.move_up",
             "session.move_down",
@@ -1322,7 +1324,7 @@ mod tests {
             let spec = by_id(id).unwrap_or_else(|| panic!("missing shortcut {id}"));
             assert!(spec.wired, "expected {id} ({}) to be wired: true", spec.gpui_key);
         }
-        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 60);
+        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 62);
         assert!(!by_id("browser.close_tab").unwrap().wired);
         assert!(!by_id("chat.steer").unwrap().wired);
         assert!(by_gpui_key("ctrl-shift-j").is_none());

@@ -583,35 +583,38 @@ impl MultibotView {
         }
     }
 
-    pub(crate) fn snooze_active_workspace_for_ms(
+    pub(crate) fn set_workspace_snooze(
         &mut self,
-        duration_ms: i64,
+        ws_id: &str,
+        until_ms: Option<i64>,
         cx: &mut Context<Self>,
     ) {
-        let ws_id = self.sidebar_state.active_workspace_id.clone();
-        let now = now_unix_ms();
-        if ws_id == STARRED_WORKSPACE_ID
-            || !self
+        if let Some(until) = until_ms {
+            match self
                 .sidebar_state
                 .workspace_store
-                .can_snooze_workspace(&ws_id, now)
-        {
-            return;
-        }
-        if let Ok(next_ws) = self.sidebar_state.workspace_store.snooze_workspace(
-            &ws_id,
-            now.saturating_add(duration_ms),
-            now,
-        ) {
-            if let Some(next_id) = next_ws {
-                self.sidebar_state.active_workspace_id = next_id;
+                .snooze_workspace(ws_id, until, now_unix_ms())
+            {
+                Ok(next) => {
+                    if self.sidebar_state.active_workspace_id == ws_id {
+                        self.sidebar_state.active_workspace_id =
+                            next.unwrap_or_else(|| ALL_WORKSPACES_ID.into());
+                    }
+                }
+                Err(error) => {
+                    self.notice = Some(error.to_string());
+                    cx.notify();
+                    return;
+                }
             }
-            self.sidebar_state.rename = None;
-            self.cleanup_unmounted_surface_state();
-            self.persist_workspace_store_if_enabled();
-            self.sync_workspace_to_shared(cx);
-            cx.notify();
+        } else {
+            self.sidebar_state.workspace_store.wake_workspace(ws_id);
         }
+        self.sidebar_state.rename = None;
+        self.cleanup_unmounted_surface_state();
+        self.persist_workspace_store_if_enabled();
+        self.sync_workspace_to_shared(cx);
+        cx.notify();
     }
 
     fn handle_sidebar_keydown(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {

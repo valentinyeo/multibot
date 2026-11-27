@@ -82,8 +82,8 @@ Source of truth for the F1 overlay is `SHORTCUT_ROWS` in `src/shortcuts.zig`. Th
 - Ctrl+Plus / Ctrl+Minus / Ctrl+0: Console font bigger / smaller / reset (global override, all tabs, persisted; reset returns to the Windows console default; AltGr-safe). Also Ctrl+K "Font Size: Increase/Decrease/Reset". Fonts are PINNED across monitors (v0.28.238) — no DPI scaling, by user decision. While Chat View (Alt+C) is active, these same keys size Chat View's text instead (transcript + composer, code blocks scale with it; range 10..28pt, default 14, persisted separately from the console font)
 - Ctrl+Tab / Ctrl+Shift+Tab: Next/previous tab
 - Ctrl+1-9: Switch to tab 1-9. Pressing Ctrl shows the numbers 1 to 9 on the first nine session pictures in the sidebar, in the same order Ctrl+1-9 uses; releasing Ctrl, pressing any other key with it, or leaving the window hides them. Ctrl+Alt (AltGr) never shows them.
-- Ctrl+Shift+Y: Snooze the current workspace (single-window mode). Pick In 1, 2, 3, 6 or 12 hours, This evening, Tomorrow morning, Tomorrow evening, In 3 days, This weekend, Next week, Someday, or Custom in the same Remind Me picker as a tab. It closes local tabs, keeps remote tmux sessions running, and hides the workspace until its wake time. Ctrl+K "Workspace: Snoozed..." wakes it early and switches to it; right-click a visible workspace pill to snooze that pill. Ctrl+Shift+Y is free; Ctrl+Shift+H already snoozes one tab, Alt+Y is unclaimed but lacks the Ctrl+Shift pattern and could interfere with browser input, and Ctrl+Alt combinations are reserved for AltGr on US-International keyboards. Separate-window workspaces remain available; workspace snooze applies to in-process single-window workspaces.
-- Ctrl+K "Workspace: Wake <name>": one row for every snoozed workspace, listed from the live snooze flags (not only from reminders.json). It wakes the workspace now and switches to it. No dedicated shortcut. The snooze flag is also saved with the workspace in the session file, so a lost wake marker is rebuilt at the next start and the workspace stays reachable.
+- Ctrl+Shift+Y: Snooze the current workspace. Choose 15 minutes, 1 hour, 3 hours, Tomorrow 9am (local time), or Unsnooze. The workspace is hidden from the sidebar and its sessions stay quiet in the Inbox until it wakes automatically. Remote sessions keep running. From All or Starred, this targets the selected session’s workspace.
+- Ctrl+K "Wake <name>": wake a snoozed workspace early and switch to it. Snooze deadlines are saved atomically with workspace state in Multibot’s own data directory and survive restarts.
 - Ctrl+K "Workspace: Bring Back All Sessions": no dedicated shortcut. For the active workspace it reopens, as tabs in that workspace, every tmux session recorded for it (written when the workspace is snoozed, plus its snooze snapshot) that is still running on a VPS and not open as a tab anywhere. Sessions already open are never duplicated.
 - Alt+1..9: Switch in-process workspace (single-window mode): 1 is Starred, and 2-9 are the first eight stored workspaces. Held Alt chains — Alt+1, 2, 3 without re-pressing (focus defers until Alt release so the synthetic-Alt trick can't cancel the held key)
 - Alt+Left / Alt+Right: Cycle prev/next workspace (hold Alt, tap arrows; auto-repeat works). Both Alt shortcuts exit the inbox first if it's open. EXCEPTION (v0.28.286): while the docked browser pane is FOCUSED, Alt+Left/Right = browser back/forward instead (the Alt+Shift chord from .285 was dropped - too alien); shell focus always keeps workspace cycling
@@ -148,7 +148,7 @@ Opening multiprompt is locked until device login is validated and the initial se
 | Right-click workspace pill -&gt; Archive workspace | Archive that workspace; Other stays available |
 | Delete in workspace menu | Delete the highlighted workspace from the workspace menu |
 | Ctrl+Shift+Y | Snooze this workspace until a chosen time |
-| Ctrl+K -&gt; Workspace: Wake &lt;name&gt; | Wake a snoozed workspace now and switch to it |
+| Ctrl+K -&gt; Wake &lt;name&gt; | Wake a snoozed workspace now and switch to it |
 | Ctrl+K -&gt; Workspace: Bring Back All Sessions | Reopen every recorded tmux session of this workspace |
 | Alt+Left / Alt+Right | Cycle prev / next workspace |
 | Ctrl+N / Alt+N pill | New workspace |
@@ -240,10 +240,10 @@ The search bar stays hidden so the Inbox opens clean. Ctrl+F or / opens and focu
 | Ctrl+K -&gt; Set workspace folder | Declare this workspace folder from the repo list; saved for next time |
 | Ctrl+K -&gt; Move workspace to server | Point this workspace default folder at the same path on another account server |
 | Ctrl+K -&gt; New tab on server | Open one workspace tab on another account server without moving the workspace |
-| Ctrl+K Remind Me | Snooze active tmux/Claude tab via quick presets (or type a time) |
-| Ctrl+H | Remind Me: pick In 1, 2, 3, 6 or 12 hours, This evening, Tomorrow morning or evening, and more |
-| Alt+H | Remind Me: hide local tab, keep tmux running, return when due |
-| Ctrl+K Reminders | View / restore snoozed sessions |
+| Ctrl+K Remind Me | Schedule or clear a reminder for the selected chat |
+| Ctrl+H | Remind Me: 15 minutes, 1 hour, 3 hours, Tomorrow 9am (local time), or Clear reminder. Type an optional short note, then choose with Up/Down and Enter |
+| Alt+H | Same reminder picker as Ctrl+H; remote sessions keep running |
+| Inbox: Due reminder · Dismiss | Due reminders rise above other chats, including in Unread Only, until dismissed; snoozed workspaces remain quiet until wake |
 | Ctrl+V (in Ctrl+K) | Paste into the palette search |
 | Browser pane focused | Ctrl+C / Ctrl+V / Ctrl+K pass through to the page |
 | Ctrl+K / right-click tab -&gt; Pin to Top | Pins keep sessions above other tabs. Closing unpins them. Archiving and group closing remain protected. |

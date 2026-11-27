@@ -100,6 +100,7 @@ actions!(
         ToggleUnreadOnly,
         MarkSessionUnread,
         MoveSessionWaiting,
+        RemindSession,
         UndoWaiting,
         // Slice 3 — Workspaces & views (16 actions)
         ToggleFavorite,
@@ -525,8 +526,14 @@ impl MultibotView {
         update_ui.set_update_state(update_state);
 
         // Observe SharedAppStore across OS windows (Ctrl+N) without triggering idle redraws.
-        let _shared_store_sub = cx.observe_global::<SharedAppStore>(|this, cx| {
+        let mut reminder_wake_seq = cx.global::<SharedAppStore>().reminder_wake_seq;
+        let _shared_store_sub = cx.observe_global::<SharedAppStore>(move |this, cx| {
             this.sync_from_shared_store(cx);
+            let next = cx.global::<SharedAppStore>().reminder_wake_seq;
+            if reminder_wake_seq != next {
+                reminder_wake_seq = next;
+                cx.notify();
+            }
         });
         let prompt_fh = prompt_input.read(cx).focus_handle(cx);
         let _prompt_focus_sub = cx.on_focus(&prompt_fh, window, |this, _window, cx| {
@@ -631,6 +638,8 @@ impl MultibotView {
             }
         })
         .detach();
+
+        SharedAppStore::schedule_reminder_timer(cx);
 
         Self {
             runtime,
@@ -796,6 +805,7 @@ impl MultibotView {
                 store.bump_revision()
             };
             self.last_synced_revision = rev;
+            SharedAppStore::schedule_reminder_timer(cx);
         }
     }
 
@@ -4681,7 +4691,7 @@ impl MultibotView {
             .map(|r| r.session_key.clone())
     }
 
-    fn target_triage_session_key(&self) -> Option<String> {
+    pub(crate) fn target_triage_session_key(&self) -> Option<String> {
         if self.main_surface == MainSurface::Inbox {
             self.selected_inbox_session_key()
         } else {
@@ -5229,6 +5239,7 @@ impl Render for MultibotView {
                     // 2. Modal dialogs (Command Palette / F1 Shortcuts)
                     this.active_modal = ActiveModal::None;
                     this.palette_state.tab_context_session_key = None;
+                    this.palette_state.reminder_target = None;
                     this.focus_active_surface_default(window, cx);
                 } else if this.sidebar_state.workspace_menu_open {
                     this.sidebar_state.workspace_menu_open = false;
@@ -5644,6 +5655,18 @@ impl Render for MultibotView {
                     cx.notify();
                 }
             }))
+            .on_action(cx.listener(|this, _: &RemindSession, window, cx| {
+                if this.active_modal == ActiveModal::None
+                    && !this.table_modal_state.is_open()
+                    && let Some(key) = this.target_triage_session_key()
+                {
+                    this.open_reminder_picker(
+                        crate::palette::ReminderTarget::Session(key),
+                        window,
+                        cx,
+                    );
+                }
+            }))
             .on_action(cx.listener(|this, _: &MoveSessionWaiting, _, cx| {
                 if this.table_modal_state.is_open()
                     || this.active_modal != ActiveModal::None
@@ -5701,12 +5724,16 @@ impl Render for MultibotView {
                     this.toggle_active_favorite(cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &SnoozeWorkspace, _, cx| {
+            .on_action(cx.listener(|this, _: &SnoozeWorkspace, window, cx| {
                 if this.table_modal_state.is_open() || this.active_modal != ActiveModal::None {
                     return;
                 }
-                this.snooze_active_workspace_for_ms(60 * 60 * 1000, cx);
-                this.sync_workspace_to_shared(cx);
+                let id = this.sidebar_state.active_workspace_id.clone();
+                this.open_reminder_picker(
+                    crate::palette::ReminderTarget::Workspace(id),
+                    window,
+                    cx,
+                );
             }))
             .on_action(cx.listener(|this, _: &JumpWorkspace1, _, cx| {
                 if !this.table_modal_state.is_open() && this.active_modal == ActiveModal::None {
@@ -5980,6 +6007,81 @@ mod tests {
             source_path: format!("/tmp/{id}.jsonl"),
             ..Default::default()
         }
+    }
+
+    #[gpui_kit::test]
+    fn reminder_and_snooze_shortcuts_presets_and_inbox_dismiss(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                let session = make_session("reminder", AgentKind::Claude, "Follow up", false);
+                v.sessions = vec![session.clone()];
+                v.selected_session = Some(session);
+                v.sync_sessions_to_shared(cx);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.press("ctrl-h", cx);
+            window.render_frame(cx);
+            assert!(window.find("pal-reminder-0").visible());
+            window.click("pal-reminder-0", cx);
+            window.render_frame(cx);
+            view.read_with(cx, |v, cx| {
+                let key = v.session_key_for(v.selected_session.as_ref().unwrap());
+                assert!(
+                    v.sidebar_state.workspace_store.session_meta[&key]
+                        .remind_at_ms
+                        .unwrap()
+                        > now_unix_ms()
+                );
+                assert!(cx.global::<SharedAppStore>().reminder_timer.is_some());
+            });
+            window.press("alt-h", cx);
+            window.render_frame(cx);
+            window.click("pal-reminder-4", cx);
+            window.render_frame(cx);
+            assert!(cx.global::<SharedAppStore>().reminder_deadline_ms.is_none());
+
+            window.press("ctrl-shift-y", cx);
+            window.render_frame(cx);
+            window.click("pal-reminder-0", cx);
+            window.render_frame(cx);
+            assert!(
+                view.read(cx)
+                    .sidebar_state
+                    .workspace_store
+                    .visible_workspaces(now_unix_ms())
+                    .is_empty()
+            );
+            view.update(cx, |v, cx| {
+                let key = v.session_key_for(v.selected_session.as_ref().unwrap());
+                let ws = v.sidebar_state.workspace_store.effective_workspace_id(&key);
+                v.set_workspace_snooze(&ws, None, cx);
+                v.sidebar_state.workspace_store.set_reminder(
+                    &key,
+                    Some(now_unix_ms() - 1),
+                    Some("Follow up"),
+                );
+                v.main_surface = MainSurface::Inbox;
+                v.inbox_state.select_all_split();
+                v.sidebar_state.unread_only = true;
+                v.sync_workspace_to_shared(cx);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.find("dismiss-reminder-0").visible());
+            window.click("dismiss-reminder-0", cx);
+            window.render_frame(cx);
+            view.read_with(cx, |v, _| {
+                let key = v.session_key_for(v.selected_session.as_ref().unwrap());
+                assert!(
+                    !v.sidebar_state
+                        .workspace_store
+                        .reminder_due(&key, now_unix_ms())
+                );
+            });
+        })
+        .unwrap();
     }
 
     fn install_test_host(

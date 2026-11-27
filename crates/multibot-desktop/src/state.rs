@@ -1,6 +1,6 @@
-use gpui_kit::{App, Global};
+use gpui_kit::{App, Global, Task};
 use multibot_core::outbox::ChatOutbox;
-use multibot_core::workspaces::{PaletteStats, WorkspaceStore};
+use multibot_core::workspaces::{PaletteStats, WorkspaceStore, now_unix_ms};
 use multibot_core::{DaemonTarget, FootprintSnapshot, MultibotSettings};
 use multibot_proto::{ClientRequest, ServerEvent, SessionSummary};
 use multibot_updater::{CheckOutcome, ReleaseInfo, StagedUpdate, UpdateState};
@@ -169,6 +169,9 @@ pub(crate) struct SharedAppStore {
     pub settings: MultibotSettings,
     pub sessions: Vec<SessionSummary>,
     pub workspace_store: WorkspaceStore,
+    pub reminder_wake_seq: u64,
+    pub reminder_deadline_ms: Option<i64>,
+    pub reminder_timer: Option<Task<()>>,
     pub palette_stats: PaletteStats,
     pub unread_only: bool,
     pub connected_host: Option<String>,
@@ -222,6 +225,38 @@ pub(crate) struct SharedAppStore {
 impl Global for SharedAppStore {}
 
 impl SharedAppStore {
+    pub(crate) fn schedule_reminder_timer(cx: &mut App) {
+        let now = now_unix_ms();
+        let store = cx.global_mut::<Self>();
+        let deadline = store.workspace_store.next_deadline_ms(now);
+        if store.reminder_deadline_ms == deadline {
+            return;
+        }
+        store.reminder_timer = None;
+        store.reminder_deadline_ms = deadline;
+        let Some(at) = deadline else { return };
+        let task = cx.spawn(async move |cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(
+                    at.saturating_sub(now_unix_ms()).max(0) as u64,
+                ))
+                .await;
+            cx.update(|cx| {
+                let store = cx.global_mut::<Self>();
+                store.reminder_timer = None;
+                store.reminder_deadline_ms = None;
+                let woken = store.workspace_store.wake_due_workspaces(now_unix_ms());
+                if !woken.is_empty() && store.persist_to_disk {
+                    let _ = store.workspace_store.save();
+                }
+                store.reminder_wake_seq = store.reminder_wake_seq.wrapping_add(1);
+                store.bump_revision();
+                Self::schedule_reminder_timer(cx);
+            });
+        });
+        cx.global_mut::<Self>().reminder_timer = Some(task);
+    }
+
     pub(crate) fn new(settings: MultibotSettings) -> Self {
         let (daemon_event_tx, _) = broadcast::channel(256);
         Self {
@@ -230,6 +265,9 @@ impl SharedAppStore {
             settings,
             sessions: Vec::new(),
             workspace_store: WorkspaceStore::new(),
+            reminder_wake_seq: 0,
+            reminder_deadline_ms: None,
+            reminder_timer: None,
             palette_stats: PaletteStats::default(),
             unread_only: false,
             connected_host: None,
@@ -272,6 +310,9 @@ impl SharedAppStore {
             settings,
             sessions: Vec::new(),
             workspace_store: WorkspaceStore::load(),
+            reminder_wake_seq: 0,
+            reminder_deadline_ms: None,
+            reminder_timer: None,
             palette_stats: PaletteStats::load(),
             unread_only: false,
             connected_host: None,
@@ -431,6 +472,60 @@ pub(crate) fn update_footprint_if_changed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui_kit::test]
+    fn reminder_timer_rearms_cancels_and_wakes_overdue_snooze(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(|cx| {
+            SharedAppStore::init(cx, MultibotSettings::default());
+            let now = now_unix_ms();
+            cx.global_mut::<SharedAppStore>()
+                .workspace_store
+                .set_reminder("a", Some(now + 60_000), None);
+            SharedAppStore::schedule_reminder_timer(cx);
+            assert_eq!(
+                cx.global::<SharedAppStore>().reminder_deadline_ms,
+                Some(now + 60_000)
+            );
+            cx.global_mut::<SharedAppStore>()
+                .workspace_store
+                .set_reminder("b", Some(now + 30_000), None);
+            SharedAppStore::schedule_reminder_timer(cx);
+            assert_eq!(
+                cx.global::<SharedAppStore>().reminder_deadline_ms,
+                Some(now + 30_000)
+            );
+            cx.global_mut::<SharedAppStore>()
+                .workspace_store
+                .set_reminder("a", None, None);
+            cx.global_mut::<SharedAppStore>()
+                .workspace_store
+                .set_reminder("b", None, None);
+            SharedAppStore::schedule_reminder_timer(cx);
+            assert!(cx.global::<SharedAppStore>().reminder_timer.is_none());
+            cx.global_mut::<SharedAppStore>()
+                .workspace_store
+                .snooze_workspace(
+                    multibot_core::workspaces::DEFAULT_WORKSPACE_ID,
+                    now - 1,
+                    now - 2,
+                )
+                .unwrap();
+            SharedAppStore::schedule_reminder_timer(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let store = cx.global::<SharedAppStore>();
+            assert!(store.reminder_deadline_ms.is_none());
+            assert!(store.reminder_timer.is_none());
+            assert!(
+                store
+                    .workspace_store
+                    .snoozed_workspaces(now_unix_ms())
+                    .is_empty()
+            );
+            assert_eq!(store.reminder_wake_seq, 1);
+        });
+    }
 
     #[test]
     fn identical_values_do_not_trigger_notify() {

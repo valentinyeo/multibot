@@ -26,7 +26,7 @@ use app::{
     JumpWorkspace4, JumpWorkspace5, JumpWorkspace6, JumpWorkspace7, JumpWorkspace8, JumpWorkspace9,
     MarkSessionUnread, MoveSessionDown, MoveSessionUp, MoveSessionWaiting, MultibotView,
     NewSession, NewWindow, NextSession, NextWorkspace, OpenInbox, OpenPalette, OpenShortcuts,
-    PrevSession, PrevWorkspace, ReconnectSession, RenameActiveSession, ReopenClosedSession,
+    PrevSession, PrevWorkspace, ReconnectSession, RemindSession, RenameActiveSession, ReopenClosedSession,
     SnoozeWorkspace, ToggleFavorite, ToggleGroup, ToggleInbox, ToggleSettings, ToggleSidebar,
     ToggleTerminal, VoiceDictation,
     ToggleUnreadOnly, UndoWaiting, WorkspaceViewAll, WorkspaceViewFavorites, WorkspaceViewFrequent,
@@ -114,6 +114,8 @@ pub fn bind_multibot_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-u", ToggleUnreadOnly, None),
         KeyBinding::new("alt-u", MarkSessionUnread, None),
         KeyBinding::new("alt-e", MoveSessionWaiting, None),
+        KeyBinding::new("ctrl-h", RemindSession, None),
+        KeyBinding::new("alt-h", RemindSession, None),
         KeyBinding::new("alt-z", UndoWaiting, None),
         // Slice 3 — Workspaces & views (16 bindings)
         KeyBinding::new("alt-s", ToggleFavorite, None),

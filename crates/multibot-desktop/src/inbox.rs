@@ -777,6 +777,7 @@ impl MultibotView {
             for (idx, row) in filtered_rows.into_iter().enumerate() {
                 let is_selected = idx == selected_idx;
                 let key_click = row.session_key.clone();
+                let key_dismiss = row.session_key.clone();
                 let keys_for_step = all_keys.clone();
                 let age = format_relative_age(row.sort_ms, now);
                 let is_renaming = self
@@ -793,8 +794,9 @@ impl MultibotView {
                     None
                 };
                 let preview_text = row
-                    .preview
+                    .reminder_note
                     .clone()
+                    .or_else(|| row.preview.clone())
                     .or_else(|| row.cwd.clone())
                     .unwrap_or_else(|| row.agent.label().to_string());
 
@@ -912,6 +914,28 @@ impl MultibotView {
                                                                 .text_color(theme::text_muted())
                                                                 .child(age),
                                                         )
+                                                        .when(row.due_reminder, |el| {
+                                                            el.child(
+                                                                div()
+                                                                    .id(SharedString::from(format!("dismiss-reminder-{idx}")))
+                                                                    .role(Role::Button)
+                                                                    .test_support()
+                                                                    .px_2()
+                                                                    .py_0p5()
+                                                                    .rounded(RADIUS_CHIP)
+                                                                    .bg(theme::bg_canvas())
+                                                                    .text_xs()
+                                                                    .text_color(theme::accent_amber())
+                                                                    .child("Due reminder · Dismiss")
+                                                                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                                                                        cx.stop_propagation();
+                                                                        this.sidebar_state.workspace_store.set_reminder(&key_dismiss, None, None);
+                                                                        this.persist_workspace_store_if_enabled();
+                                                                        this.sync_workspace_to_shared(cx);
+                                                                        cx.notify();
+                                                                    })),
+                                                            )
+                                                        })
                                                         .when(row.favorite, |el| {
                                                             el.child(
                                                                 div()

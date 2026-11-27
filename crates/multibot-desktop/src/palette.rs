@@ -25,9 +25,16 @@ use multibot_core::workspaces::{
 use multibot_keys::{ALL_CATEGORIES, by_category};
 use multibot_proto::ClientRequest;
 
+#[derive(Debug, Clone)]
+pub(crate) enum ReminderTarget {
+    Session(String),
+    Workspace(String),
+}
+
 #[derive(Default)]
 pub(crate) struct PaletteState {
     pub stats: PaletteStats,
+    pub reminder_target: Option<ReminderTarget>,
     pub selected_index: usize,
     pub tab_context_session_key: Option<String>,
     pub input_sub: Option<Subscription>,
@@ -42,9 +49,10 @@ impl MultibotView {
         }
         self.active_modal = ActiveModal::Palette;
         self.palette_state.tab_context_session_key = None;
+        self.palette_state.reminder_target = None;
         self.palette_state.selected_index = 0;
         self.palette_state.scroll_handle.scroll_to_item(0);
-        self.ensure_palette_input_subscription(cx);
+        self.ensure_palette_input_subscription(window, cx);
         self.palette_input.update(cx, |state, cx| {
             state.set_value("", window, cx);
             state.focus(window, cx);
@@ -62,10 +70,11 @@ impl MultibotView {
             self.table_modal_state.close();
         }
         self.active_modal = ActiveModal::Palette;
+        self.palette_state.reminder_target = None;
         self.palette_state.tab_context_session_key = Some(session_key);
         self.palette_state.selected_index = 0;
         self.palette_state.scroll_handle.scroll_to_item(0);
-        self.ensure_palette_input_subscription(cx);
+        self.ensure_palette_input_subscription(window, cx);
         self.palette_input.update(cx, |state, cx| {
             state.set_value("", window, cx);
             state.focus(window, cx);
@@ -73,26 +82,60 @@ impl MultibotView {
         cx.notify();
     }
 
-    fn ensure_palette_input_subscription(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_reminder_picker(
+        &mut self,
+        target: ReminderTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = match target {
+            ReminderTarget::Workspace(id) => {
+                let id = if self
+                    .sidebar_state
+                    .workspace_store
+                    .workspace_by_id(&id)
+                    .is_some()
+                {
+                    id
+                } else if let Some(key) = self.target_triage_session_key() {
+                    self.sidebar_state
+                        .workspace_store
+                        .effective_workspace_id(&key)
+                } else {
+                    return;
+                };
+                ReminderTarget::Workspace(id)
+            }
+            target => target,
+        };
+        self.open_palette(window, cx);
+        self.palette_state.reminder_target = Some(target);
+    }
+
+    fn ensure_palette_input_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette_state.input_sub.is_some() {
             return;
         }
-        let sub = cx.subscribe(&self.palette_input, |this, _input, event, cx| {
-            if this.active_modal != ActiveModal::Palette {
-                return;
-            }
-            match event {
-                InputEvent::Change => {
-                    this.palette_state.selected_index = 0;
-                    this.palette_state.scroll_handle.scroll_to_item(0);
-                    cx.notify();
+        let sub = cx.subscribe_in(
+            &self.palette_input,
+            window,
+            |this, _input, event, window, cx| {
+                if this.active_modal != ActiveModal::Palette {
+                    return;
                 }
-                InputEvent::PressEnter { .. } => {
-                    this.execute_selected_palette_row(None, cx);
+                match event {
+                    InputEvent::Change => {
+                        this.palette_state.selected_index = 0;
+                        this.palette_state.scroll_handle.scroll_to_item(0);
+                        cx.notify();
+                    }
+                    InputEvent::PressEnter { .. } => {
+                        this.execute_selected_palette_row(Some(window), cx);
+                    }
+                    InputEvent::Focus | InputEvent::Blur => {}
                 }
-                InputEvent::Focus | InputEvent::Blur => {}
-            }
-        });
+            },
+        );
         self.palette_state.input_sub = Some(sub);
     }
 
@@ -153,6 +196,16 @@ impl MultibotView {
                 category: PaletteCategory::Sessions,
                 destructive: false,
                 aliases: vec!["unread".into(), "mark read".into()],
+                tab_context: true,
+                global: true,
+            },
+            PaletteCommandSpec {
+                id: "pal-cmd-remind".into(),
+                label: "Remind Me".into(),
+                chord: "Ctrl+H".into(),
+                category: PaletteCategory::Sessions,
+                destructive: false,
+                aliases: vec!["reminder".into()],
                 tab_context: true,
                 global: true,
             },
@@ -289,7 +342,7 @@ impl MultibotView {
             },
             PaletteCommandSpec {
                 id: "pal-cmd-ws-snooze".into(),
-                label: "Snooze active workspace (1h)".into(),
+                label: "Snooze active workspace…".into(),
                 chord: "Ctrl+Shift+Y".into(),
                 category: PaletteCategory::WorkspacesAndWindows,
                 destructive: false,
@@ -622,6 +675,31 @@ impl MultibotView {
     }
 
     pub(crate) fn build_palette_rows(&self, query: &str, now_ms: i64) -> Vec<PaletteRow> {
+        if let Some(target) = &self.palette_state.reminder_target {
+            let clear = match target {
+                ReminderTarget::Session(_) => "Clear reminder",
+                ReminderTarget::Workspace(_) => "Unsnooze",
+            };
+            return [
+                "In 15 minutes",
+                "In 1 hour",
+                "In 3 hours",
+                "Tomorrow 9am",
+                clear,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(idx, label)| PaletteRow::Command {
+                id: format!("pal-reminder-{idx}"),
+                label: label.into(),
+                chord: String::new(),
+                category: PaletteCategory::Sessions,
+                destructive: false,
+                match_rank: 0,
+                frecency: 0,
+            })
+            .collect();
+        }
         let inputs = self.session_inputs();
         let commands = self.build_palette_command_catalog(now_ms);
         let current_key = self
@@ -708,6 +786,53 @@ impl MultibotView {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        if let Some(target) = self.palette_state.reminder_target.take() {
+            let PaletteRow::Command { id, .. } = row else {
+                return;
+            };
+            let at = match id.as_str() {
+                "pal-reminder-0" => Some(now_ms.saturating_add(15 * 60 * 1000)),
+                "pal-reminder-1" => Some(now_ms.saturating_add(60 * 60 * 1000)),
+                "pal-reminder-2" => Some(now_ms.saturating_add(3 * 60 * 60 * 1000)),
+                "pal-reminder-3" => {
+                    use chrono::{Local, TimeZone};
+                    let tomorrow = Local::now()
+                        .date_naive()
+                        .succ_opt()
+                        .and_then(|day| day.and_hms_opt(9, 0, 0))
+                        .and_then(|time| Local.from_local_datetime(&time).earliest());
+                    let Some(tomorrow) = tomorrow else {
+                        self.notice =
+                            Some("Tomorrow 9am is unavailable; choose a duration instead".into());
+                        self.palette_state.reminder_target = Some(target);
+                        cx.notify();
+                        return;
+                    };
+                    Some(tomorrow.timestamp_millis())
+                }
+                "pal-reminder-4" => None,
+                _ => return,
+            };
+            match target {
+                ReminderTarget::Session(key) => {
+                    let note = self.palette_input.read(cx).value().to_string();
+                    self.sidebar_state
+                        .workspace_store
+                        .set_reminder(&key, at, Some(&note));
+                }
+                ReminderTarget::Workspace(id) => {
+                    self.active_modal = ActiveModal::None;
+                    self.set_workspace_snooze(&id, at, cx);
+                    return;
+                }
+            }
+            self.active_modal = ActiveModal::None;
+            self.persist_workspace_store_if_enabled();
+            self.sync_workspace_to_shared(cx);
+            cx.notify();
+            return;
+        }
+
         let explicit_tab_target = self.palette_state.tab_context_session_key.clone();
         let target_key = explicit_tab_target.clone().or_else(|| {
             self.selected_session
@@ -717,6 +842,7 @@ impl MultibotView {
 
         self.active_modal = ActiveModal::None;
         self.palette_state.tab_context_session_key = None;
+        self.palette_state.reminder_target = None;
 
         match row {
             PaletteRow::Header(_) => {}
@@ -919,8 +1045,17 @@ impl MultibotView {
                             self.persist_workspace_store_if_enabled();
                         }
                     }
+                    "pal-cmd-remind" => {
+                        if let (Some(key), Some(window)) = (target_key, window) {
+                            self.open_reminder_picker(ReminderTarget::Session(key), window, cx);
+                        }
+                        return;
+                    }
                     "pal-cmd-ws-snooze" => {
-                        self.snooze_active_workspace_for_ms(60 * 60 * 1000, cx);
+                        let id = self.sidebar_state.active_workspace_id.clone();
+                        if let Some(window) = window {
+                            self.open_reminder_picker(ReminderTarget::Workspace(id), window, cx);
+                        }
                         return;
                     }
                     "workspace.delete" => {
@@ -1274,6 +1409,7 @@ impl MultibotView {
         let query = self.palette_input.read(cx).value().to_string();
         if query.is_empty() && self.palette_state.tab_context_session_key.is_some() {
             self.palette_state.tab_context_session_key = None;
+            self.palette_state.reminder_target = None;
             self.palette_state.selected_index = 0;
             self.palette_state.scroll_handle.scroll_to_item(0);
             cx.notify();
@@ -1325,6 +1461,7 @@ impl MultibotView {
                 }
                 self.active_modal = ActiveModal::None;
                 self.palette_state.tab_context_session_key = None;
+                self.palette_state.reminder_target = None;
                 self.focus_active_surface_default(window, cx);
                 cx.stop_propagation();
                 cx.notify();
@@ -1628,6 +1765,13 @@ impl MultibotView {
                     .unwrap_or_else(|| key.to_string());
                 format!("Session actions: {title}  (Backspace to exit)")
             });
+        let context_banner = match &self.palette_state.reminder_target {
+            Some(ReminderTarget::Session(_)) => {
+                Some("Remind Me · optional note below · ↑/↓ then Enter".into())
+            }
+            Some(ReminderTarget::Workspace(_)) => Some("Snooze workspace · ↑/↓ then Enter".into()),
+            None => context_banner,
+        };
 
         div()
             .id("palette-backdrop")
@@ -1643,6 +1787,7 @@ impl MultibotView {
                 cx.listener(|this, _, window, cx| {
                     this.active_modal = ActiveModal::None;
                     this.palette_state.tab_context_session_key = None;
+                    this.palette_state.reminder_target = None;
                     this.focus_active_surface_default(window, cx);
                     cx.notify();
                 }),
@@ -1664,6 +1809,7 @@ impl MultibotView {
                             return;
                         }
                         this.palette_state.tab_context_session_key = None;
+                        this.palette_state.reminder_target = None;
                         this.active_modal = ActiveModal::None;
                         this.focus_active_surface_default(window, cx);
                         cx.notify();
@@ -1710,6 +1856,7 @@ impl MultibotView {
                             return;
                         }
                         this.palette_state.tab_context_session_key = None;
+                        this.palette_state.reminder_target = None;
                         this.active_modal = ActiveModal::None;
                         this.focus_active_surface_default(window, cx);
                         cx.stop_propagation();

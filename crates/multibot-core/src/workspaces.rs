@@ -291,6 +291,10 @@ pub struct SessionGroup {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SessionMeta {
     #[serde(default)]
+    pub remind_at_ms: Option<i64>,
+    #[serde(default)]
+    pub reminder_note: Option<String>,
+    #[serde(default)]
     pub workspace_id: Option<String>,
     #[serde(default)]
     pub pinned: bool,
@@ -558,6 +562,8 @@ pub enum InboxSplit {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxRow {
+    pub due_reminder: bool,
+    pub reminder_note: Option<String>,
     pub session_key: String,
     pub session_id: String,
     pub host: String,
@@ -685,7 +691,13 @@ impl WorkspaceStore {
         if parsed.workspaces.len() > 1 && parsed.workspaces.iter().all(|w| w.position == 0) {
             parsed.normalize_workspace_positions();
         }
-        parsed.ensure_default_workspace();
+        if !parsed
+            .workspaces
+            .iter()
+            .any(|w| !w.archived && w.snoozed_until_ms.is_some())
+        {
+            parsed.ensure_default_workspace();
+        }
         Ok(parsed)
     }
 
@@ -703,6 +715,39 @@ impl WorkspaceStore {
 
     pub fn save(&self) -> Result<()> {
         self.save_to(&MultibotSettings::workspaces_path())
+    }
+
+    pub fn set_reminder(&mut self, key: &str, remind_at_ms: Option<i64>, note: Option<&str>) {
+        let meta = self.session_meta.entry(key.to_string()).or_default();
+        meta.remind_at_ms = remind_at_ms;
+        meta.reminder_note = remind_at_ms.and_then(|_| {
+            note.map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(|n| n.chars().take(200).collect())
+        });
+    }
+
+    pub fn reminder_due(&self, key: &str, now_ms: i64) -> bool {
+        self.session_meta
+            .get(key)
+            .and_then(|m| m.remind_at_ms)
+            .is_some_and(|at| at <= now_ms)
+    }
+
+    /// Due reminders remain visible until dismissed; only future reminders need a timer.
+    /// Overdue workspace snoozes still need one wake to clear their persisted flags.
+    pub fn next_deadline_ms(&self, now_ms: i64) -> Option<i64> {
+        self.session_meta
+            .values()
+            .filter_map(|m| m.remind_at_ms)
+            .filter(|&at| at > now_ms)
+            .chain(
+                self.workspaces
+                    .iter()
+                    .filter(|w| !w.archived)
+                    .filter_map(|w| w.snoozed_until_ms),
+            )
+            .min()
     }
 
     /// Applies the workspace names the legacy `multiprompt` server recorded for live sessions.
@@ -1648,6 +1693,12 @@ impl WorkspaceStore {
             }
             let meta = self.session_meta.get(&input.key);
             let eff_ws = self.effective_workspace_id(&input.key);
+            if self
+                .workspace_by_id(&eff_ws)
+                .is_some_and(|ws| ws.is_snoozed_at(now_ms))
+            {
+                continue;
+            }
 
             if in_starred {
                 if !self.favorites.contains(&input.key) {
@@ -2280,27 +2331,24 @@ impl WorkspaceStore {
         sessions
             .iter()
             .filter(|input| {
-                if input.summary.archived
-                    || self.inbox_excluded.contains(&input.key)
-                    || self.waiting_sessions.contains_key(&input.key)
+                let meta = self.session_meta.get(&input.key);
+                let due = self.reminder_due(&input.key, now_ms);
+                if !due
+                    && (input.summary.archived
+                        || self.inbox_excluded.contains(&input.key)
+                        || self.waiting_sessions.contains_key(&input.key)
+                        || meta.is_some_and(|m| m.muted || m.remind_at_ms.is_some()))
                 {
                     return false;
                 }
-                let muted = self
-                    .session_meta
-                    .get(&input.key)
-                    .map(|m| m.muted)
-                    .unwrap_or(false);
-                if muted {
-                    return false;
-                }
-                let eff_ws_id = self.effective_workspace_id(&input.key);
-                if let Some(ws) = self.workspace_by_id(&eff_ws_id)
-                    && (ws.archived || ws.is_snoozed_at(now_ms))
+                let workspace_id = self.effective_workspace_id(&input.key);
+                if self
+                    .workspace_by_id(&workspace_id)
+                    .is_some_and(|ws| ws.archived || ws.is_snoozed_at(now_ms))
                 {
                     return false;
                 }
-                self.is_session_unread(&input.key, input.summary)
+                due || self.is_session_unread(&input.key, input.summary)
             })
             .count()
     }
@@ -2333,14 +2381,17 @@ impl WorkspaceStore {
         let mut rows = Vec::new();
 
         for input in sessions {
-            if input.summary.archived
-                || self.inbox_excluded.contains(&input.key)
-                || self.waiting_sessions.contains_key(&input.key)
+            let meta = self.session_meta.get(&input.key);
+            let due_reminder = self.reminder_due(&input.key, now_ms);
+            if !due_reminder
+                && (input.summary.archived
+                    || self.inbox_excluded.contains(&input.key)
+                    || self.waiting_sessions.contains_key(&input.key)
+                    || meta.is_some_and(|m| m.remind_at_ms.is_some()))
             {
                 continue;
             }
-            let meta = self.session_meta.get(&input.key);
-            if meta.is_some_and(|m| m.muted) {
+            if !due_reminder && meta.is_some_and(|m| m.muted) {
                 continue;
             }
 
@@ -2361,9 +2412,11 @@ impl WorkspaceStore {
             let last_input = meta.and_then(|m| m.last_input_ms);
 
             let matches_split = match split {
-                InboxSplit::Frequent => qualifies_for_frequent(visits, last_input, now_ms),
+                InboxSplit::Frequent => {
+                    due_reminder || qualifies_for_frequent(visits, last_input, now_ms)
+                }
                 InboxSplit::All => true,
-                InboxSplit::Favorites => self.favorites.contains(&input.key),
+                InboxSplit::Favorites => due_reminder || self.favorites.contains(&input.key),
                 InboxSplit::Workspace(wid) => eff_ws_id == *wid,
             };
             if !matches_split {
@@ -2371,7 +2424,7 @@ impl WorkspaceStore {
             }
 
             let unread = self.is_session_unread(&input.key, input.summary);
-            if unread_only && !unread {
+            if unread_only && !unread && !due_reminder {
                 continue;
             }
 
@@ -2416,6 +2469,8 @@ impl WorkspaceStore {
             let frequent_key_ms = frequent_order_key(visits, last_input, now_ms);
 
             rows.push(InboxRow {
+                due_reminder,
+                reminder_note: meta.and_then(|m| m.reminder_note.clone()),
                 session_key: input.key.clone(),
                 session_id: input.summary.id.clone(),
                 host: input.host.to_string(),
@@ -2443,7 +2498,9 @@ impl WorkspaceStore {
             } else {
                 b.sort_ms.cmp(&a.sort_ms)
             };
-            primary
+            b.due_reminder
+                .cmp(&a.due_reminder)
+                .then(primary)
                 .then_with(|| b.unread.cmp(&a.unread))
                 .then_with(|| b.working.cmp(&a.working))
                 .then_with(|| b.last_activity_ms.cmp(&a.last_activity_ms))
@@ -3135,6 +3192,149 @@ mod tests {
             host,
             summary,
         }
+    }
+
+    #[test]
+    fn reminders_and_snooze_persist_atomically() {
+        let dir = unique_temp_dir("reminders");
+        let path = dir.join("workspaces.json");
+        let mut store = WorkspaceStore::new();
+        let ws = store.create_workspace("Quiet", None).unwrap();
+        store.set_reminder("h:claude:s1", Some(5_000), Some("  Follow up  "));
+        store.snooze_workspace(&ws.id, 9_000, 1_000).unwrap();
+        store.save_to(&path).unwrap();
+        store.save_to(&path).unwrap();
+        let loaded = WorkspaceStore::load_from(&path).unwrap();
+        assert_eq!(loaded, store);
+        assert_eq!(
+            loaded.session_meta["h:claude:s1"].reminder_note.as_deref(),
+            Some("Follow up")
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn last_workspace_snooze_survives_restart() {
+        let dir = unique_temp_dir("last-snooze");
+        let path = dir.join("workspaces.json");
+        let mut store = WorkspaceStore::new();
+        store
+            .snooze_workspace(DEFAULT_WORKSPACE_ID, 9_000, 1_000)
+            .unwrap();
+        store.save_to(&path).unwrap();
+        let mut loaded = WorkspaceStore::load_from(&path).unwrap();
+        assert!(loaded.visible_workspaces(1_000).is_empty());
+        assert_eq!(loaded.snoozed_workspaces(1_000).len(), 1);
+        loaded.wake_due_workspaces(9_000);
+        assert_eq!(loaded.visible_workspaces(9_000).len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reminder_resurfaces_above_newer_rows_until_dismissed() {
+        let mut store = WorkspaceStore::new();
+        let sessions = [
+            make_session("old", AgentKind::Claude, "Follow up", 100, false, false),
+            make_session("new", AgentKind::Claude, "Newer", 9_000, true, false),
+        ];
+        let inputs: Vec<_> = sessions.iter().map(|s| make_input("h", s)).collect();
+        let key = &inputs[0].key;
+        store.archive_to_waiting_session(key, 500, &sessions[0]);
+        store.set_reminder(key, Some(1_000), Some("Ask again"));
+        assert_eq!(
+            store
+                .query_inbox(&InboxSplit::All, &inputs, false, "", 999)
+                .len(),
+            1
+        );
+        let rows = store.query_inbox(&InboxSplit::All, &inputs, true, "", 1_000);
+        assert_eq!(rows[0].session_key, *key);
+        assert!(rows[0].due_reminder);
+        assert_eq!(rows[0].reminder_note.as_deref(), Some("Ask again"));
+        assert_eq!(store.inbox_unread_count_at(&inputs, 1_000), 2);
+        assert_eq!(store.next_deadline_ms(1_000), None);
+        store.set_reminder(key, None, None);
+        assert!(!store.reminder_due(key, 1_000));
+        assert_eq!(store.session_meta[key].reminder_note, None);
+        assert_eq!(
+            store
+                .query_inbox(&InboxSplit::All, &inputs, false, "", 1_000)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn snooze_quiets_even_due_reminders_and_wakes_at_deadline() {
+        let mut store = WorkspaceStore::new();
+        let ws = store.create_workspace("Quiet", None).unwrap();
+        let session = make_session("s", AgentKind::Claude, "Reminder", 100, true, false);
+        let inputs = [make_input("h", &session)];
+        let key = &inputs[0].key;
+        store.assign_session_workspace(key, &ws.id);
+        store.set_reminder(key, Some(2_000), None);
+        store.snooze_workspace(&ws.id, 3_000, 1_000).unwrap();
+        assert!(
+            store
+                .query_inbox(&InboxSplit::All, &inputs, false, "", 2_999)
+                .is_empty()
+        );
+        assert_eq!(store.inbox_unread_count_at(&inputs, 2_999), 0);
+        assert!(
+            !store
+                .visible_workspaces(2_999)
+                .iter()
+                .any(|w| w.id == ws.id)
+        );
+        assert_eq!(
+            store
+                .compute_sidebar_layout(ALL_WORKSPACES_ID, &inputs, false, 2_999)
+                .total_visible_sessions(),
+            0
+        );
+        assert_eq!(
+            store
+                .compute_sidebar_layout(ALL_WORKSPACES_ID, &inputs, false, 3_000)
+                .total_visible_sessions(),
+            1
+        );
+        assert_eq!(
+            store
+                .query_inbox(&InboxSplit::All, &inputs, false, "", 3_000)
+                .len(),
+            1
+        );
+        store.wake_due_workspaces(3_000);
+        assert!(!store.workspace_by_id(&ws.id).unwrap().snoozed);
+        store.snooze_workspace(&ws.id, 4_000, 3_000).unwrap();
+        store.wake_workspace(&ws.id);
+        assert_eq!(
+            store
+                .query_inbox(&InboxSplit::All, &inputs, false, "", 3_000)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn next_timer_deadline_ignores_due_reminders_and_tracks_edits() {
+        let mut store = WorkspaceStore::new();
+        assert_eq!(store.next_deadline_ms(1_000), None);
+        let ws = store.create_workspace("Quiet", None).unwrap();
+        store.set_reminder("a", Some(2_000), None);
+        store.set_reminder("b", Some(3_000), None);
+        store.snooze_workspace(&ws.id, 4_000, 1_000).unwrap();
+        assert_eq!(store.next_deadline_ms(1_000), Some(2_000));
+        assert_eq!(store.next_deadline_ms(2_000), Some(3_000));
+        store.set_reminder("b", Some(1_500), None);
+        assert_eq!(store.next_deadline_ms(1_000), Some(1_500));
+        store.set_reminder("b", None, None);
+        assert_eq!(store.next_deadline_ms(3_000), Some(4_000));
+        // An overdue snooze still needs its persisted flags cleared at startup.
+        assert_eq!(store.next_deadline_ms(5_000), Some(4_000));
+        store.wake_due_workspaces(5_000);
+        assert_eq!(store.next_deadline_ms(5_000), None);
     }
 
     #[test]
