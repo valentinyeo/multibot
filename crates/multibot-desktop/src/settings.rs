@@ -521,7 +521,7 @@ impl MultibotView {
         let mut rail = v_flex()
             .id("settings-nav")
             .test_support()
-            .w(px(184.0))
+            .w(px(216.0))
             .flex_shrink_0()
             .h_full()
             .p_3()
