@@ -2269,6 +2269,7 @@ impl MultibotView {
                     .small()
                     .label(format!("{}{label}", if selected { "✓ " } else { "" }))
                     .selected(selected)
+                    .toggled(selected)
                     .when(selected, |b| b.primary())
                     .disabled(!supported)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -2302,6 +2303,7 @@ impl MultibotView {
                     .small()
                     .label(format!("{}{label}", if selected { "✓ " } else { "" }))
                     .selected(selected)
+                    .toggled(selected)
                     .when(selected, |b| b.primary())
                     .disabled(!supported)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -2331,6 +2333,7 @@ impl MultibotView {
                     .small()
                     .label(format!("{}{label}", if selected { "✓ " } else { "" }))
                     .selected(selected)
+                    .toggled(selected)
                     .when(selected, |b| b.primary())
                     .disabled(!supported)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -5719,10 +5722,17 @@ mod tests {
             window.click("attach-file-btn", cx);
             window.render_frame(cx);
             assert!(window.find("composer-options").visible());
-            for id in ["composer-model-1", "composer-effort-3", "composer-permission-2"] {
+            for (id, default_id) in [
+                ("composer-model-1", "composer-model-0"),
+                ("composer-effort-3", "composer-effort-0"),
+                ("composer-permission-2", "composer-permission-0"),
+            ] {
+                assert_eq!(window.find(default_id).checked(), Some(true));
+                assert_eq!(window.find(id).checked(), Some(false));
                 window.click(id, cx);
                 window.render_frame(cx);
-                assert_eq!(window.find(id).selected(), Some(true));
+                assert_eq!(window.find(id).checked(), Some(true));
+                assert_eq!(window.find(default_id).checked(), Some(false));
             }
             assert!(window.try_find("composer-options-summary").is_some());
             view.update(cx, |v, cx| {

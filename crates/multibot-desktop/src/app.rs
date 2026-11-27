@@ -5472,11 +5472,12 @@ mod tests {
             window.render_frame(cx);
             window.click("attach-file-btn", cx);
             window.render_frame(cx);
-            for id in ["composer-options", "composer-model", "composer-effort", "composer-permissions"] {
-                assert!(window.try_find(id).is_some());
+            for id in ["composer-options", "composer-model-1", "composer-effort-3", "composer-permission-2"] {
+                assert!(window.try_find(id).is_some(), "Missing {id}");
             }
-            window.click("composer-effort", cx);
+            window.click("composer-effort-3", cx);
             window.render_frame(cx);
+            assert_eq!(window.find("composer-effort-3").checked(), Some(true));
             assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "Unsent draft");
             window.click("send-prompt", cx);
             window.render_frame(cx);
@@ -5485,9 +5486,18 @@ mod tests {
             view.update(cx, |v, cx| v.prompt_input.update(cx, |input, cx| input.set_value("", window, cx)));
             window.click("attach-file-btn", cx);
             window.render_frame(cx);
-            window.click("composer-model", cx);
+            assert!(window.try_find("composer-options").is_none());
+            window.click("attach-file-btn", cx);
             window.render_frame(cx);
-            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "/model ");
+            window.click("composer-model-1", cx);
+            window.render_frame(cx);
+            assert_eq!(window.find("composer-model-1").checked(), Some(true));
+            assert_eq!(window.find("composer-effort-3").checked(), Some(true));
+            assert!(view.read(cx).prompt_input.read(cx).value().is_empty());
+            let v = view.read(cx);
+            let options = v.composer_options_for(v.selected_session.as_ref().unwrap()).unwrap();
+            assert_eq!(options.model.as_deref(), Some("opus"));
+            assert_eq!(options.effort, Some(multibot_proto::EffortLevel::High));
         }).unwrap();
     }
 
