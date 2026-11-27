@@ -1228,6 +1228,9 @@ impl crate::app::MultibotView {
         };
         self.terminal.wake_task = Some(cx.spawn(async move |this, cx| {
             while wake_rx.recv().await.is_some() {
+                // Coalesce a burst of read batches into one snapshot + one redraw, so a
+                // chatty command cannot turn into per-batch grid copies.
+                while wake_rx.try_recv().is_ok() {}
                 let alive = this
                     .update(cx, |view, cx| {
                         view.refresh_terminal_screen();
