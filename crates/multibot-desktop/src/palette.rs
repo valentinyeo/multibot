@@ -2006,6 +2006,104 @@ impl MultibotView {
             )
     }
 
+    pub(crate) fn render_changelog_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let releases = multibot_core::changelog::releases();
+        let sections = releases.iter().enumerate().map(|(index, release)| {
+            v_flex()
+                .id(("changelog-release", index))
+                .test_support()
+                .flex_shrink_0()
+                .gap_3()
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::text_primary())
+                        .child(release.title),
+                )
+                .children(release.bullets.iter().map(|bullet| {
+                    h_flex()
+                        .items_start()
+                        .gap_3()
+                        .text_sm()
+                        .text_color(theme::text_secondary())
+                        .child(div().text_color(theme::text_muted()).child("•"))
+                        .child(div().flex_1().min_w_0().child(*bullet))
+                }))
+        });
+
+        div()
+            .id("changelog-backdrop")
+            .absolute()
+            .inset_0()
+            .bg(hsla(0.0, 0.0, 0.0, 0.58))
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_6()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.active_modal = ActiveModal::None;
+                    this.focus_active_surface_default(window, cx);
+                    cx.notify();
+                }),
+            )
+            .child(
+                v_flex()
+                    .id("changelog-modal")
+                    .test_support()
+                    .w(px(680.0))
+                    .max_w(gpui_kit::relative(1.0))
+                    .h(gpui_kit::relative(0.8))
+                    .max_h(px(640.0))
+                    .rounded(RADIUS_MODAL)
+                    .overflow_hidden()
+                    .bg(theme::bg_surface())
+                    .border_1()
+                    .border_color(theme::border_subtle())
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        h_flex()
+                            .flex_shrink_0()
+                            .px_6()
+                            .py_4()
+                            .border_b_1()
+                            .border_color(theme::border_subtle())
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme::text_primary())
+                                    .child("Changelog"),
+                            )
+                            .child(
+                                Button::new("close-changelog")
+                                    .xsmall()
+                                    .label("Esc")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.active_modal = ActiveModal::None;
+                                        this.focus_active_surface_default(window, cx);
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .id("changelog-scroll")
+                            .test_support()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p_6()
+                            .gap_6()
+                            .children(sections),
+                    ),
+            )
+    }
+
     pub(crate) fn render_shortcuts_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut rows = v_flex().gap_1().p_3();
         for cat in ALL_CATEGORIES {
@@ -2276,6 +2374,57 @@ mod tests {
             window.render_frame(cx);
             assert!(window.try_find("pal-spawn-directory-0").is_none());
         }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn changelog_opens_offline_from_palette_scrolls_and_closes(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).update_ui.state,
+                multibot_updater::UpdateState::Idle
+            );
+            assert!(view.read(cx).update_ui.last_release.is_none());
+            window.press("ctrl-k", cx);
+            window.input("Changelog", cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+
+            assert_eq!(view.read(cx).active_modal, ActiveModal::Changelog);
+            assert!(window.find("changelog-modal").visible());
+            assert!(window.find(("changelog-release", 0usize)).visible());
+            let last = multibot_core::changelog::releases().len() - 1;
+            assert!(
+                window
+                    .try_find(("changelog-release", last))
+                    .is_none_or(|section| !section.visible())
+            );
+            window.scroll(
+                "changelog-scroll",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.0), px(-10000.0))),
+                cx,
+            );
+            window.render_frame(cx);
+            assert!(window.find(("changelog-release", last)).visible());
+
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::None);
+            assert!(window.try_find("changelog-modal").is_none());
+            window.press("ctrl-k", cx);
+            window.input("Changelog", cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert!(window.find("changelog-modal").visible());
+            window.click("close-changelog", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::None);
+            window.press("ctrl-k", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::Palette);
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]

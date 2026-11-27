@@ -29,6 +29,7 @@
   - Prefer ready-made **`gpui-kit` / `gpui-component`** widgets over hand-drawn UI.
 
 ## Verification & Workflow
+- **Release notes:** Add user-facing changes to root `CHANGELOG.md` under `Unreleased`; move them under the published version when releasing. Keep release headings as `##` and each change as a single-line `-` bullet. The desktop embeds this file at compile time for its offline Changelog modal.
 - **Fast local verification (~15s on Linux):**
   ```bash
   ./scripts/verify.sh

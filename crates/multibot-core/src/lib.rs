@@ -1,5 +1,6 @@
 pub mod account;
 pub mod cache;
+pub mod changelog;
 pub mod chat_scroll;
 pub mod daemon_client;
 pub mod daemon_deploy;

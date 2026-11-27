@@ -1,0 +1,58 @@
+# Changelog
+
+User-facing changes, newest first. Release numbers match published GitHub releases.
+Changes on main that are not yet published belong under Unreleased. When a release
+ships, move those bullets under its published version; keep older entries here.
+This file is embedded in Multibot so Changelog works offline.
+
+## Unreleased
+
+- Open Changelog from Ctrl+K to read the full release history, even offline.
+- Discover live tmux server shells and use the built-in Windows terminal. Escape stays with the terminal while it is visible.
+- Toggle Deepgram dictation with Ctrl+D as well as Ctrl+Shift+Space. Multibot can load DEEPGRAM_API_KEY from your environment.
+- Use Pi and Cursor agents alongside the existing agents on your server.
+- Choose a working directory when starting an agent in a workspace with multiple directories.
+- Sign in at account.multiprompt.dev to sync your Deepgram key.
+
+## v0.1.55
+
+- Clicking a chat or selecting it with Ctrl+1..9 keeps the sidebar order unchanged.
+
+## v0.1.54
+
+- Chats open at the latest message and follow new messages while you are at the bottom.
+- A NEW divider marks unread messages. Jump to the latest message with the floating button or Shift+GG.
+
+## v0.1.53
+
+- Cycle through all sidebar chats with Ctrl+Tab and Ctrl+Shift+Tab without changing their order.
+
+## v0.1.52
+
+- Set chat reminders with Ctrl+H and snooze workspaces with Ctrl+Shift+Y.
+
+## v0.1.51
+
+- Dictate into the composer with Deepgram using Ctrl+Shift+Space.
+
+## v0.1.50
+
+- Install Multibot with the Windows Setup installer and launch it from the Start Menu.
+- Download, install, and relaunch an available update with one in-app action.
+
+## v0.1.49
+
+- Read real Antigravity conversation history and resume live chats without losing responsiveness.
+
+## v0.1.48
+
+- Connecting to a server no longer replaces a newer Multibot daemon with an older copy.
+
+## v0.1.47
+
+- Chats appear in the workspace recorded by the server, including newly created chats.
+- Show custom chat names, including names from the legacy app.
+
+## v0.1.46
+
+- Load and show active sessions only, keeping the sidebar focused and reducing memory use.

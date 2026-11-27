@@ -6054,6 +6054,9 @@ impl Render for MultibotView {
             .when(self.active_modal == ActiveModal::Shortcuts, |el| {
                 el.child(self.render_shortcuts_modal(cx))
             })
+            .when(self.active_modal == ActiveModal::Changelog, |el| {
+                el.child(self.render_changelog_modal(cx))
+            })
             .when_some(self.render_table_modal(cx), |el, modal| el.child(modal))
     }
 }
@@ -9778,7 +9781,7 @@ mod tests {
                 ));
             }
 
-            // Open Ctrl+K Palette and verify Changelog command shows real release notes
+            // Open Ctrl+K and verify Changelog opens independently of update notes
             window.press("ctrl-k", cx);
             window.render_frame(cx);
             assert_eq!(view.read(cx).active_modal, ActiveModal::Palette);
@@ -9788,14 +9791,9 @@ mod tests {
                     cx
                 ));
             });
-            assert!(
-                view.read(cx)
-                    .notice
-                    .as_deref()
-                    .unwrap_or("")
-                    .contains("Background release note"),
-                "Changelog must display synced release notes"
-            );
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::Changelog);
+            assert!(window.find("changelog-modal").visible());
             window.press("escape", cx);
             window.render_frame(cx);
 

@@ -289,32 +289,6 @@ impl UpdateUiState {
         }
     }
 
-    pub(crate) fn format_changelog_notice(&self, current_version: &str) -> String {
-        let loaded = match &self.state {
-            UpdateState::Available(info) => {
-                let safe = Self::safe_notes(&info.notes);
-                (!safe.is_empty()).then(|| (Self::normalize_version(&info.version), safe))
-            }
-            UpdateState::ReadyToRestart(staged) => {
-                let safe = Self::safe_notes(&staged.notes);
-                (!safe.is_empty()).then(|| (Self::normalize_version(&staged.version), safe))
-            }
-            _ => self.last_release.as_ref().and_then(|info| {
-                let safe = Self::safe_notes(&info.notes);
-                (!safe.is_empty()).then(|| (Self::normalize_version(&info.version), safe))
-            }),
-        };
-
-        if let Some((ver, notes)) = loaded {
-            format!("Changelog v{ver}: {}", notes.join(" · "))
-        } else {
-            format!(
-                "Multibot v{} — no release notes loaded.",
-                Self::normalize_version(current_version)
-            )
-        }
-    }
-
     pub(crate) fn palette_entries(&self, current_version: &str) -> Vec<PaletteEntry> {
         let action_label = match &self.state {
             UpdateState::ReadyToRestart(staged) => {
@@ -911,10 +885,7 @@ impl MultibotView {
                 true
             }
             PALETTE_CMD_UPDATE_CHANGELOG => {
-                let notice = self
-                    .update_ui
-                    .format_changelog_notice(multibot_proto::build_version());
-                self.notice = Some(notice);
+                self.active_modal = crate::state::ActiveModal::Changelog;
                 cx.notify();
                 true
             }
@@ -1137,11 +1108,6 @@ mod tests {
                     );
                     assert!(!contains_forbidden_duration_wording(entry.category));
                 }
-                let changelog = ui.format_changelog_notice("0.1.0");
-                assert!(
-                    !contains_forbidden_duration_wording(&changelog),
-                    "forbidden duration wording in changelog notice: {changelog:?}"
-                );
             }
         }
 
@@ -1564,12 +1530,9 @@ mod tests {
                     assert!(!contains_forbidden_duration_wording(&c.label));
                 }
 
-                // 1. Changelog command sets notice with release notes.
+                // 1. Changelog opens the offline release history, not an update notice.
                 assert!(v.execute_update_palette_command(PALETTE_CMD_UPDATE_CHANGELOG, cx));
-                let changelog_notice = v.notice.clone().unwrap();
-                assert!(changelog_notice.contains("Changelog v0.3.0"));
-                assert!(changelog_notice.contains("Instant dark card"));
-                assert!(!contains_forbidden_duration_wording(&changelog_notice));
+                assert_eq!(v.active_modal, crate::state::ActiveModal::Changelog);
 
                 // 2. Check command triggers CheckForUpdates.
                 assert!(v.execute_update_palette_command(PALETTE_CMD_UPDATE_CHECK, cx));
@@ -1593,7 +1556,7 @@ mod tests {
     }
 
     #[test]
-    fn defense_in_depth_strips_forbidden_duration_notes_from_card_and_changelog() {
+    fn defense_in_depth_strips_forbidden_duration_notes_from_card() {
         let injected = sample_release(
             "0.4.0",
             vec![
@@ -1659,15 +1622,7 @@ mod tests {
         }
         assert!(!card_lines.iter().any(|s| s == "Show more"));
 
-        let changelog = ui.format_changelog_notice("0.1.0");
-        assert_eq!(
-            changelog,
-            "Changelog v0.4.0: Clean dark sidebar · Team sync 👩‍💻 & family workspaces 👨‍👩‍👧"
-        );
-        assert!(!contains_forbidden_duration_wording(&changelog));
-        assert!(!has_forbidden_control_or_bidi(&changelog));
-
-        // If every injected note is forbidden, changelog falls back cleanly and no bullets render.
+        // If every injected note is forbidden, no bullets render.
         let all_bad = sample_staged(
             "0.4.0",
             vec![
@@ -1694,10 +1649,6 @@ mod tests {
             assert!(!contains_forbidden_duration_wording(&s));
             assert!(!has_forbidden_control_or_bidi(&s));
         }
-        assert_eq!(
-            ui.format_changelog_notice("0.1.0"),
-            "Multibot v0.1.0 — no release notes loaded."
-        );
     }
 
     #[gpui_kit::test]
