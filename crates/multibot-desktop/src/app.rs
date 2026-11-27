@@ -4083,8 +4083,12 @@ impl MultibotView {
 
     pub(crate) fn send_or_queue_prompt_on_host(&mut self, host: &str, session: &SessionSummary, msg_id: String, text: String) {
         let key = canonical_session_key(host, session.agent, &session.id);
-        let options = self.chat_state.composer_options.get(&key)
-            .filter(|options| !options.is_default()).cloned();
+        let options = self
+            .chat_state
+            .composer_options
+            .get(&key)
+            .filter(|options| !options.is_default())
+            .cloned();
         if let Some(tx) = self.tx_for_host(host) {
             let req = if session.working && self.settings.queue_while_working {
                 ClientRequest::SteerSession {
@@ -6061,6 +6065,82 @@ mod tests {
             });
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn multi_host_composer_options_follow_prompt_queue_and_spawn(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let (mut rx_a, _shutdown_a) = cx.update(|cx| install_test_host(cx, "host-a"));
+        let (mut rx_b, _shutdown_b) = cx.update(|cx| install_test_host(cx, "host-b"));
+        let session = make_session("same-session", AgentKind::Claude, "Same", false);
+        let options_a = multibot_proto::SessionOptions {
+            model: Some("opus".into()),
+            effort: Some(multibot_proto::EffortLevel::High),
+            permission: Some(multibot_proto::PermissionLevel::Auto),
+        };
+        let options_b = multibot_proto::SessionOptions {
+            model: Some("sonnet".into()),
+            effort: Some(multibot_proto::EffortLevel::Low),
+            permission: Some(multibot_proto::PermissionLevel::Ask),
+        };
+        cx.update_window(handle, |_, _, cx| {
+            view.update(cx, |v, cx| {
+                v.sync_from_shared_store(cx);
+                v.selected_session = Some(session.clone());
+                for (host, options) in [("host-a", &options_a), ("host-b", &options_b)] {
+                    let (rx, other) = if host == "host-a" {
+                        (&mut rx_a, &mut rx_b)
+                    } else {
+                        (&mut rx_b, &mut rx_a)
+                    };
+                    v.selected_session_host = Some(host.into());
+                    let key = canonical_session_key(host, session.agent, &session.id);
+                    v.chat_state.composer_options.insert(key, options.clone());
+                    v.send_or_queue_prompt(&session, "send".into(), "hello".into());
+                    assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { options: Some(ref o), .. }) if o == options));
+                    assert!(v.steer_active_session("steer".into(), cx));
+                    assert!(matches!(rx.try_recv(), Ok(ClientRequest::SteerSession { options: Some(ref o), .. }) if o == options));
+                    assert!(v.spawn_new_session(session.agent, ".".into(), None, None, cx));
+                    assert!(matches!(rx.try_recv(), Ok(ClientRequest::SpawnSession { options: Some(ref o), .. }) if o == options));
+                    assert!(other.try_recv().is_err());
+                }
+                v.send_or_queue_prompt_on_host("host-a", &session, "delayed".into(), "uploaded".into());
+                assert!(matches!(rx_a.try_recv(), Ok(ClientRequest::SendPrompt { options: Some(ref o), .. }) if o == &options_a));
+                assert!(rx_b.try_recv().is_err());
+
+                v.selected_session_host = Some("host-a".into());
+                let spawned = make_session("spawned", session.agent, "New", false);
+                v.handle_daemon_server_event_with_hint(
+                    "host-a",
+                    ServerEvent::SessionSpawned { session: spawned.clone() },
+                    false,
+                    cx,
+                );
+                assert_eq!(v.pending_spawn_host.as_deref(), Some("host-b"));
+                assert_eq!(v.chat_state.pending_spawn_options, Some(options_b.clone()));
+                v.handle_daemon_server_event_with_hint(
+                    "host-b",
+                    ServerEvent::SessionSpawned { session: spawned.clone() },
+                    false,
+                    cx,
+                );
+                assert_eq!(v.selected_session_host.as_deref(), Some("host-b"));
+                assert_eq!(v.composer_options_for(&spawned), Some(options_b.clone()));
+                assert!(!v.chat_state.composer_options.contains_key(
+                    &canonical_session_key("host-a", spawned.agent, &spawned.id)
+                ));
+                assert!(v.chat_state.pending_spawn_options.is_none());
+                assert!(v.pending_spawn_host.is_none());
+                while rx_b.try_recv().is_ok() {}
+
+                MultibotView::disconnect_host_on_app("host-b", cx);
+                v.sync_from_shared_store(cx);
+                v.send_or_queue_prompt(&spawned, "offline".into(), "queued".into());
+                assert_eq!(v.chat_outbox.entries.last().unwrap().options, Some(options_b));
+                assert_eq!(v.flush_outbox_for_host("host-a"), 0);
+                assert!(rx_a.try_recv().is_err());
+            });
+        }).unwrap();
     }
 
     #[gpui_kit::test]
