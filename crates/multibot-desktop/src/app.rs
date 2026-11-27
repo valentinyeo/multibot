@@ -2426,6 +2426,7 @@ impl MultibotView {
                         store
                             .workspace_store
                             .auto_unarchive_waiting_if_active(&key, session);
+                        store.workspace_store.reconcile_session(host_label, &session);
                         if store.persist_to_disk {
                             let _ = store.workspace_store.save();
                         }
@@ -2449,6 +2450,10 @@ impl MultibotView {
                                 .unwrap()
                                 .sessions
                                 .insert(0, session.clone());
+                        }
+                        let moved = store.workspace_store.reconcile_session(host_label, &session);
+                        if moved > 0 && store.persist_to_disk {
+                            let _ = store.workspace_store.save();
                         }
                         store.daemon_notice = Some(format!(
                             "Started {} session: {}",
@@ -2791,6 +2796,7 @@ impl MultibotView {
                         store
                             .workspace_store
                             .auto_unarchive_waiting_if_active(&key, session);
+                        store.workspace_store.reconcile_session(host_label, &session);
                         if store.persist_to_disk {
                             let _ = store.workspace_store.save();
                         }
@@ -2806,6 +2812,11 @@ impl MultibotView {
                             *existing = session.clone();
                         } else {
                             store.sessions.insert(0, session.clone());
+                        }
+                        let host_label = store.connected_host.as_deref().unwrap_or("local");
+                        let moved = store.workspace_store.reconcile_session(host_label, &session);
+                        if moved > 0 && store.persist_to_disk {
+                            let _ = store.workspace_store.save();
                         }
                         store.daemon_notice = Some(format!(
                             "Started {} session: {}",

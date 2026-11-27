@@ -793,6 +793,20 @@ impl WorkspaceStore {
         changed
     }
 
+    /// Applies the server's workspace name to one session that just spawned or changed.
+    ///
+    /// [`Self::reconcile_live_sessions`] also rescans every known session key for legacy
+    /// aliases, which is right for a full refresh and too costly for a per-transcript-append
+    /// event. This does only the O(1) part: place the one session that has a recorded
+    /// workspace, and leave everything else alone.
+    pub fn reconcile_session(&mut self, host: &str, summary: &SessionSummary) -> usize {
+        let Some(workspace) = summary.workspace.as_deref() else {
+            return 0;
+        };
+        let key = canonical_session_key(host, summary.agent, &summary.id);
+        self.apply_server_workspace_hints(&[(key, workspace)])
+    }
+
     /// Restores imported state when host aliases or legacy agent guesses differ from live keys.
     pub fn reconcile_live_session_keys(&mut self, live_keys: &[String]) -> usize {
         let mut by_sid: HashMap<String, Vec<String>> = HashMap::new();
@@ -3575,6 +3589,23 @@ mod tests {
             ]),
             0
         );
+    }
+
+    #[test]
+    fn one_session_refresh_places_a_spawned_chat_without_a_full_list() {
+        let mut store = WorkspaceStore::new();
+        let fresh = server_summary("51fe0c0d-2abc-4def-8abc-0123456789ab", Some("Vstack"));
+
+        // A spawn/update event carries the resolved name, so the chat lands immediately.
+        assert_eq!(store.reconcile_session("VPS Hetzner", &fresh), 1);
+        let key = canonical_session_key("VPS Hetzner", AgentKind::Claude, &fresh.id);
+        let ws = store.workspace_by_id(store.session_meta[&key].workspace_id.as_deref().unwrap());
+        assert_eq!(ws.unwrap().name, "Vstack");
+
+        // A plain chat with no recorded workspace stays put and creates nothing.
+        let unplaced = server_summary("62fe0d0d-3abc-4def-8abc-0123456789ab", None);
+        assert_eq!(store.reconcile_session("VPS Hetzner", &unplaced), 0);
+        assert_eq!(store.workspaces.len(), 2);
     }
 
     #[test]
