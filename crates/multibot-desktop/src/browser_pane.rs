@@ -10,6 +10,7 @@ mod windows {
     use super::{Context, MultibotView, Window, native};
     use crate::{
         computer_view::normalise_user_input,
+        icons::{self, lucide_icon},
         state::{ActiveModal, MainSurface},
         theme,
     };
@@ -555,7 +556,9 @@ mod windows {
                             ))
                             .child(
                                 Button::new("browser-close")
+                                    .icon(lucide_icon(icons::X, 12.0))
                                     .label("Close")
+                                    .accessibility_label("Close browser pane")
                                     .small()
                                     .on_click(cx.listener(|view, _, window, cx| {
                                         view.toggle_browser_pane(window, cx)

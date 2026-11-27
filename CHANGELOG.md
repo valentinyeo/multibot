@@ -7,6 +7,7 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 
+- Dock Chrome or Edge beside each chat with Alt+A, switch focus with Alt+Q, and attach a browser screenshot with Ctrl+Shift+S.
 - Keep shell discovery working when the tmux server starts alongside Multibot.
 - Reduce server memory use when reading Pi and Cursor chats with long replies or images.
 - Open Changelog from Ctrl+K to read the full release history, even offline.

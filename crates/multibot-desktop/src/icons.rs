@@ -80,6 +80,7 @@ mod tests {
             ("slash_picker", include_str!("slash_picker.rs")),
             ("terminal_pane", include_str!("terminal_pane.rs")),
             ("computer_view", include_str!("computer_view.rs")),
+            ("browser_pane", include_str!("browser_pane.rs")),
         ] {
             let chrome = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
             for (line_index, line) in chrome.lines().enumerate() {
