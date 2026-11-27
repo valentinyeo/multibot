@@ -1889,6 +1889,37 @@ impl WorkspaceStore {
         splits
     }
 
+    /// Inbox split bar set: every split with `>= 1` session in the current Inbox query, plus
+    /// `All`, which always stays visible so the Inbox keeps a live tab at `0` total sessions.
+    ///
+    /// This hides `0`-count splits (`Frequent 0`, `★ Favorites 0`, empty custom workspaces)
+    /// from the Inbox split bar and from `Tab` / `Shift+Tab` cycling. `visible_inbox_splits`
+    /// and `visible_workspaces` stay unfiltered so the Sidebar workspace switcher and
+    /// Settings -> Workspaces keep listing empty workspaces for management.
+    pub fn inbox_splits_with_sessions(
+        &self,
+        sessions: &[SessionInput<'_>],
+        unread_only: bool,
+        filter_query: &str,
+        now_ms: i64,
+    ) -> Vec<InboxSplit> {
+        let splits: Vec<InboxSplit> = self
+            .visible_inbox_splits(now_ms)
+            .into_iter()
+            .filter(|split| {
+                *split == InboxSplit::All
+                    || !self
+                        .query_inbox(split, sessions, unread_only, filter_query, now_ms)
+                        .is_empty()
+            })
+            .collect();
+        if splits.is_empty() {
+            vec![InboxSplit::All]
+        } else {
+            splits
+        }
+    }
+
     pub fn record_frequent_visit(&mut self, session_key: &str, visit_ms: i64) {
         let meta = self
             .session_meta
@@ -3823,6 +3854,80 @@ mod tests {
                 .map(|r| r.session_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["s4", "s2"]
+        );
+    }
+
+    #[test]
+    fn inbox_splits_with_sessions_hides_zero_count_splits_and_keeps_all() {
+        let mut store = WorkspaceStore::new();
+        let now = 10_000_000_i64;
+
+        // No sessions at all: only `All` survives so the Inbox keeps a live tab
+        assert_eq!(
+            store.inbox_splits_with_sessions(&[], false, "", now),
+            vec![InboxSplit::All]
+        );
+
+        let back = store.create_workspace("Backend", None).unwrap();
+        let shelf = store.create_workspace("Empty Shelf", None).unwrap();
+
+        let s1 = make_session("s1", AgentKind::Claude, "Favorite", now - 10, false, false);
+        let s2 = make_session("s2", AgentKind::Codex, "Frequent", now - 20, false, false);
+        let s3 = make_session("s3", AgentKind::Claude, "Backend", now - 30, false, false);
+        let all = [s1, s2, s3];
+        let inputs: Vec<_> = all.iter().map(|s| make_input("h", s)).collect();
+        let k = |i: usize| inputs[i].key.clone();
+
+        store.toggle_favorite(&k(0));
+        store.record_session_input(&k(1), now);
+        store.assign_session_workspace(&k(2), &back.id);
+
+        let splits = store.inbox_splits_with_sessions(&inputs, false, "", now);
+        assert_eq!(
+            splits,
+            vec![
+                InboxSplit::Frequent,
+                InboxSplit::All,
+                InboxSplit::Favorites,
+                // s1 and s2 never leave the default workspace
+                InboxSplit::Workspace(DEFAULT_WORKSPACE_ID.to_string()),
+                InboxSplit::Workspace(back.id.clone()),
+            ],
+            "only splits with >= 1 session stay in the Inbox split bar"
+        );
+        assert!(
+            !splits.contains(&InboxSplit::Workspace(shelf.id.clone())),
+            "an empty custom workspace must be hidden"
+        );
+
+        // The workspace lists behind the Sidebar switcher and Settings stay unfiltered
+        assert!(
+            store
+                .visible_workspaces(now)
+                .iter()
+                .any(|w| w.id == shelf.id),
+            "empty workspaces must stay manageable in the Sidebar and Settings"
+        );
+
+        // A filter that matches nothing leaves only `All`
+        assert_eq!(
+            store.inbox_splits_with_sessions(&inputs, false, "no-such-title", now),
+            vec![InboxSplit::All]
+        );
+
+        // An unread-only filter with nothing unread leaves only `All`
+        assert_eq!(
+            store.inbox_splits_with_sessions(&inputs, true, "", now),
+            vec![InboxSplit::All]
+        );
+
+        // Emptying a split hides it again
+        store.toggle_favorite(&k(0));
+        assert!(
+            !store
+                .inbox_splits_with_sessions(&inputs, false, "", now)
+                .contains(&InboxSplit::Favorites),
+            "Favorites 0 must drop out of the split bar"
         );
     }
 

@@ -737,6 +737,8 @@ impl MultibotView {
                     "pal-cmd-inbox" => {
                         self.sidebar_state.rename = None;
                         self.sidebar_state.new_workspace_draft = None;
+                        // Opening the Inbox always lands on `All`, never on a hidden empty split
+                        self.inbox_state.select_all_split();
                         self.set_main_surface(MainSurface::Inbox);
                         if let Some(win) = window {
                             self.focus_inbox(win, cx);

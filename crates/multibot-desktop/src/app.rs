@@ -1141,6 +1141,11 @@ impl MultibotView {
             self.sidebar_state.rename = None;
             self.sidebar_state.new_workspace_draft = None;
         }
+        if next == MainSurface::Inbox {
+            // Never open the Inbox on a split that is hidden because it holds 0 sessions
+            let splits = self.inbox_visible_splits(now_unix_ms());
+            self.inbox_state.normalize_active_split(&splits);
+        }
         self.main_surface = next;
         self.cleanup_unmounted_surface_state();
     }
@@ -6733,9 +6738,15 @@ mod tests {
             window.render_frame(cx);
             window.click("pal-cmd-inbox", cx);
             window.render_frame(cx);
-            // Minimal Inbox: split pills stay, provider pills do not exist anymore
-            window.click("inbox-split-favorites", cx);
+            // Minimal Inbox: only non-empty split pills render, so a `0`-session Favorites
+            // split is hidden and `All` stays clickable
+            assert!(
+                window.try_find("inbox-split-favorites").is_none(),
+                "0-session Favorites split must be hidden from the Inbox split bar"
+            );
+            window.click("inbox-tab-all", cx);
             window.render_frame(cx);
+            assert!(window.try_find("inbox-tab-all").is_some());
             window.press("f1", cx);
             window.render_frame(cx);
             window.click("close-shortcuts", cx);
@@ -10920,6 +10931,9 @@ mod tests {
         cx.update_window(handle, |_, window, cx| {
             view.update(cx, |v, cx| {
                 v.sessions = vec![s1.clone(), s2.clone(), s3.clone()];
+                // Keep Favorites non-empty so the Inbox bar has a second visible split to cycle
+                let k1 = v.session_key_for(&s1);
+                v.sidebar_state.workspace_store.toggle_favorite(&k1);
                 v.selected_session = Some(s1.clone());
                 v.messages = vec![
                     ChatMessage {
@@ -11331,6 +11345,9 @@ mod tests {
         cx.update_window(handle, |_, window, cx| {
             view.update(cx, |v, cx| {
                 v.sessions = vec![s1.clone(), s2.clone()];
+                // Keep Favorites non-empty so the Inbox bar has a second visible split to cycle
+                let k1 = v.session_key_for(&s1);
+                v.sidebar_state.workspace_store.toggle_favorite(&k1);
                 v.selected_session = Some(s1.clone());
                 v.sidebar_state.mode = SidebarMode::Open;
                 v.settings.sidebar_mode = SidebarMode::Open;
@@ -11714,6 +11731,13 @@ mod tests {
             window.render_frame(cx);
             let k1 = view.read(cx).session_key_for(&s1);
             let k2 = view.read(cx).session_key_for(&s2);
+            // Keep Favorites non-empty so its split pill is visible and clickable
+            // (0-count splits are hidden from the Inbox split bar)
+            view.update(cx, |v, cx| {
+                v.sidebar_state.workspace_store.toggle_favorite(&k1);
+                cx.notify();
+            });
+            window.render_frame(cx);
 
             // 1. Enter Inbox, start F2 rename on Claude Alpha, then click a workspace split
             window.press("alt-i", cx);
@@ -11792,9 +11816,10 @@ mod tests {
                 "Clicking #inbox-split-favorites must clear inbox_state.rename"
             );
 
-            // 4. Empty/filtered Inbox (#inbox-split-favorites = 0 rows) + Collapsed sidebar:
+            // 4. Empty/filtered Inbox (filter matches no session) + Collapsed sidebar:
             //    Ctrl+K -> Rename session must NOT open an unmounted inbox_state.rename or sidebar_state.rename!
             view.update(cx, |v, cx| {
+                v.inbox_state.filter_query = "zzz-no-such-session".into();
                 v.set_sidebar_mode_synced(SidebarMode::Collapsed, cx);
             });
             window.render_frame(cx);
@@ -11851,6 +11876,7 @@ mod tests {
 
             // And on non-empty Inbox (All split, row 0 = s1), explicit tab-context rename for s2
             // renames s2 (NOT row 0 s1) inside Inbox with mounted & focused input!
+            view.update(cx, |v, _| v.inbox_state.filter_query.clear());
             window.press("escape", cx);
             window.press("alt-i", cx);
             window.render_frame(cx);
@@ -12236,11 +12262,18 @@ mod tests {
 
         cx.update_window(handle, |_, window, cx| {
             view.update(cx, |v, cx| {
-                let _ = v
+                let work_id = v
                     .sidebar_state
                     .workspace_store
-                    .create_workspace("Work", None);
+                    .create_workspace("Work", None)
+                    .expect("Work workspace must be created")
+                    .id;
                 v.sessions = vec![s1.clone(), s2.clone()];
+                // One session in `Work` keeps that split non-empty (0-count splits are hidden)
+                let k2 = v.session_key_for(&s2);
+                v.sidebar_state
+                    .workspace_store
+                    .assign_session_workspace(&k2, &work_id);
                 v.selected_session = Some(s1.clone());
                 v.sidebar_state.mode = SidebarMode::Open;
                 v.settings.sidebar_mode = SidebarMode::Open;
