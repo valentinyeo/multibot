@@ -103,6 +103,18 @@ pub(crate) fn should_show_embedded_shell(
 
 #[cfg(any(windows, test))]
 fn forwarded_shortcut(key: u32, ctrl: bool, alt: bool, shift: bool) -> Option<&'static str> {
+    registered_native_shortcut(key, ctrl, alt, shift)
+        .filter(|spec| spec.category != multibot_keys::ShortcutCategory::Browser)
+        .map(|spec| spec.gpui_key)
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn registered_native_shortcut(
+    key: u32,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+) -> Option<&'static multibot_keys::ShortcutSpec> {
     // Keep interrupt, EOF, suspend, and Escape terminal-owned even if the app binds them.
     if (ctrl && alt)
         || (ctrl && !alt && !shift && matches!(key, 0x43 | 0x44 | 0x5A))
@@ -137,9 +149,7 @@ fn forwarded_shortcut(key: u32, ctrl: bool, alt: bool, shift: bool) -> Option<&'
         if shift { "shift-" } else { "" }
     );
     // Only app-owned bindings escape the console. Unbound Ctrl+C/L stay terminal-owned.
-    multibot_keys::by_gpui_key(&chord)
-        .filter(|spec| spec.wired)
-        .map(|spec| spec.gpui_key)
+    multibot_keys::by_gpui_key(&chord).filter(|spec| spec.wired)
 }
 
 #[cfg(any(windows, test))]

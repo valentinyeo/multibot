@@ -1,4 +1,5 @@
 pub mod account;
+pub mod browser_pane;
 pub mod cache;
 pub mod changelog;
 pub mod chat_scroll;

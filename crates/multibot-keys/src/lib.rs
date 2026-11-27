@@ -680,7 +680,7 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         wired: false,
     },
     // =========================================================================
-    // Browser Pane (12 entries — Phase 2 reserved)
+    // Browser Pane (12 entries)
     // =========================================================================
     ShortcutSpec {
         id: "browser.toggle",
@@ -688,7 +688,7 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         gpui_key: "alt-a",
         category: ShortcutCategory::Browser,
         description: "Toggle docked Chrome/Edge browser pane",
-        wired: false,
+        wired: true,
     },
     ShortcutSpec {
         id: "browser.toggle_alt",
@@ -712,7 +712,7 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         gpui_key: "alt-q",
         category: ShortcutCategory::Browser,
         description: "Jump focus between composer and browser pane",
-        wired: false,
+        wired: true,
     },
     ShortcutSpec {
         id: "browser.focus_swap_alt",
@@ -727,8 +727,8 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         display: "Ctrl+Shift+S",
         gpui_key: "ctrl-shift-s",
         category: ShortcutCategory::Browser,
-        description: "Screenshot browser pane and paste link into chat",
-        wired: false,
+        description: "Capture browser screenshot and attach it to the chat draft",
+        wired: true,
     },
     ShortcutSpec {
         id: "browser.open_url_tab",
@@ -1428,7 +1428,16 @@ mod tests {
             let spec = by_id(id).unwrap_or_else(|| panic!("missing shortcut {id}"));
             assert!(spec.wired, "expected {id} ({}) to be wired: true", spec.gpui_key);
         }
-        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 68);
+        for (id, key) in [
+            ("browser.toggle", "alt-a"),
+            ("browser.focus_swap", "alt-q"),
+            ("browser.screenshot", "ctrl-shift-s"),
+        ] {
+            let spec = by_id(id).unwrap();
+            assert_eq!(spec.gpui_key, key);
+            assert!(spec.wired);
+        }
+        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 71);
         assert!(!by_id("browser.close_tab").unwrap().wired);
         assert!(!by_id("chat.steer").unwrap().wired);
         assert!(by_gpui_key("ctrl-shift-j").is_none());

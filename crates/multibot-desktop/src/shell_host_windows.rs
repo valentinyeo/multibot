@@ -122,7 +122,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                     let parent = VISIBLE.with(|v| {
                         v.borrow()
                             .get(&root)
-                            .filter(|(hwnd, _)| *hwnd != 0)
+                            .filter(|(hwnd, _)| *hwnd != 0 && !crate::browser_pane::native::has_focus(root))
                             .map(|_| root)
                     });
                     if let Some(parent) = parent {

@@ -5,6 +5,7 @@
 
 mod account;
 mod app;
+mod browser_pane;
 mod chat_view;
 mod computer_view;
 mod icons;
@@ -22,17 +23,17 @@ mod update_ui;
 mod voice;
 
 use app::{
-    ArchiveSession, BrowseCommands, CloseOverlay, CopyLatestCodeBlock, DeleteSession, FindInChat,
-    FontZoomIn, FontZoomOut, FontZoomReset, GoLeader, InboxNext, InboxNextSplit, InboxPrev,
-    InboxPrevSplit, JumpSession1, JumpSession2, JumpSession3, JumpSession4, JumpSession5,
-    JumpSession6, JumpSession7, JumpSession8, JumpSession9, JumpWorkspace1, JumpWorkspace2,
-    JumpWorkspace3, JumpWorkspace4, JumpWorkspace5, JumpWorkspace6, JumpWorkspace7, JumpWorkspace8,
-    JumpWorkspace9, MarkSessionUnread, MoveSessionDown, MoveSessionUp, MoveSessionWaiting,
+    ArchiveSession, BrowseCommands, CaptureBrowserPane, CloseOverlay, CopyLatestCodeBlock,
+    DeleteSession, FindInChat, FocusBrowserPane, FontZoomIn, FontZoomOut, FontZoomReset, GoLeader,
+    InboxNext, InboxNextSplit, InboxPrev, InboxPrevSplit, JumpSession1, JumpSession2, JumpSession3,
+    JumpSession4, JumpSession5, JumpSession6, JumpSession7, JumpSession8, JumpSession9, JumpWorkspace1,
+    JumpWorkspace2, JumpWorkspace3, JumpWorkspace4, JumpWorkspace5, JumpWorkspace6, JumpWorkspace7,
+    JumpWorkspace8, JumpWorkspace9, MarkSessionUnread, MoveSessionDown, MoveSessionUp, MoveSessionWaiting,
     MultibotView, NewSession, NewWindow, NextSession, NextWorkspace, OpenDissolved, OpenDone,
     OpenHibernated, OpenInbox, OpenPalette, OpenShortcuts, PrevSession, PrevWorkspace,
     ReconnectSession, RemindSession, RenameActiveSession, ReopenClosedSession, SnoozeWorkspace,
-    ToggleFavorite, ToggleGroup, ToggleHibernateMode, ToggleInbox, ToggleSettings, ToggleSidebar,
-    ToggleTerminal, ToggleUnreadOnly, UndoWaiting, VoiceDictation, WorkspaceViewAll,
+    ToggleBrowserPane, ToggleFavorite, ToggleGroup, ToggleHibernateMode, ToggleInbox, ToggleSettings,
+    ToggleSidebar, ToggleTerminal, ToggleUnreadOnly, UndoWaiting, VoiceDictation, WorkspaceViewAll,
     WorkspaceViewFavorites, WorkspaceViewFrequent,
 };
 use gpui_kit::{
@@ -87,6 +88,9 @@ pub fn bind_multibot_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-b", ToggleSidebar, None),
         // Slice 5 — built-in terminal pane
         KeyBinding::new("alt-c", ToggleTerminal, None),
+        KeyBinding::new("alt-a", ToggleBrowserPane, None),
+        KeyBinding::new("alt-q", FocusBrowserPane, None),
+        KeyBinding::new("ctrl-shift-s", CaptureBrowserPane, None),
         KeyBinding::new("ctrl-n", NewWindow, None),
         KeyBinding::new("f1", OpenShortcuts, None),
         KeyBinding::new("escape", CloseOverlay, None),

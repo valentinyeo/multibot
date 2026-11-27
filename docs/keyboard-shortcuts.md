@@ -10,6 +10,16 @@ updated: 2026-10-03
 
 # Keyboard shortcuts
 
+## Multibot browser pane on Windows
+
+| Shortcut | Action |
+| --- | --- |
+| Alt+A | Open or close the Chrome or Edge pane for the current chat |
+| Alt+Q | Switch focus between the pane and chat composer |
+| Ctrl+Shift+S | Capture the visible browser tab and attach the PNG to the chat draft |
+
+Each chat remembers the address entered in the pane. Hidden tabs release their browser processes after five minutes and reopen at that address when selected again.
+
 Source of truth for the F1 overlay is `SHORTCUT_ROWS` in `src/shortcuts.zig`. The Full list below is generated from it by `node tools/shortcuts-doc.mjs`. Every new user-facing function ships with a shortcut (when sensible), a Ctrl+K entry, and an F1 row; regenerate the Full list after changing those rows.
 
 - Ctrl+T / Ctrl+K → New Claude session: Create a live chat manually. New Claude processes request Remote Control at startup so the session can appear in the Claude app. Claude versions or accounts that refuse Remote Control keep ordinary chat working. Agents can use the [server command](spawn-multibot-session.md) to create a named chat through account sync instead; no additional Windows binding is needed.
