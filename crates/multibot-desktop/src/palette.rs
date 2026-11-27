@@ -600,6 +600,16 @@ impl MultibotView {
                 tab_context: false,
                 global: true,
             },
+            PaletteCommandSpec {
+                id: "pal-cmd-fullwidth".into(),
+                label: "Toggle Full-Width".into(),
+                chord: "Ctrl+Shift+F".into(),
+                category: PaletteCategory::LookAndSettings,
+                destructive: false,
+                aliases: vec!["fullscreen".into(), "shell".into()],
+                tab_context: false,
+                global: true,
+            },
             // Terminal (Slice 5)
             PaletteCommandSpec {
                 id: "pal-cmd-toggle-terminal".into(),
@@ -1134,6 +1144,9 @@ impl MultibotView {
                             self.toggle_dictation(win, cx);
                         }
                         return;
+                    }
+                    "pal-cmd-fullwidth" => {
+                        self.toggle_shell_fullscreen(cx);
                     }
                     "pal-cmd-toggle-terminal" => {
                         self.toggle_terminal_pane(cx);

@@ -498,7 +498,7 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         gpui_key: "ctrl-shift-f",
         category: ShortcutCategory::View,
         description: "Toggle full-width content mode",
-        wired: false,
+        wired: true,
     },
     ShortcutSpec {
         id: "view.font_inc",
@@ -1438,7 +1438,10 @@ mod tests {
             assert_eq!(spec.gpui_key, key);
             assert!(spec.wired);
         }
-        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 70);
+        let fullscreen = by_id("view.fullscreen").unwrap();
+        assert_eq!(fullscreen.gpui_key, "ctrl-shift-f");
+        assert!(fullscreen.wired);
+        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 71);
         assert!(!by_id("browser.close_tab").unwrap().wired);
         assert!(!by_id("chat.steer").unwrap().wired);
         assert!(by_gpui_key("ctrl-shift-j").is_none());

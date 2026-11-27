@@ -3,7 +3,7 @@ use crate::state::{ActiveModal, MainSurface};
 use crate::theme;
 use anyhow::{Result, bail};
 use gpui_kit::{
-    Context, InteractiveElement, IntoElement, ParentElement, Styled, Window,
+    Context, InteractiveElement, IntoElement, ParentElement, Styled, TestSupportExt, Window,
     component::{Sizable, button::Button, h_flex, v_flex},
     div,
     prelude::FluentBuilder,
@@ -268,7 +268,8 @@ impl MultibotView {
             self.sidebar_state.rename.is_some() || self.sidebar_state.new_workspace_draft.is_some(),
         ) && !self.table_modal_state.is_open()
             && !self.computer.is_open()
-            && !self.slash_picker_state.is_open();
+            && !self.slash_picker_state.is_open()
+            && !(self.sidebar_rendered() && self.sidebar_state.dev_stats_expanded);
         let active = visible
             .then(|| {
                 self.selected_session
@@ -461,7 +462,9 @@ impl MultibotView {
         let active_key = key.clone();
         let weak = cx.entity().downgrade();
         v_flex()
-            .flex_1()
+            .w_full()
+            .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+            .mx_auto()
             .min_w_0()
             .h_full()
             .bg(theme::bg_canvas())
@@ -558,12 +561,14 @@ impl MultibotView {
                             || view.sidebar_state.new_workspace_draft.is_some(),
                     ) && !view.table_modal_state.is_open()
                         && !view.computer.is_open()
-                        && !view.slash_picker_state.is_open();
+                        && !view.slash_picker_state.is_open()
+                        && !(view.sidebar_rendered() && view.sidebar_state.dev_stats_expanded);
                     view.shell_host
                         .reconcile(visible.then_some(active_key.as_str()), Some(rect));
                 });
             })
             .id("server-shell-panel")
+            .test_support()
     }
 }
 

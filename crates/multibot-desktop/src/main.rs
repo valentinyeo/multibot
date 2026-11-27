@@ -33,7 +33,8 @@ use app::{
     OpenHibernated, OpenInbox, OpenPalette, OpenShortcuts, PrevSession, PrevWorkspace,
     ReconnectSession, RemindSession, RenameActiveSession, ReopenClosedSession, SnoozeWorkspace,
     ToggleBrowserPane, ToggleFavorite, ToggleGroup, ToggleHibernateMode, ToggleInbox, ToggleSettings,
-    ToggleSidebar, ToggleTerminal, ToggleUnreadOnly, UndoWaiting, VoiceDictation, WorkspaceViewAll,
+    ToggleFullscreen, ToggleSidebar, ToggleTerminal, ToggleUnreadOnly, UndoWaiting, VoiceDictation,
+    WorkspaceViewAll,
     WorkspaceViewFavorites, WorkspaceViewFrequent,
 };
 use gpui_kit::{
@@ -86,6 +87,7 @@ pub fn bind_multibot_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-i", ToggleInbox, None),
         KeyBinding::new("ctrl-,", ToggleSettings, None),
         KeyBinding::new("ctrl-shift-b", ToggleSidebar, None),
+        KeyBinding::new("ctrl-shift-f", ToggleFullscreen, None),
         // Slice 5 — built-in terminal pane
         KeyBinding::new("alt-c", ToggleTerminal, None),
         KeyBinding::new("alt-a", ToggleBrowserPane, None),

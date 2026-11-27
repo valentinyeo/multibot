@@ -1,4 +1,5 @@
-use super::{AgentProvider, HeaderMeta, LineSlice, ParsedSlice};
+use super::{AgentProvider, HeaderMeta, LineSlice, MetadataStore, ParsedSlice};
+use crate::server_workspaces::ServerWorkspaceIndex;
 use multibot_proto::{AgentKind, ServerEvent, SessionSummary};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -57,6 +58,19 @@ pub fn discover_sessions() -> Vec<SessionSummary> {
     parse_tmux_sessions_output(&String::from_utf8_lossy(&output.stdout))
 }
 
+pub fn apply_metadata(
+    shell: &mut SessionSummary,
+    metadata: &MetadataStore,
+    index: &ServerWorkspaceIndex,
+) {
+    shell.title = metadata
+        .get(&shell.id)
+        .and_then(|m| m.title.clone())
+        .or_else(|| index.name_for(&shell.id).map(str::to_string))
+        .unwrap_or_else(|| shell.id.clone());
+    shell.workspace = index.workspace_for(&shell.id).map(str::to_string);
+}
+
 pub fn empty_history(session_id: String) -> ServerEvent {
     ServerEvent::History {
         session_id,
@@ -96,6 +110,44 @@ impl AgentProvider for TmuxProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shell_titles_use_legacy_names_but_multibot_renames_win() {
+        let dir = std::env::temp_dir().join(format!("multibot-shell-names-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = r#"{
+            "term-56d16ef56ce668ab2d7235d20e7ecd75": {"name":"Multi Bot AGY Shell","workspace":"Multi Bot"},
+            "hypertask-vps:term-56d16ef56ce668ab2d7235d20e7ecd75": {"name":"Stale alias"},
+            "hypertask-vps:term-4d82a90403033d51dd366d2b1d7c89c6": {"name":"HT AGY Shell","workspace":"HT Product"}
+        }"#;
+        let path = dir.join("chat-names.json");
+        std::fs::write(&path, raw).unwrap();
+        let index = ServerWorkspaceIndex::load_from_state_dir(&dir);
+        let mut metadata = MetadataStore::default();
+        let mut shells = parse_tmux_sessions_output(
+            "term-56d16ef56ce668ab2d7235d20e7ecd75\t1\tbash\t/\t0\nterm-4d82a90403033d51dd366d2b1d7c89c6\t2\tagy\t/\t1\nterm-deadbeef\t3\tzsh\t/\t0",
+        );
+        for shell in &mut shells {
+            apply_metadata(shell, &metadata, &index);
+        }
+        assert_eq!(shells[0].title, "Multi Bot AGY Shell");
+        assert_eq!(shells[0].workspace.as_deref(), Some("Multi Bot"));
+        assert_eq!(shells[1].title, "HT AGY Shell");
+        assert_eq!(shells[1].workspace.as_deref(), Some("HT Product"));
+        assert_eq!(shells[2].title, "term-deadbeef");
+        metadata.sessions.insert(
+            shells[0].id.clone(),
+            super::super::SessionMetaEntry {
+                title: Some("My Multibot name".into()),
+                ..Default::default()
+            },
+        );
+        apply_metadata(&mut shells[0], &metadata, &index);
+        assert_eq!(shells[0].title, "My Multibot name");
+        assert_eq!(shells[0].source_path, format!("tmux:{}", shells[0].id));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn parses_exact_names_activity_commands_and_paths() {
         let s = parse_tmux_sessions_output(

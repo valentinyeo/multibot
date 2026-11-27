@@ -140,6 +140,7 @@ pub(crate) struct SidebarState {
     pub unread_only: bool,
     pub recents_collapsed: bool,
     pub workspace_menu_open: bool,
+    pub dev_stats_expanded: bool,
     pub show_jump_badges: bool,
     pub previous_session_key: Option<String>,
     pub rename: Option<InlineRenameState>,
@@ -158,6 +159,7 @@ impl Default for SidebarState {
             unread_only: false,
             recents_collapsed: false,
             workspace_menu_open: false,
+            dev_stats_expanded: false,
             show_jump_badges: false,
             previous_session_key: None,
             rename: None,
@@ -880,7 +882,6 @@ impl MultibotView {
                 .into_any_element();
         }
 
-        let (gpu_label, gpu_safe) = self.active_gpu_summary();
         let in_starred = self.sidebar_state.active_workspace_id == STARRED_WORKSPACE_ID;
 
         let mut ws_menu = v_flex()
@@ -1421,63 +1422,109 @@ impl MultibotView {
             .when_some(self.render_update_card(false, cx), |el, card| {
                 el.child(card)
             })
+            .child(self.render_dev_stats_indicator(false, cx))
+            .into_any_element()
+    }
+
+    fn render_dev_stats_indicator(&self, rail: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let (gpu_label, gpu_safe) = self.active_gpu_summary();
+        v_flex()
+            .relative()
+            .items_start()
+            .when(self.sidebar_state.dev_stats_expanded, |el| {
+                el.child(
+                    gpui_kit::deferred(
+                        v_flex()
+                            .id("dev-stats-details")
+                            .test_support()
+                            .absolute()
+                            .bottom(px(28.0))
+                            .left_0()
+                            .w(px(280.0))
+                            .p_2()
+                            .gap_1()
+                            .rounded(RADIUS_ROW)
+                            .border_1()
+                            .border_color(theme::border_subtle())
+                            .occlude()
+                            .bg(theme::bg_surface())
+                            .text_xs()
+                            .text_color(theme::text_secondary())
+                            .child(
+                                Label::new(format!("GPU: {gpu_label}"))
+                                    .id("dev-stats-gpu")
+                                    .text_color(theme::text_secondary()),
+                            )
+                            .child(
+                                Label::new(self.footprint_label.clone())
+                                    .id("dev-stats-footprint")
+                                    .text_color(theme::text_secondary()),
+                            )
+                            .child(
+                                Label::new(self.connection_status.clone())
+                                    .id("dev-stats-connection")
+                                    .text_color(theme::text_secondary()),
+                            )
+                            .child(
+                                Button::new("dev-stats-gpu-settings")
+                                    .small()
+                                    .label("GPU settings")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.sidebar_state.dev_stats_expanded = false;
+                                        this.table_modal_state.close();
+                                        this.settings_tab = crate::settings::SettingsTab::Gpu;
+                                        this.set_main_surface(MainSurface::Settings);
+                                        this.active_modal = ActiveModal::None;
+                                        this.focus_active_surface_default(window, cx);
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .with_priority(1),
+                )
+            })
             .child(
-                div()
+                h_flex()
                     .id("gpu-status-card")
                     .role(Role::Button)
+                    .aria_label("Developer stats")
+                    .aria_expanded(self.sidebar_state.dev_stats_expanded)
                     .test_support()
-                    .px_3()
-                    .py_2()
-                    .rounded(RADIUS_ROW)
-                    .border_1()
-                    .border_color(if gpu_safe {
-                        theme::accent_green()
-                    } else {
-                        theme::accent_amber()
-                    })
-                    .bg(theme::bg_surface())
+                    .h(px(24.0))
+                    .px_2()
+                    .gap_1()
+                    .items_center()
+                    .rounded(RADIUS_CHIP)
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .hover(|s| s.bg(theme::bg_hover()))
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
                             cx.stop_propagation();
-                            if this.table_modal_state.is_open() {
-                                this.table_modal_state.close();
-                            }
-                            this.settings_tab = crate::settings::SettingsTab::Gpu;
-                            this.set_main_surface(MainSurface::Settings);
-                            this.active_modal = ActiveModal::None;
-                            this.focus_active_surface_default(window, cx);
+                            this.shell_host.focus_parent();
+                            this.root_focus_handle.focus(window, cx);
+                            this.sidebar_state.dev_stats_expanded =
+                                !this.sidebar_state.dev_stats_expanded;
                             cx.notify();
                         }),
                     )
                     .child(
-                        v_flex()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(if gpu_safe {
-                                        theme::accent_green()
-                                    } else {
-                                        theme::accent_amber()
-                                    })
-                                    .child(format!("GPU: {gpu_label}")),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme::text_muted())
-                                    .child(format!(
-                                        "v{} · {} · {}",
-                                        multibot_proto::build_version(),
-                                        self.footprint_label,
-                                        self.connection_status
-                                    )),
-                            ),
-                    ),
+                        div()
+                            .w(px(4.0))
+                            .h(px(4.0))
+                            .rounded(RADIUS_CHIP)
+                            .bg(if gpu_safe {
+                                theme::accent_green()
+                            } else {
+                                theme::accent_amber()
+                            }),
+                    )
+                    .when(!rail, |el| {
+                        el.child(format!("v{}", multibot_proto::build_version()))
+                    }),
             )
-            .into_any_element()
     }
 
     fn render_sidebar_session_row(
@@ -1644,7 +1691,6 @@ impl MultibotView {
         now: i64,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let (_, gpu_safe) = self.active_gpu_summary();
         let active_key = self
             .selected_session
             .as_ref()
@@ -1930,47 +1976,7 @@ impl MultibotView {
                     .child(avatars),
             )
             // Update card intentionally omitted in Collapsed rail mode to prevent overflow.
-            .child(
-                div()
-                    .id("gpu-status-card")
-                    .role(Role::Button)
-                    .test_support()
-                    .w(px(28.0))
-                    .h(px(28.0))
-                    .rounded(RADIUS_CHIP)
-                    .bg(theme::bg_surface())
-                    .border_1()
-                    .border_color(if gpu_safe {
-                        theme::accent_green()
-                    } else {
-                        theme::accent_amber()
-                    })
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_xs()
-                    .text_color(if gpu_safe {
-                        theme::accent_green()
-                    } else {
-                        theme::accent_amber()
-                    })
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            cx.stop_propagation();
-                            if this.table_modal_state.is_open() {
-                                this.table_modal_state.close();
-                            }
-                            this.settings_tab = crate::settings::SettingsTab::Gpu;
-                            this.set_main_surface(MainSurface::Settings);
-                            this.active_modal = ActiveModal::None;
-                            this.focus_active_surface_default(window, cx);
-                            cx.notify();
-                        }),
-                    )
-                    .child("G"),
-            )
+            .child(self.render_dev_stats_indicator(true, cx))
     }
 }
 

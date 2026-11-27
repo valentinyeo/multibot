@@ -72,6 +72,7 @@ actions!(
         ToggleInbox,
         ToggleSettings,
         ToggleSidebar,
+        ToggleFullscreen,
         NewWindow,
         OpenShortcuts,
         CloseOverlay,
@@ -1270,6 +1271,23 @@ impl MultibotView {
         self.sidebar_state.set_mode(mode);
         self.cleanup_unmounted_surface_state();
         self.settings.sidebar_mode = mode;
+        self.sync_settings_to_shared(cx);
+        if self.sidebar_state.persist_to_disk {
+            let _ = self.settings.save();
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_shell_fullscreen(&mut self, cx: &mut Context<Self>) {
+        if self.main_surface != MainSurface::Chat
+            || !self
+                .selected_session
+                .as_ref()
+                .is_some_and(|s| s.agent == AgentKind::Shell)
+        {
+            return;
+        }
+        self.settings.shell_fullscreen = !self.settings.shell_fullscreen;
         self.sync_settings_to_shared(cx);
         if self.sidebar_state.persist_to_disk {
             let _ = self.settings.save();
@@ -5300,6 +5318,28 @@ impl Render for MultibotView {
             .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, _, cx| {
                 this.handle_modifiers_changed(ev, cx);
             }))
+            .capture_action(cx.listener(|this, _: &CloseOverlay, _, cx| {
+                if this.sidebar_state.dev_stats_expanded
+                    && this.active_modal == ActiveModal::None
+                    && !this.table_modal_state.is_open()
+                {
+                    this.sidebar_state.dev_stats_expanded = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .capture_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Escape, _, cx| {
+                    if this.sidebar_state.dev_stats_expanded
+                        && this.active_modal == ActiveModal::None
+                        && !this.table_modal_state.is_open()
+                    {
+                        this.sidebar_state.dev_stats_expanded = false;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }),
+            )
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 if this.handle_lifecycle_keydown(ev, window, cx) {
                     return;
@@ -5412,6 +5452,11 @@ impl Render for MultibotView {
                 this.set_main_surface(next);
                 this.focus_active_surface_default(window, cx);
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleFullscreen, _, cx| {
+                if this.active_modal == ActiveModal::None && !this.table_modal_state.is_open() {
+                    this.toggle_shell_fullscreen(cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
                 this.cycle_sidebar_mode_synced(cx);
@@ -6137,11 +6182,19 @@ mod tests {
     fn open_test_view_with_entity(
         cx: &mut TestAppContext,
     ) -> (gpui_kit::AnyWindowHandle, Entity<MultibotView>) {
+        open_test_view_with_settings(cx, MultibotSettings::default(), WindowOptions::default())
+    }
+
+    fn open_test_view_with_settings(
+        cx: &mut TestAppContext,
+        settings: MultibotSettings,
+        options: WindowOptions,
+    ) -> (gpui_kit::AnyWindowHandle, Entity<MultibotView>) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::theme::apply_multibot_dark_theme(cx);
             crate::bind_multibot_keys(cx);
-            SharedAppStore::init(cx, MultibotSettings::default());
+            SharedAppStore::init(cx, settings);
         });
         let rt = Arc::new(
             tokio::runtime::Builder::new_current_thread()
@@ -6150,7 +6203,7 @@ mod tests {
                 .unwrap(),
         );
         cx.update(|cx| {
-            gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
+            gpui_kit::open_window(options, cx, move |window, cx| {
                 cx.new(|cx| MultibotView::new(rt, window, cx))
             })
             .unwrap()
@@ -7309,6 +7362,141 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn shell_fullscreen_restores_on_first_frame_and_shortcut_saves_both_choices(
+        cx: &mut TestAppContext,
+    ) {
+        let settings: MultibotSettings =
+            serde_json::from_str(r#"{"shell_fullscreen":true}"#).unwrap();
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                gpui_kit::point(px(0.0), px(0.0)),
+                size(px(1440.0), px(900.0)),
+            ))),
+            ..Default::default()
+        };
+        let (handle, view) = open_test_view_with_settings(cx, settings, options);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                let shell = make_session(
+                    "term-56d16ef56ce668ab2d7235d20e7ecd75",
+                    AgentKind::Shell,
+                    "Multi Bot AGY Shell",
+                    false,
+                );
+                v.sessions = vec![shell.clone()];
+                v.select_session(shell, cx);
+            });
+            window.render_frame(cx);
+            let wide = window.find("server-shell-panel").bounds().size.width;
+            assert!(
+                wide > px(760.0),
+                "saved full-width must apply before the first frame: {wide:?}"
+            );
+            assert!(view.read(cx).settings.shell_fullscreen);
+            window.press("ctrl-shift-f", cx);
+            window.render_frame(cx);
+            assert!(!view.read(cx).settings.shell_fullscreen);
+            assert!(!cx.global::<SharedAppStore>().settings.shell_fullscreen);
+            assert_eq!(
+                window.find("server-shell-panel").bounds().size.width,
+                px(760.0)
+            );
+            let saved = serde_json::to_string(&cx.global::<SharedAppStore>().settings).unwrap();
+            assert!(
+                !serde_json::from_str::<MultibotSettings>(&saved)
+                    .unwrap()
+                    .shell_fullscreen
+            );
+            window.press("ctrl-shift-f", cx);
+            window.render_frame(cx);
+            assert_eq!(window.find("server-shell-panel").bounds().size.width, wide);
+            assert!(cx.global::<SharedAppStore>().settings.shell_fullscreen);
+            let saved = serde_json::to_string(&cx.global::<SharedAppStore>().settings).unwrap();
+            assert!(
+                serde_json::from_str::<MultibotSettings>(&saved)
+                    .unwrap()
+                    .shell_fullscreen
+            );
+            window.press("ctrl-k", cx);
+            window.input("Toggle Full-Width", cx);
+            window.render_frame(cx);
+            window.click("pal-cmd-fullwidth", cx);
+            window.render_frame(cx);
+            assert!(!view.read(cx).settings.shell_fullscreen);
+            assert_eq!(
+                window.find("server-shell-panel").bounds().size.width,
+                px(760.0)
+            );
+            view.update(cx, |v, cx| {
+                v.select_session(make_session("chat", AgentKind::Claude, "Chat", false), cx)
+            });
+            window.render_frame(cx);
+            window.press("ctrl-shift-f", cx);
+            assert!(!view.read(cx).settings.shell_fullscreen);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn shell_fullscreen_defaults_to_regular_width_on_initial_load(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                let shell = make_session("term-deadbeef", AgentKind::Shell, "Shell", false);
+                v.sessions = vec![shell.clone()];
+                v.select_session(shell, cx);
+            });
+            window.render_frame(cx);
+            assert!(!view.read(cx).settings.shell_fullscreen);
+            assert!(window.find("server-shell-panel").bounds().size.width <= px(760.0));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn dev_stats_start_compact_and_toggle_by_click_and_escape_in_both_sidebar_modes(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, _| {
+                v.gpu_report = multibot_gpu::parse_gpu_report("MODE\tauto_integrated\nACTIVE\t00000000:00012345\t8086\t9a49\t128\t0\tIntel(R) Arc(TM) Pro Graphics\n");
+                v.footprint_label = "120.5 MB · 2.2% CPU".into();
+                v.connection_status = "3/3 hosts · 106 sessions".into();
+            });
+            for mode in [SidebarMode::Open, SidebarMode::Collapsed] {
+                view.update(cx, |v, cx| v.set_sidebar_mode_synced(mode, cx));
+                window.render_frame(cx);
+                assert!(!view.read(cx).sidebar_state.dev_stats_expanded);
+                assert!(window.try_find("dev-stats-details").is_none());
+                assert!(window.find("gpu-status-card").bounds().size.height <= px(24.0));
+                window.click("gpu-status-card", cx);
+                window.render_frame(cx);
+                for id in ["dev-stats-details", "dev-stats-gpu", "dev-stats-footprint", "dev-stats-connection"] {
+                    assert!(window.try_find(id).is_some(), "missing {id}");
+                }
+                let text = gpui_kit::base::test_support::texts(window).iter().map(|t| t.text().to_string()).collect::<Vec<_>>().join(" ");
+                assert!(text.contains("GPU: Intel(R) Arc(TM) Pro Graphics (iGPU · 0% NVIDIA)"));
+                assert!(text.contains("120.5 MB"));
+                assert!(text.contains("2.2% CPU"));
+                assert!(text.contains("3/3 hosts"));
+                assert!(text.contains("106 sessions"));
+                assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
+                window.click("gpu-status-card", cx);
+                window.render_frame(cx);
+                assert!(window.try_find("dev-stats-details").is_none());
+                window.click("gpu-status-card", cx);
+                window.render_frame(cx);
+                window.press("escape", cx);
+                window.render_frame(cx);
+                assert!(!view.read(cx).sidebar_state.dev_stats_expanded);
+                assert!(window.try_find("dev-stats-details").is_none());
+                assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
+            }
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
     fn wave1_clean_chrome_keeps_status_and_keyboard_entry_points(cx: &mut TestAppContext) {
         let (handle, view) = open_test_view_with_entity(cx);
         cx.update_window(handle, |_, window, cx| {
@@ -7346,6 +7534,9 @@ mod tests {
                 );
             }
             window.click("gpu-status-card", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("dev-stats-details").is_some());
+            window.click("dev-stats-gpu-settings", cx);
             window.render_frame(cx);
             assert_eq!(
                 view.read(cx).settings_tab,
@@ -8066,6 +8257,8 @@ mod tests {
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             window.click("gpu-status-card", cx);
+            window.render_frame(cx);
+            window.click("dev-stats-gpu-settings", cx);
             window.render_frame(cx);
             window.click("gpu-mode-software", cx);
             window.render_frame(cx);

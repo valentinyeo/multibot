@@ -7,6 +7,9 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 
+- Resolve available legacy shell names, including host-qualified terminal keys, while keeping Multibot renames.
+- Remember shell full-width mode across restarts; toggle it with Ctrl+Shift+F or Ctrl+K.
+- Keep sidebar developer stats in a tiny indicator; click to expand GPU, memory, CPU and connection details, or press Esc to collapse.
 - Show sidebar section names without collapse arrows; clicking a heading keeps chats visible, and chats follow newest messages without moving on selection.
 - Pin chats above all sections and return unpinned chats to their section, preserving pin choices across imports and in Starred; right-click any chat for its Ctrl+K actions.
 - Dock Chrome or Edge beside each chat with Alt+A, switch focus with Alt+Q, and attach a browser screenshot with Ctrl+Shift+S.

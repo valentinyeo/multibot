@@ -513,20 +513,7 @@ pub fn discover_live_sessions_with_ctx(
     let mut sessions = discover_all_sessions_with_ctx(home, limit, ctx);
     let mut shells = tmux::discover_sessions();
     for shell in &mut shells {
-        shell.title = ctx
-            .metadata
-            .get(&shell.id)
-            .and_then(|m| m.title.clone())
-            .or_else(|| {
-                ctx.server_workspaces
-                    .name_for(&shell.id)
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| shell.id.clone());
-        shell.workspace = ctx
-            .server_workspaces
-            .workspace_for(&shell.id)
-            .map(str::to_string);
+        tmux::apply_metadata(shell, ctx.metadata, ctx.server_workspaces);
     }
     // The transcript limit must never hide a live terminal.
     sessions.extend(shells);

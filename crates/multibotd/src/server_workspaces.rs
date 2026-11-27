@@ -345,6 +345,24 @@ fn read_chat_names(path: &Path) -> ChatNames {
             }
         }
     }
+    // Accept host-qualified shell keys without overriding exact local keys.
+    for key in root.keys() {
+        let Some((_, tmux)) = key.rsplit_once(':') else {
+            continue;
+        };
+        if !tmux
+            .strip_prefix("term-")
+            .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            continue;
+        }
+        if let Some(name) = out.name_by_tmux.get(key).cloned() {
+            out.name_by_tmux.entry(tmux.to_string()).or_insert(name);
+        }
+        if let Some(workspace) = out.by_tmux.get(key).cloned() {
+            out.by_tmux.entry(tmux.to_string()).or_insert(workspace);
+        }
+    }
     out
 }
 

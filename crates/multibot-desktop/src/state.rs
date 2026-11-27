@@ -127,6 +127,7 @@ pub(crate) fn settings_visible_eq(a: &MultibotSettings, b: &MultibotSettings) ->
         ssh_hosts: a_hosts,
         selected_host: a_sel,
         sidebar_mode: a_sb,
+        shell_fullscreen: a_full,
         chat_font_size_pt: a_font,
         composer_ctrl_enter: a_send,
         queue_while_working: a_queue,
@@ -141,6 +142,7 @@ pub(crate) fn settings_visible_eq(a: &MultibotSettings, b: &MultibotSettings) ->
         ssh_hosts: b_hosts,
         selected_host: b_sel,
         sidebar_mode: b_sb,
+        shell_fullscreen: b_full,
         chat_font_size_pt: b_font,
         composer_ctrl_enter: b_send,
         queue_while_working: b_queue,
@@ -154,6 +156,7 @@ pub(crate) fn settings_visible_eq(a: &MultibotSettings, b: &MultibotSettings) ->
         && a_hosts == b_hosts
         && a_sel == b_sel
         && a_sb == b_sb
+        && a_full == b_full
         && a_send == b_send
         && a_queue == b_queue
         && a_font == b_font

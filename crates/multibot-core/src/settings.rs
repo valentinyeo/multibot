@@ -115,6 +115,8 @@ pub struct MultibotSettings {
     pub selected_host: Option<String>,
     #[serde(default)]
     pub sidebar_mode: SidebarMode,
+    #[serde(default)]
+    pub shell_fullscreen: bool,
     #[serde(default = "default_chat_font_size_pt")]
     pub chat_font_size_pt: u16,
     #[serde(default)]
@@ -139,6 +141,7 @@ impl Default for MultibotSettings {
             ssh_hosts: Vec::new(),
             selected_host: None,
             sidebar_mode: SidebarMode::Open,
+            shell_fullscreen: false,
             chat_font_size_pt: DEFAULT_CHAT_FONT_SIZE_PT,
             composer_ctrl_enter: false,
             queue_while_working: true,
@@ -287,6 +290,24 @@ mod tests {
         let loaded = MultibotSettings::load_from(&path).unwrap();
         assert_eq!(loaded, settings);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shell_fullscreen_defaults_off_and_roundtrips_both_choices() {
+        let dir =
+            std::env::temp_dir().join(format!("multibot-shell-layout-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        let mut settings: MultibotSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.shell_fullscreen);
+        for fullscreen in [true, false] {
+            settings.shell_fullscreen = fullscreen;
+            settings.save_to(&path).unwrap();
+            assert_eq!(
+                MultibotSettings::load_from(&path).unwrap().shell_fullscreen,
+                fullscreen
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
