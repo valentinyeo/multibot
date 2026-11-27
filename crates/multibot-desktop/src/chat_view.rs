@@ -4253,6 +4253,7 @@ impl MultibotView {
             PendingScrollTarget::None => {}
         }
         let view = cx.entity().downgrade();
+        // Each direct scroll child is one visible message, including its NEW divider.
         let mut msg_col = v_flex()
             .on_children_prepainted(move |_, _, cx| {
                 let _ = view.update(cx, |this, cx| {
@@ -4661,11 +4662,12 @@ impl MultibotView {
                             .child(
                                 div()
                                     .text_xs()
-                                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .text_color(theme::accent_blue())
                                     .rounded(RADIUS_CHIP)
+                                    .bg(theme::bg_surface())
                                     .border_1()
-                                    .border_color(theme::border_subtle())
+                                    .border_color(theme::accent_blue())
                                     .px_2()
                                     .py_0p5()
                                     .child("NEW"),
@@ -6012,8 +6014,108 @@ mod tests {
             assert_eq!(scroll.offset().y, -scroll.max_offset().y);
             assert!(view.read(cx).chat_state.scroll.follow_bottom);
             assert_eq!(view.read(cx).chat_state.scroll.unread_divider_msg_idx, None);
+            assert_eq!(view.read(cx).chat_state.scroll.pending_scroll, PendingScrollTarget::None);
+            assert!(window.try_find("chat-unread-divider").is_none());
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn chat_scroll_first_visit_unread_tall_reply_aligns_new_divider_at_top(cx: &mut TestAppContext) {
+        use multibot_core::cache::{CacheKey, CachedSession};
+        use multibot_proto::ServerEvent;
+
+        for cached in [false, true] {
+            let (handle, view) = open_test_chat_window(cx);
+            cx.update_window(handle, |_, window, cx| {
+                let session = SessionSummary {
+                    id: format!("first-unread-{cached}"),
+                    agent: AgentKind::Claude,
+                    needs_attention: true,
+                    last_assistant_id: Some("reply-tail".into()),
+                    ..Default::default()
+                };
+                let mut messages = chat_scroll_messages();
+                messages.extend([
+                    ChatMessage {
+                        id: "tall-reply".into(),
+                        role: MessageRole::Assistant,
+                        text: "Start of the unread reply.\n\n".repeat(100),
+                        ..Default::default()
+                    },
+                    ChatMessage {
+                        id: "reply-tail".into(),
+                        role: MessageRole::Assistant,
+                        text: "End of the unread turn.".into(),
+                        ..Default::default()
+                    },
+                ]);
+                view.update(cx, |v, cx| {
+                    if cached {
+                        v.chat_cache.put(
+                            CacheKey::new("local", session.agent, &session.id),
+                            CachedSession { messages: messages.clone(), ..Default::default() },
+                        );
+                    }
+                    v.open_session_on_host("local".into(), session.clone(), false, cx);
+                });
+                window.render_frame(cx);
+                if cached {
+                    assert_eq!(view.read(cx).chat_state.scroll.unread_divider_msg_idx, Some(40));
+                    assert_eq!(
+                        window.find("chat-unread-divider").bounds().top(),
+                        view.read(cx).chat_state.scroll_handle.bounds().top(),
+                    );
+                }
+                view.update(cx, |v, cx| {
+                    v.handle_daemon_server_event(
+                        ServerEvent::History {
+                            session_id: session.id.clone(),
+                            messages,
+                            oldest_offset: None,
+                            latest_offset: None,
+                            has_more: false,
+                            file_size: None,
+                            file_mtime_ms: None,
+                            probe_sha256: None,
+                            todos: vec![],
+                        },
+                        cx,
+                    );
+                });
+                window.render_frame(cx);
+                let scroll = view.read(cx).chat_state.scroll_handle.clone();
+                assert_eq!(scroll.children_count(), 42);
+                assert_eq!(view.read(cx).chat_state.scroll.unread_divider_msg_idx, Some(40));
+                let row = scroll.bounds_for_item(40).unwrap();
+                assert!(row.size.height > scroll.bounds().size.height);
+                assert_eq!(row.top() + scroll.offset().y, scroll.bounds().top());
+                let divider = window.find("chat-unread-divider");
+                assert!(divider.visible());
+                assert_eq!(divider.bounds().top(), scroll.bounds().top());
+                let bubble = window.find("msg-bubble-40").bounds();
+                assert!(bubble.top() >= divider.bounds().bottom());
+                assert!(bubble.top() < scroll.bounds().bottom());
+                assert!(scroll.offset().y > -scroll.max_offset().y);
+                assert_eq!(view.read(cx).chat_state.scroll.pending_scroll, PendingScrollTarget::None);
+                window.render_frame(cx);
+                assert_eq!(window.find("chat-unread-divider").bounds().top(), scroll.bounds().top());
+
+                window.click("chat-jump-to-bottom-btn", cx);
+                window.render_frame(cx);
+                assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+                assert_eq!(view.read(cx).chat_state.scroll.pending_scroll, PendingScrollTarget::None);
+
+                view.update(cx, |v, cx| {
+                    v.open_session_on_host("local".into(), session, false, cx);
+                });
+                window.render_frame(cx);
+                let scroll = &view.read(cx).chat_state.scroll_handle;
+                assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+                assert_eq!(view.read(cx).chat_state.scroll.unread_divider_msg_idx, None);
+                assert!(window.try_find("chat-unread-divider").is_none());
+            }).unwrap();
+        }
     }
 
     #[gpui_kit::test]
@@ -6033,10 +6135,13 @@ mod tests {
                 ..Default::default()
             };
             view.update(cx, |v, cx| {
+                let mut messages = chat_scroll_messages();
+                messages[10].role = MessageRole::Assistant;
+                messages[10].text = "Start of the returning unread reply.\n\n".repeat(100);
                 v.chat_cache.put(
                     CacheKey::new("local", session.agent, &session.id),
                     CachedSession {
-                        messages: chat_scroll_messages(),
+                        messages,
                         oldest_offset: 100,
                         consumed_offset: 200,
                         file_size: 200,
@@ -6061,8 +6166,12 @@ mod tests {
             });
             window.render_frame(cx);
             let scroll = view.read(cx).chat_state.scroll_handle.clone();
-            let cutoff_top = scroll.bounds_for_item(10).unwrap().top();
+            let cutoff = scroll.bounds_for_item(10).unwrap();
+            let cutoff_top = cutoff.top();
+            assert!(cutoff.size.height > scroll.bounds().size.height);
             assert_eq!(cutoff_top + scroll.offset().y, scroll.bounds().top());
+            assert!(window.find("chat-unread-divider").visible());
+            assert_eq!(window.find("chat-unread-divider").bounds().top(), scroll.bounds().top());
             assert!(view.read(cx).chat_state.scroll.scrolled_up);
             let previous_cutoff_screen_y = cutoff_top + scroll.offset().y;
             view.update(cx, |v, cx| {
@@ -6108,6 +6217,7 @@ mod tests {
         let (handle, view) = open_test_chat_window(cx);
         cx.update_window(handle, |_, window, cx| {
             view.update(cx, |v, cx| {
+                v.messages = chat_scroll_messages();
                 v.prompt_input.update(cx, |input, cx| {
                     input.set_value("", window, cx);
                     input.focus(window, cx);
@@ -6116,9 +6226,19 @@ mod tests {
                 cx.notify();
             });
             window.render_frame(cx);
+            let scroll = view.read(cx).chat_state.scroll_handle.clone();
+            view.update(cx, |v, cx| {
+                scroll.set_offset(gpui_kit::point(px(0.0), px(-100.0)));
+                v.chat_state.scroll.sync_position(200.0);
+                cx.notify();
+            });
+            window.render_frame(cx);
             window.press("shift-g", cx);
             assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "G");
             window.press("shift-g", cx);
+            window.render_frame(cx);
+            assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+            assert_eq!(view.read(cx).chat_state.scroll.pending_scroll, PendingScrollTarget::None);
             assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "");
             assert_eq!(view.read(cx).chat_state.focused_message_idx, None);
             window.press("shift-g", cx);

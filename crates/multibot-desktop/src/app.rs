@@ -30,7 +30,7 @@ use gpui_kit::{
 use multibot_core::cache::{
     CacheKey, ChatCache, MAX_SESSION_CACHE_BYTES, ReconcileOutcome, SwitchToken,
 };
-use multibot_core::chat_scroll::PendingScrollTarget;
+use multibot_core::chat_scroll::{PendingScrollTarget, UnreadVisit};
 use multibot_core::outbox::ChatOutbox;
 use multibot_core::settings::{MAX_CHAT_FONT_SIZE_PT, MIN_CHAT_FONT_SIZE_PT};
 use multibot_core::workspaces::{
@@ -4180,7 +4180,7 @@ impl MultibotView {
             self.chat_state.session_todos.clear();
         }
         self.selected_session_host = Some(host.clone());
-        self.chat_state.scroll.open_visit(None);
+        self.chat_state.scroll.open_visit(UnreadVisit::Read);
         self.chat_state.scroll_handle = gpui_kit::ScrollHandle::default();
         self.chat_state.prepend_scroll_anchor = None;
         self.chat_state.newest_chord.reset();

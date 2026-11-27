@@ -1,5 +1,5 @@
 use crate::workspaces::UnreadBoundary;
-use multibot_proto::ChatMessage;
+use multibot_proto::{ChatMessage, MessageRole};
 
 pub const NEAR_BOTTOM_PX: f32 = 48.0;
 pub const DOUBLE_G_WINDOW_MS: u64 = 500;
@@ -12,36 +12,63 @@ pub enum PendingScrollTarget {
     UnreadDivider(usize),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum UnreadVisit {
+    #[default]
+    Read,
+    Unread {
+        previous_boundary: Option<UnreadBoundary>,
+    },
+}
+
 pub fn find_first_unread_message_idx(
     messages: &[ChatMessage],
-    boundary: &UnreadBoundary,
+    previous_boundary: Option<&UnreadBoundary>,
     was_unread: bool,
 ) -> Option<usize> {
-    let manual = boundary.manual_unread == Some(true);
+    let manual = previous_boundary.is_some_and(|boundary| boundary.manual_unread == Some(true));
     if !was_unread && !manual {
         return None;
     }
-    if let Some(id) = &boundary.last_read_assistant_id
-        && let Some(i) = messages.iter().position(|msg| msg.id == *id)
-    {
-        return if i + 1 < messages.len() {
-            Some(i + 1)
-        } else {
-            manual.then_some(0)
-        };
+    if let Some(boundary) = previous_boundary {
+        if let Some(id) = &boundary.last_read_assistant_id
+            && let Some(i) = messages.iter().position(|msg| msg.id == *id)
+        {
+            return if i + 1 < messages.len() {
+                Some(i + 1)
+            } else {
+                manual.then_some(0)
+            };
+        }
+        if boundary.last_read_ms > 0
+            && let Some(i) = messages.iter().enumerate().find_map(|(i, msg)| {
+                (i > 0
+                    && msg
+                        .timestamp_ms
+                        .is_some_and(|ts| ts > boundary.last_read_ms))
+                .then_some(i)
+            })
+        {
+            return Some(i);
+        }
     }
-    if boundary.last_read_ms > 0
-        && let Some(i) = messages.iter().enumerate().find_map(|(i, msg)| {
-            (i > 0
-                && msg
-                    .timestamp_ms
-                    .is_some_and(|ts| ts > boundary.last_read_ms))
-            .then_some(i)
-        })
-    {
-        return Some(i);
+    if manual {
+        return (!messages.is_empty()).then_some(0);
     }
-    (manual && !messages.is_empty()).then_some(0)
+    if let Some(i) = messages
+        .iter()
+        .rposition(|msg| msg.role == MessageRole::User)
+    {
+        messages
+            .iter()
+            .enumerate()
+            .skip(i + 1)
+            .find_map(|(i, msg)| (msg.role == MessageRole::Assistant).then_some(i))
+    } else {
+        messages
+            .iter()
+            .rposition(|msg| msg.role == MessageRole::Assistant)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -50,7 +77,7 @@ pub struct ChatScrollTracker {
     pub pending_scroll: PendingScrollTarget,
     pub scrolled_up: bool,
     pub new_messages_while_scrolled_up: usize,
-    pub visit_unread_boundary: Option<UnreadBoundary>,
+    pub unread_visit: UnreadVisit,
     pub unread_divider_msg_idx: Option<usize>,
 }
 
@@ -61,30 +88,31 @@ impl Default for ChatScrollTracker {
             pending_scroll: PendingScrollTarget::Bottom,
             scrolled_up: false,
             new_messages_while_scrolled_up: 0,
-            visit_unread_boundary: None,
+            unread_visit: UnreadVisit::Read,
             unread_divider_msg_idx: None,
         }
     }
 }
 
 impl ChatScrollTracker {
-    pub fn open_visit(&mut self, boundary: Option<UnreadBoundary>) {
+    pub fn open_visit(&mut self, unread_visit: UnreadVisit) {
         *self = Self {
-            visit_unread_boundary: boundary,
+            unread_visit,
             ..Self::default()
         };
     }
 
     pub fn history_loaded(&mut self, messages: &[ChatMessage], cached: bool) {
-        if let Some(boundary) = &self.visit_unread_boundary {
-            self.unread_divider_msg_idx = find_first_unread_message_idx(messages, boundary, true);
+        if let UnreadVisit::Unread { previous_boundary } = &self.unread_visit {
+            self.unread_divider_msg_idx =
+                find_first_unread_message_idx(messages, previous_boundary.as_ref(), true);
             self.pending_scroll = self
                 .unread_divider_msg_idx
                 .map(PendingScrollTarget::UnreadDivider)
                 .unwrap_or(PendingScrollTarget::Bottom);
             self.follow_bottom = self.unread_divider_msg_idx.is_none();
             if !cached {
-                self.visit_unread_boundary = None;
+                self.unread_visit = UnreadVisit::Read;
             }
         } else if self.follow_bottom {
             self.pending_scroll = PendingScrollTarget::Bottom;
@@ -92,12 +120,12 @@ impl ChatScrollTracker {
     }
 
     pub fn sent_message(&mut self) {
-        self.visit_unread_boundary = None;
         self.unread_divider_msg_idx = None;
         self.jump_to_bottom();
     }
 
     pub fn jump_to_bottom(&mut self) {
+        self.unread_visit = UnreadVisit::Read;
         self.follow_bottom = true;
         self.scrolled_up = false;
         self.new_messages_while_scrolled_up = 0;
@@ -195,25 +223,113 @@ mod tests {
     }
 
     #[test]
-    fn read_and_first_visit_chats_open_at_bottom() {
+    fn read_chats_open_at_bottom() {
         let messages = messages();
         let boundary = UnreadBoundary {
             last_read_assistant_id: Some("m1".into()),
             ..Default::default()
         };
         assert_eq!(
-            find_first_unread_message_idx(&messages, &boundary, false),
+            find_first_unread_message_idx(&messages, Some(&boundary), false),
             None
         );
-        assert_eq!(
-            find_first_unread_message_idx(&messages, &UnreadBoundary::default(), true),
-            None
-        );
+        assert_eq!(find_first_unread_message_idx(&messages, None, false), None);
         let mut scroll = ChatScrollTracker::default();
-        scroll.open_visit(None);
+        scroll.open_visit(UnreadVisit::Read);
         scroll.history_loaded(&messages, false);
+        assert_eq!(scroll.unread_divider_msg_idx, None);
         assert_eq!(scroll.pending_scroll, PendingScrollTarget::Bottom);
         assert!(scroll.follow_bottom);
+    }
+
+    fn assistant_turn_messages() -> Vec<ChatMessage> {
+        use multibot_proto::MessageRole::{Assistant, User};
+        [
+            ("user1", User),
+            ("assistant1", Assistant),
+            ("user2", User),
+            ("assistant2", Assistant),
+            ("assistant3", Assistant),
+        ]
+        .into_iter()
+        .map(|(id, role)| ChatMessage {
+            id: id.into(),
+            role,
+            ..Default::default()
+        })
+        .collect()
+    }
+
+    #[test]
+    fn unread_without_a_saved_boundary_starts_at_the_latest_assistant_turn() {
+        let messages = assistant_turn_messages();
+        assert_eq!(
+            find_first_unread_message_idx(&messages, None, true),
+            Some(3)
+        );
+        let mut scroll = ChatScrollTracker::default();
+        scroll.open_visit(UnreadVisit::Unread {
+            previous_boundary: None,
+        });
+        scroll.history_loaded(&messages, true);
+        assert_eq!(scroll.unread_divider_msg_idx, Some(3));
+        assert_eq!(scroll.pending_scroll, PendingScrollTarget::UnreadDivider(3));
+        assert!(!scroll.follow_bottom);
+        assert!(matches!(scroll.unread_visit, UnreadVisit::Unread { .. }));
+        scroll.history_loaded(&messages, false);
+        assert_eq!(scroll.pending_scroll, PendingScrollTarget::UnreadDivider(3));
+        assert_eq!(scroll.unread_visit, UnreadVisit::Read);
+        scroll.pending_scroll = PendingScrollTarget::None;
+        scroll.history_loaded(&messages, false);
+        assert_eq!(scroll.pending_scroll, PendingScrollTarget::None);
+        assert_eq!(scroll.unread_divider_msg_idx, Some(3));
+    }
+
+    #[test]
+    fn returning_unread_chat_starts_after_the_last_read_assistant() {
+        let mut scroll = ChatScrollTracker::default();
+        scroll.open_visit(UnreadVisit::Unread {
+            previous_boundary: Some(UnreadBoundary {
+                last_read_assistant_id: Some("assistant1".into()),
+                ..Default::default()
+            }),
+        });
+        scroll.history_loaded(&assistant_turn_messages(), false);
+        assert_eq!(scroll.unread_divider_msg_idx, Some(2));
+        assert_eq!(scroll.pending_scroll, PendingScrollTarget::UnreadDivider(2));
+        assert!(!scroll.follow_bottom);
+    }
+
+    #[test]
+    fn missing_boundary_falls_back_to_latest_turn_or_last_assistant_without_a_user() {
+        let messages = assistant_turn_messages();
+        let missing = UnreadBoundary {
+            last_read_assistant_id: Some("truncated".into()),
+            last_read_ms: 100,
+            ..Default::default()
+        };
+        assert_eq!(
+            find_first_unread_message_idx(&messages, Some(&missing), true),
+            Some(3)
+        );
+        let assistants: Vec<_> = messages
+            .into_iter()
+            .filter(|msg| msg.role == MessageRole::Assistant)
+            .collect();
+        assert_eq!(
+            find_first_unread_message_idx(&assistants, None, true),
+            Some(2)
+        );
+        assert_eq!(
+            find_first_unread_message_idx(&assistants, None, false),
+            None
+        );
+        assert_eq!(find_first_unread_message_idx(&[], None, true), None);
+        let users = vec![ChatMessage {
+            role: MessageRole::User,
+            ..Default::default()
+        }];
+        assert_eq!(find_first_unread_message_idx(&users, None, true), None);
     }
 
     #[test]
@@ -224,13 +340,15 @@ mod tests {
             ..Default::default()
         };
         let mut scroll = ChatScrollTracker::default();
-        scroll.open_visit(Some(boundary));
+        scroll.open_visit(UnreadVisit::Unread {
+            previous_boundary: Some(boundary),
+        });
         scroll.history_loaded(&messages, true);
         assert_eq!(scroll.pending_scroll, PendingScrollTarget::UnreadDivider(2));
         assert!(!scroll.follow_bottom);
-        assert!(scroll.visit_unread_boundary.is_some());
+        assert!(matches!(scroll.unread_visit, UnreadVisit::Unread { .. }));
         scroll.history_loaded(&messages, false);
-        assert!(scroll.visit_unread_boundary.is_none());
+        assert_eq!(scroll.unread_visit, UnreadVisit::Read);
         scroll.pending_scroll = PendingScrollTarget::None;
         scroll.history_loaded(&messages, false);
         assert_eq!(scroll.pending_scroll, PendingScrollTarget::None);
@@ -241,7 +359,7 @@ mod tests {
             manual_unread: None,
         };
         assert_eq!(
-            find_first_unread_message_idx(&messages, &boundary, true),
+            find_first_unread_message_idx(&messages, Some(&boundary), true),
             Some(2)
         );
         let boundary = UnreadBoundary {
@@ -249,14 +367,17 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            find_first_unread_message_idx(&messages, &boundary, false),
+            find_first_unread_message_idx(&messages, Some(&boundary), false),
             Some(0)
         );
-        assert_eq!(find_first_unread_message_idx(&[], &boundary, true), None);
+        assert_eq!(
+            find_first_unread_message_idx(&[], Some(&boundary), true),
+            None
+        );
     }
 
     #[test]
-    fn boundary_at_end_or_without_new_timestamp_has_no_divider() {
+    fn boundary_at_end_is_read_but_unmatched_timestamp_falls_back_to_latest_assistant() {
         let messages = messages();
         let boundary = UnreadBoundary {
             last_read_assistant_id: Some("m3".into()),
@@ -264,7 +385,7 @@ mod tests {
             manual_unread: None,
         };
         assert_eq!(
-            find_first_unread_message_idx(&messages, &boundary, true),
+            find_first_unread_message_idx(&messages, Some(&boundary), true),
             None
         );
         let manual = UnreadBoundary {
@@ -272,7 +393,7 @@ mod tests {
             ..boundary.clone()
         };
         assert_eq!(
-            find_first_unread_message_idx(&messages, &manual, true),
+            find_first_unread_message_idx(&messages, Some(&manual), true),
             Some(0)
         );
         let boundary = UnreadBoundary {
@@ -280,8 +401,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            find_first_unread_message_idx(&messages, &boundary, true),
-            None
+            find_first_unread_message_idx(&messages, Some(&boundary), true),
+            Some(3)
         );
         let messages = vec![ChatMessage {
             timestamp_ms: Some(200),
@@ -292,8 +413,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            find_first_unread_message_idx(&messages, &boundary, true),
-            None
+            find_first_unread_message_idx(&messages, Some(&boundary), true),
+            Some(0)
         );
     }
 
@@ -318,16 +439,18 @@ mod tests {
     #[test]
     fn send_jump_and_switch_reset_scroll_state() {
         let mut scroll = ChatScrollTracker::default();
-        scroll.open_visit(Some(UnreadBoundary {
-            manual_unread: Some(true),
-            ..Default::default()
-        }));
+        scroll.open_visit(UnreadVisit::Unread {
+            previous_boundary: Some(UnreadBoundary {
+                manual_unread: Some(true),
+                ..Default::default()
+            }),
+        });
         scroll.history_loaded(&messages(), true);
         scroll.sync_position(200.0);
         scroll.appended(3);
         scroll.sent_message();
         assert_eq!(scroll.unread_divider_msg_idx, None);
-        assert_eq!(scroll.visit_unread_boundary, None);
+        assert_eq!(scroll.unread_visit, UnreadVisit::Read);
         assert_eq!(scroll.pending_scroll, PendingScrollTarget::Bottom);
         assert!(scroll.follow_bottom);
         assert!(!scroll.scrolled_up);
@@ -339,19 +462,37 @@ mod tests {
         assert_eq!(scroll.new_messages_while_scrolled_up, 0);
         scroll.sync_position(200.0);
         scroll.appended(2);
-        scroll.open_visit(None);
+        scroll.open_visit(UnreadVisit::Read);
         assert!(scroll.follow_bottom);
         assert!(!scroll.scrolled_up);
         assert_eq!(scroll.new_messages_while_scrolled_up, 0);
     }
 
     #[test]
+    fn jump_to_bottom_overrides_unread_scroll_before_fresh_history_arrives() {
+        let mut scroll = ChatScrollTracker::default();
+        let messages = assistant_turn_messages();
+        scroll.open_visit(UnreadVisit::Unread {
+            previous_boundary: None,
+        });
+        scroll.history_loaded(&messages, true);
+        scroll.jump_to_bottom();
+        scroll.history_loaded(&messages, false);
+        assert_eq!(scroll.pending_scroll, PendingScrollTarget::Bottom);
+        assert_eq!(scroll.unread_divider_msg_idx, Some(3));
+        assert_eq!(scroll.unread_visit, UnreadVisit::Read);
+        assert!(scroll.follow_bottom);
+    }
+
+    #[test]
     fn prepending_keeps_the_unread_cutoff_on_the_same_message() {
         let mut scroll = ChatScrollTracker::default();
-        scroll.open_visit(Some(UnreadBoundary {
-            last_read_assistant_id: Some("m1".into()),
-            ..Default::default()
-        }));
+        scroll.open_visit(UnreadVisit::Unread {
+            previous_boundary: Some(UnreadBoundary {
+                last_read_assistant_id: Some("m1".into()),
+                ..Default::default()
+            }),
+        });
         scroll.history_loaded(&messages(), false);
         scroll.prepended(10);
         assert_eq!(scroll.unread_divider_msg_idx, Some(12));

@@ -11,6 +11,7 @@ use gpui_kit::{
     px, rgb,
 };
 use multibot_core::SidebarMode;
+use multibot_core::chat_scroll::UnreadVisit;
 use multibot_core::workspaces::{
     ALL_WORKSPACES_ID, MAX_SESSION_TITLE_CHARS, ReorderDirection, STARRED_WORKSPACE_ID,
     SessionInput, SidebarRow, WorkspaceStore, WorkspaceView, canonical_session_key, now_unix_ms,
@@ -395,14 +396,16 @@ impl MultibotView {
             .sidebar_state
             .workspace_store
             .is_session_unread(&next_key, &session);
-        let boundary = if was_unread {
-            self.sidebar_state
-                .workspace_store
-                .unread_boundaries
-                .get(&next_key)
-                .cloned()
+        let unread_visit = if was_unread {
+            UnreadVisit::Unread {
+                previous_boundary: self.sidebar_state
+                    .workspace_store
+                    .unread_boundaries
+                    .get(&next_key)
+                    .cloned(),
+            }
         } else {
-            None
+            UnreadVisit::Read
         };
         let now = now_unix_ms();
         self.sidebar_state
@@ -422,7 +425,7 @@ impl MultibotView {
         self.persist_workspace_store_if_enabled();
         self.sync_workspace_to_shared(cx);
         self.select_session_on_host(host, session, cx);
-        self.chat_state.scroll.open_visit(boundary);
+        self.chat_state.scroll.open_visit(unread_visit);
         if !self.messages.is_empty() {
             self.chat_state.scroll.history_loaded(&self.messages, true);
         }
