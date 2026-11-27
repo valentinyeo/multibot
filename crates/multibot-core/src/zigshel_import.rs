@@ -37,11 +37,26 @@ pub struct ImportedFavorite {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImportedSession {
+    pub session_key: String,
+    pub title: Option<String>,
+    pub workspace_id: Option<String>,
+    pub favorite: bool,
+    pub pinned: bool,
+    pub starred_pinned: bool,
+    pub muted: bool,
+    pub inbox_excluded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ZigShellImportBundle {
     pub hosts: Vec<SshHostConfig>,
     pub workspaces: Vec<ImportedWorkspace>,
     pub favorites: Vec<ImportedFavorite>,
     pub favorite_keys: Vec<String>,
+    #[serde(default)]
+    pub sessions: Vec<ImportedSession>,
     pub source_files_read: Vec<PathBuf>,
 }
 
@@ -49,6 +64,7 @@ pub struct ZigShellImportBundle {
 pub struct ImportMergeStats {
     pub workspaces_added: usize,
     pub favorites_added: usize,
+    pub sessions_assigned: usize,
 }
 
 /// Returns the legacy `%APPDATA%\ZigShell` directory (read-only source).
@@ -64,7 +80,7 @@ pub fn import_ssh_hosts_readonly(zigshel_dir: Option<&Path>) -> Vec<SshHostConfi
     import_zigshel_bundle_readonly(zigshel_dir).hosts
 }
 
-/// Strictly read-only import of legacy ZigShell hosts, workspaces, and favorites.
+/// Strictly read-only import of legacy ZigShell hosts, workspaces, sessions, and favorites.
 /// Never modifies, creates, or deletes any files inside the legacy directory.
 pub fn import_zigshel_bundle_readonly(zigshel_dir: Option<&Path>) -> ZigShellImportBundle {
     let dir = zigshel_dir
@@ -273,15 +289,12 @@ pub fn import_zigshel_bundle_from_dir(dir: &Path) -> ZigShellImportBundle {
             }
         }
 
-        // Top-level-only `tabs` favorite extraction (NEVER recurse into tab["extra"] or root["unknown"])
+        // Top-level-only tabs (NEVER recurse into tab["extra"] or root["unknown"])
         if let Some(tabs_arr) = root.get("tabs").and_then(Value::as_array) {
             for tab in tabs_arr {
                 let Some(obj) = tab.as_object() else {
                     continue;
                 };
-                if obj.get("favorite") != Some(&Value::Bool(true)) {
-                    continue;
-                }
                 let Some(sid) = ["csid", "session_id", "tmux_identity", "tmux_session", "name"]
                     .iter()
                     .find_map(|field| {
@@ -313,12 +326,25 @@ pub fn import_zigshel_bundle_from_dir(dir: &Path) -> ZigShellImportBundle {
                             .map(str::trim)
                             .filter(|s| !s.is_empty())
                             .map(str::to_string)
+                    })
+                    .or_else(|| file_ws_slots.first().cloned());
+                let favorite = obj.get("favorite") == Some(&Value::Bool(true));
+                if favorite {
+                    favorites.push(ImportedFavorite {
+                        session_key: key.clone(),
+                        title: title.clone(),
+                        workspace_id: workspace_id.clone(),
                     });
-
-                favorites.push(ImportedFavorite {
+                }
+                bundle.sessions.push(ImportedSession {
                     session_key: key,
                     title,
                     workspace_id,
+                    favorite,
+                    pinned: obj.get("pinned_top") == Some(&Value::Bool(true)),
+                    starred_pinned: obj.get("starred_pinned_top") == Some(&Value::Bool(true)),
+                    muted: obj.get("muted") == Some(&Value::Bool(true)),
+                    inbox_excluded: obj.get("inbox_excluded") == Some(&Value::Bool(true)),
                 });
             }
         }
@@ -369,15 +395,25 @@ pub fn merge_zigshel_bundle(
     let mut stats = ImportMergeStats::default();
     store.ensure_default_workspace();
 
+    let mut ws_id_remap: HashMap<String, String> = HashMap::new();
     for ws in &bundle.workspaces {
         if ws.id == STARRED_WORKSPACE_ID {
             continue;
         }
-        let exists = store.workspaces.iter().any(|existing| {
-            existing.id.eq_ignore_ascii_case(&ws.id)
-                || existing.name.eq_ignore_ascii_case(&ws.name)
-        });
-        if !exists {
+        let existing = store
+            .workspaces
+            .iter()
+            .find(|existing| existing.id.eq_ignore_ascii_case(&ws.id))
+            .or_else(|| {
+                store
+                    .workspaces
+                    .iter()
+                    .find(|existing| existing.name.eq_ignore_ascii_case(&ws.name))
+            });
+        if let Some(existing) = existing {
+            ws_id_remap.insert(ws.id.clone(), existing.id.clone());
+        } else {
+            ws_id_remap.insert(ws.id.clone(), ws.id.clone());
             let pos = store.workspaces.len();
             store.workspaces.push(Workspace {
                 id: ws.id.clone(),
@@ -393,20 +429,42 @@ pub fn merge_zigshel_bundle(
         }
     }
 
-    for fav in &bundle.favorites {
-        if store.favorites.insert(fav.session_key.clone()) {
+    let sessions = bundle.sessions.iter().cloned().chain(
+        bundle.favorites.iter().map(|fav| ImportedSession {
+            session_key: fav.session_key.clone(),
+            title: fav.title.clone(),
+            workspace_id: fav.workspace_id.clone(),
+            favorite: true,
+            ..Default::default()
+        }),
+    );
+    for session in sessions {
+        if session.favorite && store.favorites.insert(session.session_key.clone()) {
             stats.favorites_added += 1;
         }
-        if let Some(ref ws_id) = fav.workspace_id
-            && store.workspaces.iter().any(|w| w.id == *ws_id)
+        let meta = store
+            .session_meta
+            .entry(session.session_key.clone())
+            .or_default();
+        if meta.workspace_id.is_none()
+            && let Some(ws_id) = session.workspace_id.as_ref()
         {
-            let meta = store
-                .session_meta
-                .entry(fav.session_key.clone())
-                .or_default();
-            if meta.workspace_id.is_none() {
-                meta.workspace_id = Some(ws_id.clone());
+            let mapped = ws_id_remap.get(ws_id).unwrap_or(ws_id);
+            if let Some(ws) = store.workspaces.iter().find(|w| w.id == *mapped) {
+                meta.workspace_id = Some(ws.id.clone());
+                stats.sessions_assigned += 1;
             }
+        }
+        meta.pinned |= session.pinned;
+        meta.starred_pinned |= session.starred_pinned;
+        meta.muted |= session.muted;
+        if session.inbox_excluded {
+            store.inbox_excluded.insert(session.session_key.clone());
+        }
+        if !store.session_titles.contains_key(&session.session_key)
+            && let Some(title) = session.title.as_deref()
+        {
+            let _ = store.apply_session_rename(&session.session_key, title);
         }
     }
 
@@ -464,7 +522,16 @@ fn parse_servers_txt(
             name_col
         };
 
-        slot_map.insert(slot_idx, name.to_string());
+        let canonical_name = out
+            .iter()
+            .find(|existing| {
+                existing.hostname.eq_ignore_ascii_case(hostname)
+                    && existing.user.eq_ignore_ascii_case(user)
+                    && existing.port == port
+            })
+            .map(|existing| existing.name.as_str())
+            .unwrap_or(name);
+        slot_map.insert(slot_idx, canonical_name.to_string());
         out.push(SshHostConfig {
             name: name.to_string(),
             hostname: hostname.to_string(),
@@ -747,7 +814,15 @@ fn derive_tab_host(
             return format!("vps{idx}");
         }
     }
-    "local".to_string()
+    let slot = match obj.get("kind").and_then(Value::as_str) {
+        Some("tmux" | "vps") => 0,
+        Some("vps2") => 1,
+        _ => return "local".to_string(),
+    };
+    slot_map
+        .get(&slot)
+        .cloned()
+        .unwrap_or_else(|| format!("vps{slot}"))
 }
 
 fn derive_tab_agent(obj: &serde_json::Map<String, Value>) -> String {
@@ -759,13 +834,19 @@ fn derive_tab_agent(obj: &serde_json::Map<String, Value>) -> String {
     {
         return a.to_string();
     }
-    if obj.get("claude_session") == Some(&Value::Bool(true))
-        || obj
-            .get("csid")
-            .and_then(Value::as_str)
-            .is_some_and(|s| !s.trim().is_empty())
+    if let Some(agent) = obj
+        .get("ai_agent")
+        .and_then(Value::as_u64)
+        .filter(|a| *a != 0)
     {
-        return "claude".to_string();
+        return match agent {
+            1 => "claude",
+            2 => "codex",
+            3 => "pi",
+            7 => "antigravity",
+            _ => "claude",
+        }
+        .to_string();
     }
     if let Some(tmux) = obj.get("tmux_session").and_then(Value::as_str) {
         let low = tmux.to_ascii_lowercase();
@@ -919,6 +1000,252 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn imported_vps_sessions_appear_in_exact_workspaces_and_favorites() {
+        use crate::workspaces::{
+            DEFAULT_WORKSPACE_ID, SessionInput, WorkspaceView, canonical_session_key,
+        };
+        use multibot_proto::{AgentKind, SessionSummary};
+
+        let dir = unique_dir("session-assignment");
+        std::fs::create_dir_all(dir.join("ssh-key")).unwrap();
+        let servers = "v1\nconnected\t1\t22\t1000\tvps.example.com\tubuntu\tVPS Hetzner\t\n";
+        let session_json = r#"{
+            "workspaces": [
+                {"name":"General", "wid":"legacy-general"},
+                {"name":"Vstack", "wid":"legacy-vstack"},
+                {"name":"HT Product", "wid":"ht-product"},
+                {"name":"Multiprompt", "wid":"multiprompt"}
+            ],
+            "tabs": [
+                {"kind":"tmux", "ai_agent":1, "csid":"general-session"},
+                {"kind":"vps", "ai_agent":2, "csid":"codex-uuid", "workspace":1,
+                 "name":"Ship Vstack", "manual":true, "pinned_top":true,
+                 "muted":true, "inbox_excluded":true},
+                {"kind":"tmux", "ai_agent":1, "csid":"product-session", "workspace":2,
+                 "favorite":true, "starred_pinned_top":true},
+                {"kind":"tmux", "ai_agent":7, "csid":"agy-session", "workspace":3,
+                 "extra":{"kind":"tmux", "csid":"nested-decoy", "favorite":true}}
+            ],
+            "unknown":{"tabs":[{"csid":"root-decoy", "favorite":true}]}
+        }"#;
+        std::fs::write(dir.join("ssh-key/servers.txt"), servers).unwrap();
+        std::fs::write(dir.join("session.json"), session_json).unwrap();
+
+        let bundle = import_zigshel_bundle_from_dir(&dir);
+        let mut store = WorkspaceStore::new();
+        let vstack = store.create_workspace("vSTACK", None).unwrap();
+        let stats = merge_zigshel_bundle(&mut store, &bundle);
+        assert_eq!(stats.sessions_assigned, 4);
+        assert_eq!(stats.favorites_added, 1);
+        let state_dir = unique_dir("imported-state");
+        let state_path = state_dir.join("workspaces.json");
+        store.save_to(&state_path).unwrap();
+        let store = WorkspaceStore::load_from(&state_path).unwrap();
+        let summaries: Vec<_> = [
+            ("general-session", AgentKind::Claude),
+            ("codex-uuid", AgentKind::Codex),
+            ("product-session", AgentKind::Claude),
+            ("agy-session", AgentKind::Antigravity),
+        ]
+        .into_iter()
+        .map(|(id, agent)| SessionSummary {
+            id: id.into(),
+            agent,
+            title: "Discovered title".into(),
+            ..Default::default()
+        })
+        .collect();
+        let inputs: Vec<_> = summaries
+            .iter()
+            .map(|summary| SessionInput {
+                key: canonical_session_key("VPS Hetzner", summary.agent, &summary.id),
+                host: "VPS Hetzner",
+                summary,
+            })
+            .collect();
+        for (workspace, expected) in [
+            (DEFAULT_WORKSPACE_ID, &inputs[0].key),
+            (vstack.id.as_str(), &inputs[1].key),
+            ("ht-product", &inputs[2].key),
+            ("multiprompt", &inputs[3].key),
+            (STARRED_WORKSPACE_ID, &inputs[2].key),
+        ] {
+            let layout = store.compute_sidebar_layout_with_options(
+                workspace, WorkspaceView::All, &inputs, false, None, 1000,
+            );
+            assert_eq!(layout.flat_display_order, vec![expected.clone()], "{workspace}");
+        }
+        assert_eq!(store.session_meta.len(), 4);
+        let codex = &store.session_meta[&inputs[1].key];
+        assert!(codex.pinned && codex.muted);
+        assert!(store.inbox_excluded.contains(&inputs[1].key));
+        assert_eq!(store.effective_title(&inputs[1].key, "fallback"), "Ship Vstack");
+        assert!(store.session_meta[&inputs[2].key].starred_pinned);
+        assert_eq!(std::fs::read_to_string(dir.join("session.json")).unwrap(), session_json);
+        assert_eq!(std::fs::read_to_string(dir.join("ssh-key/servers.txt")).unwrap(), servers);
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(state_dir).unwrap();
+    }
+
+    #[test]
+    fn imports_host_slots_using_deduplicated_names_and_kind_defaults() {
+        let dir = unique_dir("host-slots");
+        std::fs::create_dir_all(dir.join("ssh-key")).unwrap();
+        std::fs::write(
+            dir.join("ssh-key/servers.txt"),
+            concat!(
+                "v1\n",
+                "connected\t1\t22\t1000\tvps.example.com\tubuntu\tVPS Hetzner\t\n",
+                "connected\t1\t22\t1000\tVPS.EXAMPLE.COM\tUbuntu\tDuplicate Alias\t\n",
+            ),
+        ).unwrap();
+        std::fs::write(dir.join("session.json"), r#"{"tabs":[
+            {"kind":"tmux", "csid":"zero"},
+            {"kind":"vps", "csid":"vps-zero"},
+            {"kind":"vps2", "csid":"one"},
+            {"tmux_host":1, "csid":"explicit-one"},
+            {"host":"Explicit Host", "tmux_host":1, "csid":"explicit-host"},
+            {"tmux_host":"Named Host", "csid":"named-host"},
+            {"kind":"local", "csid":"local"}
+        ]}"#).unwrap();
+        let bundle = import_zigshel_bundle_from_dir(&dir);
+        assert_eq!(bundle.hosts.len(), 1);
+        assert_eq!(bundle.hosts[0].name, "VPS Hetzner");
+        let keys: Vec<_> = bundle.sessions.iter().map(|s| s.session_key.as_str()).collect();
+        assert_eq!(keys, vec![
+            "vps hetzner:claude:zero", "vps hetzner:claude:vps-zero",
+            "vps hetzner:claude:one", "vps hetzner:claude:explicit-one",
+            "explicit host:claude:explicit-host", "named host:claude:named-host",
+            "local:claude:local",
+        ]);
+        std::fs::remove_file(dir.join("ssh-key/servers.txt")).unwrap();
+        let fallback = import_zigshel_bundle_from_dir(&dir);
+        assert_eq!(fallback.sessions[0].session_key, "vps0:claude:zero");
+        assert_eq!(fallback.sessions[1].session_key, "vps0:claude:vps-zero");
+        assert_eq!(fallback.sessions[2].session_key, "vps1:claude:one");
+        assert_eq!(fallback.sessions[3].session_key, "vps1:claude:explicit-one");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn imports_agent_discriminants_before_session_name_heuristics() {
+        let dir = unique_dir("agent-discriminants");
+        std::fs::write(dir.join("session.json"), r#"{"tabs":[
+            {"agent":"codex", "ai_agent":1, "csid":"explicit"},
+            {"ai_agent":1, "tmux_session":"codex-misleading", "csid":"claude"},
+            {"ai_agent":2, "claude_session":true, "csid":"codex"},
+            {"ai_agent":3, "csid":"pi"},
+            {"ai_agent":7, "csid":"antigravity"},
+            {"ai_agent":0, "tmux_session":"codex-old", "csid":"codex-old"},
+            {"tmux_session":"antigravity-old", "csid":"agy-old"},
+            {"tmux_session":"agy-short", "csid":"agy-short"},
+            {"claude_session":true, "csid":"claude-old"},
+            {"csid":"csid-only"},
+            {"ai_agent":99, "tmux_session":"codex-unknown", "csid":"unknown"}
+        ]}"#).unwrap();
+        let bundle = import_zigshel_bundle_from_dir(&dir);
+        let keys: Vec<_> = bundle.sessions.iter().map(|s| s.session_key.as_str()).collect();
+        assert_eq!(keys, vec![
+            "local:codex:explicit", "local:claude:claude", "local:codex:codex",
+            "local:pi:pi", "local:antigravity:antigravity", "local:codex:codex-old",
+            "local:antigravity:agy-old", "local:antigravity:agy-short",
+            "local:claude:claude-old", "local:claude:csid-only", "local:claude:unknown",
+        ]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn imports_workspace_precedence_and_preserves_existing_choices_on_reimport() {
+        let dir = unique_dir("workspace-precedence");
+        std::fs::write(dir.join("session.json"), r#"{
+            "workspaces":[{"wid":"legacy-general", "name":"GENERAL"},
+                          {"wid":"WORK", "name":"Legacy Work"}],
+            "tabs":[
+                {"csid":"omitted", "name":"  My title  "},
+                {"csid":"index", "workspace":1, "workspace_id":"legacy-general",
+                 "favorite":true, "pinned_top":true, "starred_pinned_top":true,
+                 "muted":true, "inbox_excluded":true},
+                {"csid":"id", "workspace_id":"WORK", "name":"Old title"},
+                {"csid":"fallback", "workspace":99},
+                {"csid":"invalid", "workspace_id":"missing"}
+            ]
+        }"#).unwrap();
+        let bundle = import_zigshel_bundle_from_dir(&dir);
+        assert_eq!(bundle.sessions[0].workspace_id.as_deref(), Some("legacy-general"));
+        assert_eq!(bundle.sessions[1].workspace_id.as_deref(), Some("WORK"));
+        assert_eq!(bundle.sessions[2].workspace_id.as_deref(), Some("WORK"));
+        assert_eq!(bundle.sessions[3].workspace_id.as_deref(), Some("legacy-general"));
+        assert_eq!(bundle.favorite_keys, vec!["local:claude:index"]);
+        let mut store = WorkspaceStore::new();
+        store.create_workspace("Work", None).unwrap();
+        store.assign_session_workspace("local:claude:id", "general");
+        store.apply_session_rename("local:claude:id", "Keep my title").unwrap();
+        let first = merge_zigshel_bundle(&mut store, &bundle);
+        assert_eq!(first, ImportMergeStats {
+            workspaces_added: 0, favorites_added: 1, sessions_assigned: 3,
+        });
+        assert_eq!(store.session_meta["local:claude:index"].workspace_id.as_deref(), Some("work"));
+        assert_eq!(store.session_meta["local:claude:id"].workspace_id.as_deref(), Some("general"));
+        assert!(store.session_meta["local:claude:invalid"].workspace_id.is_none());
+        assert_eq!(store.effective_title("local:claude:omitted", "fallback"), "My title");
+        assert_eq!(store.effective_title("local:claude:id", "fallback"), "Keep my title");
+        assert!(store.session_titles["local:claude:omitted"].manual);
+        let before = store.clone();
+        assert_eq!(merge_zigshel_bundle(&mut store, &bundle), ImportMergeStats::default());
+        assert_eq!(store, before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn merges_older_favorite_bundles_with_workspace_name_remapping() {
+        let mut store = WorkspaceStore::new();
+        let bundle = ZigShellImportBundle {
+            workspaces: vec![ImportedWorkspace {
+                id: "legacy-general".into(),
+                name: "GENERAL".into(),
+                ..Default::default()
+            }],
+            favorites: vec![ImportedFavorite {
+                session_key: "vps hetzner:codex:rollout".into(),
+                title: Some("Favorite title".into()),
+                workspace_id: Some("legacy-general".into()),
+            }],
+            ..Default::default()
+        };
+        let stats = merge_zigshel_bundle(&mut store, &bundle);
+        assert_eq!(stats.workspaces_added, 0);
+        assert_eq!(stats.favorites_added, 1);
+        assert_eq!(stats.sessions_assigned, 1);
+        assert_eq!(store.session_meta["vps hetzner:codex:rollout"].workspace_id.as_deref(), Some("general"));
+        assert_eq!(store.effective_title("vps hetzner:codex:rollout", "fallback"), "Favorite title");
+        assert_eq!(merge_zigshel_bundle(&mut store, &bundle), ImportMergeStats::default());
+    }
+
+    #[test]
+    fn imports_sessions_without_workspaces_and_deserializes_older_bundles() {
+        let dir = unique_dir("sessions-only");
+        std::fs::write(dir.join("session.json"), r#"{"tabs":[
+            {"csid":"ordinary", "name":"Named session", "favorite":false},
+            {"csid":"untitled", "name":"   "},
+            null, {"favorite":true}
+        ]}"#).unwrap();
+        let bundle = import_zigshel_bundle_from_dir(&dir);
+        assert_eq!(bundle.sessions.len(), 2);
+        assert!(bundle.sessions[0].workspace_id.is_none());
+        assert!(bundle.sessions[1].title.is_none());
+        assert!(bundle.favorites.is_empty());
+        let mut store = WorkspaceStore::new();
+        assert_eq!(merge_zigshel_bundle(&mut store, &bundle), ImportMergeStats::default());
+        assert_eq!(store.session_meta.len(), 2);
+        assert_eq!(store.effective_title("local:claude:ordinary", "fallback"), "Named session");
+        let old: ZigShellImportBundle = serde_json::from_str(r#"{
+            "hosts":[], "workspaces":[], "favorites":[], "favorite_keys":[], "source_files_read":[]
+        }"#).unwrap();
+        assert!(old.sessions.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1179,6 +1506,7 @@ mod tests {
                 workspace_id: Some("imported-a".into()),
             }],
             favorite_keys: vec!["prod:claude:s1".into()],
+            sessions: Vec::new(),
             source_files_read: Vec::new(),
         };
 

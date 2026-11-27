@@ -111,13 +111,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run full workspace tests (including headless GPUI Kit UI tests)
-        run: cargo test --workspace
-
-      - name: Build release multibotd (Linux x86_64)
+      - name: Verify invariants, workspace tests, and release multibotd
         env:
           MULTIBOT_BUILD_VERSION: ${{ needs.prepare.outputs.version }}
-        run: cargo build --release -p multibotd
+        run: ./scripts/verify.sh
 
       - name: Stage and verify multibotd binary
         env:

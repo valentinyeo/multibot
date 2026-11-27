@@ -33,6 +33,9 @@ use multibot_core::settings::{MAX_CHAT_FONT_SIZE_PT, MIN_CHAT_FONT_SIZE_PT};
 use multibot_core::workspaces::{
     ReorderDirection, WorkspaceView, canonical_session_key, now_unix_ms,
 };
+use multibot_core::zigshel_import::{
+    import_zigshel_bundle_readonly, legacy_zigshel_dir, merge_zigshel_bundle,
+};
 use multibot_core::{
     DaemonConnection, DaemonTarget, FootprintSnapshot, MultibotSettings, SidebarMode,
     sample_self_footprint,
@@ -389,6 +392,20 @@ impl MultibotView {
             revision,
         ) = {
             let store = cx.global_mut::<SharedAppStore>();
+            if store.persist_to_disk
+                && store.window_count == 0
+                && store.workspace_store.session_meta.is_empty()
+                && legacy_zigshel_dir().exists()
+            {
+                let bundle = import_zigshel_bundle_readonly(None);
+                let stats = merge_zigshel_bundle(&mut store.workspace_store, &bundle);
+                if stats.sessions_assigned > 0
+                    || stats.favorites_added > 0
+                    || stats.workspaces_added > 0
+                {
+                    let _ = store.workspace_store.save();
+                }
+            }
             store.window_count = store.window_count.saturating_add(1);
             (
                 store.settings.clone(),
@@ -5337,7 +5354,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             root.join("session.json"),
-            r#"{"workspaces":[{"id":"work","name":"Work"}],"favorites":["vps1:claude:s1"]}"#,
+            r#"{"workspaces":[{"id":"work","name":"Work"}],"tabs":[{"host":"vps1","csid":"s1","favorite":true},{"host":"vps1","csid":"s2","name":"Ordinary session"}]}"#,
         )
         .unwrap();
 
@@ -5369,6 +5386,15 @@ mod tests {
                 v.sidebar_state
                     .workspace_store
                     .is_favorite("vps1:claude:s1")
+            );
+            assert_eq!(
+                v.sidebar_state.workspace_store.session_meta["vps1:claude:s2"]
+                    .workspace_id.as_deref(),
+                Some("work")
+            );
+            assert_eq!(
+                v.notice.as_deref(),
+                Some("Imported 1 host(s), 1 workspace(s), 2 session assignment(s), and 1 favorite(s) from ZigShell (read-only).")
             );
         })
         .unwrap();
