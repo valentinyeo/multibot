@@ -24,6 +24,29 @@ Run `./scripts/verify.sh` from the repository root after changes. For full 4-tie
 | `.github/workflows/ci.yml`, `Cargo.toml`, `scripts/verify.sh`, `skills/verify-multibot/SKILL.md` | `./scripts/verify.sh` (`cargo test --workspace`, release `multibotd` build + CLI/stdio check, Hard Invariant #1 `cargo tree` & symbol scan). |
 | `e2e/**`, `TEST_INFRA.md`, `TEST_READY.md` | `./e2e/run_e2e.sh --tier all --no-build` (86 opaque-box tests across Tiers 1–4 covering all 4 Hard Invariants and 38 features; use `--baseline-only` for fast 17-test baseline check). |
 
+## Automated Windows UI evidence
+
+`.github/workflows/verify-windows-ui.yml` runs the real `multibot.exe` on GitHub-hosted `windows-latest` for desktop, keyboard, GPU, and verifier changes. It builds the selected ref by default. Once this workflow is on `main`, dispatch it with:
+
+```bash
+gh workflow run verify-windows-ui.yml
+gh workflow run verify-windows-ui.yml -f release_tag=v0.1.N
+gh run list --workflow verify-windows-ui.yml
+gh run view <run-id> --log-failed
+gh run download <run-id> -n windows-ui-evidence -D evidence
+```
+
+The `windows-ui-evidence` artifact expires after seven days. It contains `doctor.json` (owned PID/window, binary SHA-256, RAM, default GPU report), `result.json` (step timings, pixel differences, failures, stderr), real window PNGs, and `profile/` logs/settings. The Job Summary shows Doctor, RAM, and each journey's status.
+
+`scripts/verify-windows-ui.ps1` checks launch, `Ctrl+K`, `Ctrl+,`, `Alt+I`, `F1`, and `Esc`. Blank captures, missing visual changes, crashes, focus failures, and missing isolated GPU reports fail the run. A private kill-on-close Windows Job owns the suspended-before-launch process and its children. The script uses temporary `APPDATA`, `LOCALAPPDATA`, `USERPROFILE`, and `MULTIBOT_DATA_DIR`; it never kills processes by name or changes GPU policy. Windows known-folder lookup can ignore profile environment overrides, so `MultibotSettings::data_dir` honors the absolute `MULTIBOT_DATA_DIR` override. A Windows subprocess test covers that boundary. Older releases without this support are rejected **before launch** to protect real profile data; use a build of this ref or a newer release.
+
+| Area / Paths | Verification Journeys |
+| --- | --- |
+| `.github/workflows/verify-windows-ui.yml`, `scripts/verify-windows-ui.ps1`, this section | Windows UI workflow: real keyboard journeys, non-blank/different PNGs, Doctor/result JSON, artifact upload, and Job Summary. Locally parse workflow YAML and PowerShell AST; compile the embedded C# with `Add-Type`. |
+| `crates/multibot-core/src/settings.rs` Windows data-directory override | Windows `cargo test -p multibot-core settings::tests::windows_data_dir_honors_override -- --exact`, plus the launched app's GPU report under the isolated profile. |
+
+This is a smoke check, not proof of every screen's contents, idle CPU, or physical NVIDIA utilization. Inspect the GPU report for WARP selection on software-only runners; hardware utilization still requires the two-GPU laptop check.
+
 ## Hard Invariants (Never Regress)
 1. **0% NVIDIA GPU by default on Windows:** Never invoke `D3D11CreateDevice` on `VendorId == 0x10DE` unless explicitly overridden by LUID in settings; fall back to WARP software rendering if no non-NVIDIA hardware GPU succeeds; NEVER enable `gpui-kit`'s `gpui-fast` feature; NEVER export `NvOptimusEnablement` or `AmdPowerXpress`.
 2. **Parallel isolation:** Never write to `%APPDATA%\ZigShell`, legacy Multiprompt repos, or legacy VPS Python scripts; keep all desktop data under `%APPDATA%\Multibot` and VPS daemon data under `~/.multibot/`.

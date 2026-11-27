@@ -151,6 +151,13 @@ impl MultibotSettings {
     /// Returns `%APPDATA%\Multibot` on Windows or `~/.config/Multibot` on Linux/macOS.
     /// Completely isolated from legacy `%APPDATA%\ZigShell`.
     pub fn data_dir() -> PathBuf {
+        // Windows known-folder APIs can ignore process-local profile overrides.
+        #[cfg(target_os = "windows")]
+        if let Some(path) = std::env::var_os("MULTIBOT_DATA_DIR").map(PathBuf::from)
+            && path.is_absolute()
+        {
+            return path;
+        }
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Multibot")
@@ -233,6 +240,27 @@ impl MultibotSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_data_dir_honors_override() {
+        let path = std::env::temp_dir().join("multibot-isolated-profile-test");
+        if std::env::var_os("MULTIBOT_DATA_DIR_TEST_CHILD").is_some() {
+            assert_eq!(MultibotSettings::data_dir(), path);
+            return;
+        }
+        // A subprocess avoids changing the environment of parallel tests.
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "settings::tests::windows_data_dir_honors_override",
+            ])
+            .env("MULTIBOT_DATA_DIR", path)
+            .env("MULTIBOT_DATA_DIR_TEST_CHILD", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
 
     #[test]
     fn settings_roundtrip_and_default_is_auto_integrated() {
