@@ -445,6 +445,22 @@ impl MultibotView {
                 tab_context: false,
                 global: true,
             },
+            // Terminal (Slice 5)
+            PaletteCommandSpec {
+                id: "pal-cmd-toggle-terminal".into(),
+                label: "Toggle Terminal".into(),
+                chord: "Alt+C".into(),
+                category: PaletteCategory::SidebarAndTabs,
+                destructive: false,
+                aliases: vec![
+                    "terminal".into(),
+                    "shell".into(),
+                    "ssh".into(),
+                    "console".into(),
+                ],
+                tab_context: false,
+                global: true,
+            },
             // Browser (Phase 2 placeholders)
             PaletteCommandSpec {
                 id: "pal-cmd-browser-toggle".into(),
@@ -743,6 +759,10 @@ impl MultibotView {
                         if let Some(win) = window {
                             self.focus_inbox(win, cx);
                         }
+                    }
+                    "pal-cmd-toggle-terminal" => {
+                        self.toggle_terminal_pane(cx);
+                        return;
                     }
                     "pal-cmd-hosts" => {
                         self.settings_tab = crate::settings::SettingsTab::Hosts;

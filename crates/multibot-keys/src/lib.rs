@@ -465,8 +465,8 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         display: "Alt+C",
         gpui_key: "alt-c",
         category: ShortcutCategory::View,
-        description: "Toggle Chat View / built-in Terminal",
-        wired: false,
+        description: "Toggle the built-in Terminal panel",
+        wired: true,
     },
     ShortcutSpec {
         id: "view.fullscreen",
@@ -1213,7 +1213,6 @@ mod tests {
             "browser.address_bar",
             "browser.address_bar_alt",
             "browser.keep_awake",
-            "view.chat_terminal_toggle",
             "view.copy_console",
             "view.paste_shell",
             "view.status_cards",
@@ -1316,12 +1315,13 @@ mod tests {
             "chat.copy_code",
             "chat.find",
             "chat.commands",
+            "view.chat_terminal_toggle",
         ];
         for &id in wired_slice34_ids {
             let spec = by_id(id).unwrap_or_else(|| panic!("missing shortcut {id}"));
             assert!(spec.wired, "expected {id} ({}) to be wired: true", spec.gpui_key);
         }
-        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 58);
+        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 59);
         assert!(!by_id("browser.close_tab").unwrap().wired);
         assert!(!by_id("chat.steer").unwrap().wired);
         assert!(by_gpui_key("ctrl-shift-j").is_none());

@@ -9,6 +9,7 @@ use crate::state::{
     settings_visible_eq, update_footprint_if_changed,
 };
 use crate::table_modal::TableModalState;
+use crate::terminal_pane::TerminalPaneState;
 use crate::theme::{self, RADIUS_CHIP};
 use crate::update_ui::{UpdateUiAction, UpdateUiState};
 use gpui_kit::{
@@ -127,6 +128,8 @@ actions!(
         // Inbox split cycling (scoped to "Inbox" context)
         InboxNextSplit,
         InboxPrevSplit,
+        // Slice 5 — built-in native terminal pane (`Alt+C`)
+        ToggleTerminal,
     ]
 );
 
@@ -278,6 +281,7 @@ pub(crate) struct FocusLayoutSignature {
     message_count: usize,
     answered_question_count: usize,
     gpu_adapter_count: usize,
+    terminal_open: bool,
 }
 
 pub struct MultibotView {
@@ -301,6 +305,8 @@ pub struct MultibotView {
     pub(crate) update_ui: UpdateUiState,
     pub(crate) slash_picker_state: SlashPickerState,
     pub(crate) table_modal_state: TableModalState,
+    /// Built-in native GPU terminal pane (`Alt+C`). Owns no PTY while closed.
+    pub(crate) terminal: TerminalPaneState,
 
     // Daemon & chat state
     pub(crate) connected_host: Option<String>,
@@ -618,6 +624,7 @@ impl MultibotView {
             update_ui,
             slash_picker_state: SlashPickerState::default(),
             table_modal_state: TableModalState::default(),
+            terminal: TerminalPaneState::default(),
             connected_host,
             connection_status,
             daemon_tx,
@@ -1140,6 +1147,19 @@ impl MultibotView {
         if self.main_surface != next {
             self.sidebar_state.rename = None;
             self.sidebar_state.new_workspace_draft = None;
+            // Hard Invariant #4: the Inbox surface does not render the terminal pane, so
+            // its PTY, child process and reader thread must go with the unmount.
+            if next == MainSurface::Inbox && self.terminal.is_open() {
+                if let Some(session) = self.terminal.session.take() {
+                    session.request_reader_stop();
+                    drop(session);
+                }
+                self.terminal.screen = None;
+                self.terminal.error = None;
+                self.terminal.wake_task = None;
+                self.terminal.wake_tx = None;
+                self.terminal.wake_rx = None;
+            }
         }
         if next == MainSurface::Inbox {
             // Never open the Inbox on a split that is hidden because it holds 0 sessions
@@ -4807,6 +4827,7 @@ impl MultibotView {
             message_count: self.messages.len(),
             answered_question_count,
             gpu_adapter_count: self.gpu_report.discovered.len(),
+            terminal_open: self.terminal.is_open(),
         }
     }
 
@@ -4946,6 +4967,12 @@ impl MultibotView {
             || ((self.sidebar_state.mode != SidebarMode::Open || !self.sidebar_rendered())
                 && self
                     .sidebar_state
+                    .focus_handle
+                    .as_ref()
+                    .is_some_and(|fh| fh.is_focused(window)))
+            || (!self.terminal.is_open()
+                && self
+                    .terminal
                     .focus_handle
                     .as_ref()
                     .is_some_and(|fh| fh.is_focused(window)))
@@ -5099,6 +5126,22 @@ impl Render for MultibotView {
                 } else if this.sidebar_state.mode != SidebarMode::Open
                     && !this.is_focused_on_mounted_known_handle(window, cx)
                 {
+                    this.focus_active_surface_default(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
+                // Modals own the keyboard; the pane never opens over one.
+                if this.active_modal != ActiveModal::None || this.table_modal_state.is_open() {
+                    return;
+                }
+                // Alt+C always wins: it opens the pane, or closes it even while the grid
+                // has focus, dropping the PTY and its child process immediately.
+                this.toggle_terminal_pane(cx);
+                if this.terminal.is_open() {
+                    if let Some(focus_handle) = this.terminal.focus_handle.clone() {
+                        window.focus(&focus_handle, cx);
+                    }
+                } else {
                     this.focus_active_surface_default(window, cx);
                 }
             }))
@@ -6688,6 +6731,193 @@ mod tests {
             assert_eq!(options.model.as_deref(), Some("opus"));
             assert_eq!(options.effort, Some(multibot_proto::EffortLevel::High));
         }).unwrap();
+    }
+
+    // =====================================================================
+    // Slice 5 — built-in Alt+C terminal pane (lazy lifecycle + obsidian grid)
+    // =====================================================================
+
+    fn stub_terminal_command() -> crate::terminal_pane::TerminalCommand {
+        crate::terminal_pane::TerminalCommand {
+            program: if cfg!(windows) {
+                "cmd.exe".to_string()
+            } else {
+                "/bin/sh".to_string()
+            },
+            args: if cfg!(windows) {
+                vec!["/C".to_string(), "echo mbru-6-terminal-ready".to_string()]
+            } else {
+                vec!["-c".to_string(), "echo mbru-6-terminal-ready".to_string()]
+            },
+            cwd: None,
+        }
+    }
+
+    #[gpui_kit::test]
+    fn terminal_pane_stays_closed_and_spawns_no_process_until_alt_c(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            // Hard Invariant #4: closed pane owns no PTY, no child and no layout node.
+            assert_eq!(view.read(cx).terminal.live_process_count(), 0);
+            assert!(view.read(cx).terminal.session.is_none());
+            assert!(!view.read(cx).terminal.is_open());
+            assert!(window.try_find("terminal-pane").is_none());
+            assert!(window.try_find("terminal-grid").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn alt_c_opens_terminal_pane_and_renders_output_in_obsidian_theme(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let _guard = crate::terminal_pane::test_pty_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            view.update(cx, |v, _cx| {
+                v.terminal.command_override = Some(stub_terminal_command());
+            });
+
+            window.press("alt-c", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).terminal.live_process_count(), 1);
+            assert!(view.read(cx).terminal.is_open());
+            assert!(window.try_find("terminal-pane").is_some());
+            assert!(window.try_find("terminal-header").is_some());
+            assert!(window.try_find("terminal-grid").is_some());
+            for control in ["terminal-clear", "terminal-reconnect", "terminal-close"] {
+                assert!(window.try_find(control).is_some(), "missing {control}");
+            }
+            // The grid advertises its text, proving real PTY output reached the emulator.
+            let grid = window.find("terminal-grid");
+            let value = grid.value().unwrap_or_default().to_string();
+            assert!(
+                value.contains("mbru-6-terminal-ready"),
+                "terminal grid must render PTY output, got: {value:?}"
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn pressing_alt_c_again_closes_and_cleans_up_the_terminal_pane(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let _guard = crate::terminal_pane::test_pty_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            view.update(cx, |v, _cx| {
+                v.terminal.command_override = Some(stub_terminal_command());
+            });
+            window.press("alt-c", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).terminal.live_process_count(), 1);
+
+            window.press("alt-c", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).terminal.live_process_count(), 0);
+            assert!(view.read(cx).terminal.session.is_none());
+            assert!(view.read(cx).terminal.screen.is_none());
+            assert!(view.read(cx).terminal.wake_task.is_none());
+            assert!(window.try_find("terminal-pane").is_none());
+            assert!(window.try_find("terminal-grid").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn alt_c_closes_the_pane_even_while_the_grid_has_focus(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let _guard = crate::terminal_pane::test_pty_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            view.update(cx, |v, _cx| {
+                v.terminal.command_override = Some(stub_terminal_command());
+            });
+            window.press("alt-c", cx);
+            window.render_frame(cx);
+            let focus_handle = view.read(cx).terminal.focus_handle.clone();
+            let focus_handle = focus_handle.expect("terminal must own a focus handle");
+            window.focus(&focus_handle, cx);
+            window.render_frame(cx);
+            assert!(focus_handle.is_focused(window));
+            window.press("alt-c", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).terminal.live_process_count(), 0);
+            assert!(window.try_find("terminal-pane").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_k_palette_offers_toggle_terminal_with_alt_c(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let _guard = crate::terminal_pane::test_pty_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-k", cx);
+            window.render_frame(cx);
+
+            let catalog = view.read(cx).build_palette_command_catalog(now_unix_ms());
+            let entry = catalog
+                .iter()
+                .find(|c| c.id == "pal-cmd-toggle-terminal")
+                .expect("Ctrl+K must offer 'Toggle Terminal'");
+            assert_eq!(entry.label, "Toggle Terminal");
+            assert_eq!(entry.chord, "Alt+C");
+
+            // Running the palette row toggles exactly like the chord does.
+            view.update(cx, |v, _cx| {
+                v.terminal.command_override = Some(stub_terminal_command());
+            });
+            view.update(cx, |v, cx| {
+                v.execute_palette_row(
+                    PaletteRow::Command {
+                        id: "pal-cmd-toggle-terminal".into(),
+                        label: "Toggle Terminal".into(),
+                        chord: "Alt+C".into(),
+                        category: PaletteCategory::SidebarAndTabs,
+                        destructive: false,
+                        match_rank: 0,
+                        frecency: 0,
+                    },
+                    now_unix_ms(),
+                    Some(window),
+                    cx,
+                );
+            });
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).terminal.live_process_count(), 1);
+            assert!(window.try_find("terminal-pane").is_some());
+
+            // And closes it again through the same entry.
+            view.update(cx, |v, cx| {
+                v.execute_palette_row(
+                    PaletteRow::Command {
+                        id: "pal-cmd-toggle-terminal".into(),
+                        label: "Toggle Terminal".into(),
+                        chord: "Alt+C".into(),
+                        category: PaletteCategory::SidebarAndTabs,
+                        destructive: false,
+                        match_rank: 0,
+                        frecency: 0,
+                    },
+                    now_unix_ms(),
+                    Some(window),
+                    cx,
+                );
+            });
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).terminal.live_process_count(), 0);
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]

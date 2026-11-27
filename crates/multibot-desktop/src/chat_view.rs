@@ -4,7 +4,7 @@ use crate::state::{ActiveModal, SharedAppStore};
 use crate::table_modal::{TableSource, extract_tables_from_markdown};
 use crate::theme::{self, RADIUS_BUBBLE, RADIUS_CHIP, RADIUS_ROW};
 use gpui_kit::{
-    AnyElement, ClipboardEntry, ClipboardItem, Context, ExternalPaths, FocusHandle, Focusable,
+    AnyElement, ClipboardEntry, ClipboardItem, Context, ExternalPaths, FocusHandle,
     Hsla, InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, MouseButton,
     MouseDownEvent, MouseUpEvent, ParentElement, Role, ScrollHandle, SharedString,
     StatefulInteractiveElement, Styled, TestSupportExt, Window,
@@ -4141,7 +4141,7 @@ impl MultibotView {
         )
     }
 
-    pub(crate) fn render_chat_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_chat_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let header_title = match &self.selected_session {
             Some(s) => format!("{}  {}", s.agent.glyph(), s.title),
             None => "Multibot · Ready".to_string(),
@@ -4906,6 +4906,11 @@ impl MultibotView {
                 this.schedule_slash_picker_sync(window, cx);
             }))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                // The terminal grid owns printable keys, arrows and Ctrl+C/D/L/Z while the
+                // pane has focus. `Alt+C` never matches here: it closes the pane instead.
+                if this.handle_terminal_key_down(ev, window, cx) {
+                    return;
+                }
                 this.handle_chat_capture_key_down(ev, window, cx);
             }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
@@ -5134,6 +5139,9 @@ impl MultibotView {
                         ),
                 ),
             )
+            // Slice 5 — built-in terminal pane splits the chat column; the pane is mounted
+            // only while open, so a closed pane adds no layout node and no PTY.
+            .when_some(self.render_terminal_pane(cx), |el, pane| el.child(pane))
     }
 }
 

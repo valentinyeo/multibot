@@ -9,12 +9,14 @@ name = "multibot"
 path = "src/main.rs"
 
 [dependencies]
+alacritty_terminal.workspace = true
 anyhow.workspace = true
 multibot-core.workspace = true
 multibot-gpu.workspace = true
 multibot-keys.workspace = true
 multibot-proto.workspace = true
 multibot-updater.workspace = true
+portable-pty.workspace = true
 sysinfo.workspace = true
 tokio.workspace = true
 
