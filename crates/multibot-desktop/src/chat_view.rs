@@ -2098,7 +2098,7 @@ impl MultibotView {
         let Some(session) = self.selected_session.clone() else {
             return false;
         };
-        let Some(ref tx) = self.daemon_tx else {
+        let Some(tx) = self.active_session_tx() else {
             return false;
         };
         let sent = tx
@@ -2128,17 +2128,19 @@ impl MultibotView {
             cx.notify();
             return;
         };
-        self.dispatch_text_prompt_for_session(session, text, quoted_message_id, cx);
+        let host = self.active_session_host().to_string();
+        self.dispatch_text_prompt_for_session(&host, session, text, quoted_message_id, cx);
     }
 
     fn dispatch_text_prompt_for_session(
         &mut self,
+        host: &str,
         session: SessionSummary,
         text: String,
         quoted_message_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let is_selected = self
+        let is_selected = self.active_session_host() == host && self
             .selected_session
             .as_ref()
             .is_some_and(|s| s.id == session.id && s.agent == session.agent);
@@ -2154,12 +2156,14 @@ impl MultibotView {
             });
             self.chat_state.advance_busy_tick();
         }
-        self.send_or_queue_prompt(&session, msg_id, text);
+        self.send_or_queue_prompt_on_host(host, &session, msg_id, text);
         cx.notify();
     }
 
     pub(crate) fn track_queued_prompt(&mut self, session_id: &str, message_id: &str, status: &str) {
-        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
+        let Some(session) = self.selected_session.as_ref().filter(|s| s.id == session_id)
+            .or_else(|| self.host_sessions.iter().find(|(h, s)| h == self.active_session_host() && s.id == session_id).map(|(_, s)| s))
+            .or_else(|| self.sessions.iter().find(|s| s.id == session_id)) else {
             return;
         };
         let key = self.session_key_for(session);
@@ -2414,8 +2418,11 @@ impl MultibotView {
             return;
         }
 
+        let session_host = self.active_session_host().to_string();
         let remote_ssh_host = cx.try_global::<SharedAppStore>().and_then(|store| {
-            match store.connected_target.as_ref() {
+            let target = store.host_connections.get(&session_host).map(|h| &h.target)
+                .or_else(|| if store.host_connections.is_empty() { store.connected_target.as_ref() } else { None });
+            match target {
                 Some(DaemonTarget::RemoteSsh { host, .. }) => Some(host.clone()),
                 _ => None,
             }
@@ -2451,6 +2458,7 @@ impl MultibotView {
                         let final_payload =
                             substitute_uploaded_attachment_paths(&payload, &replacements);
                         this.dispatch_text_prompt_for_session(
+                            &session_host,
                             session,
                             final_payload,
                             quoted_id,
@@ -2486,7 +2494,7 @@ impl MultibotView {
             return;
         }
 
-        self.dispatch_text_prompt_for_session(session, payload, quoted_id, cx);
+        self.dispatch_text_prompt_for_session(&session_host, session, payload, quoted_id, cx);
     }
 
     pub(crate) fn restore_failed_upload_draft(
@@ -2580,7 +2588,7 @@ impl MultibotView {
 
         if let Some(wire_text) = format_reaction_message(emoji, target_id, target_text)
             && let (Some(session), Some(tx)) =
-                (self.selected_session.clone(), self.daemon_tx.as_ref())
+                (self.selected_session.clone(), self.active_session_tx())
         {
             let _ = tx.send(ClientRequest::SendPrompt {
                 options: self.composer_options_for(&session),
@@ -4167,7 +4175,7 @@ impl MultibotView {
                 queued_previews.extend(queue.iter().map(|(_, text)| text.clone()));
             }
             let outbox_key = multibot_core::outbox::ChatOutbox::session_key(
-                self.current_host_label(),
+                self.active_session_host(),
                 session.agent,
                 &session.id,
             );

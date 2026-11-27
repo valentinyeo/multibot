@@ -419,8 +419,8 @@ impl MultibotView {
         let next = (current + step).rem_euclid(len) as usize;
         let key = self.inbox_state.step_order[next].clone();
         self.inbox_state.step_index = Some(next);
-        if let Some(sess) = self.find_session_by_key(&key) {
-            self.open_session_with_tracking(sess, true, cx);
+        if let Some((host, sess)) = self.host_for_session_key(&key) {
+            self.open_session_on_host(host, sess, true, cx);
             return true;
         }
         false
@@ -458,8 +458,8 @@ impl MultibotView {
             InboxKeyOutcome::Ignored => return,
             InboxKeyOutcome::Handled => {}
             InboxKeyOutcome::OpenSession(key) => {
-                if let Some(sess) = self.find_session_by_key(&key) {
-                    self.open_session_with_tracking(sess, true, cx);
+                if let Some((host, sess)) = self.host_for_session_key(&key) {
+                    self.open_session_on_host(host, sess, true, cx);
                 }
             }
             InboxKeyOutcome::CloseInbox => {
@@ -875,8 +875,8 @@ impl MultibotView {
                                 this.inbox_state.selected_row = idx;
                                 this.inbox_state.step_order = keys_for_step.clone();
                                 this.inbox_state.step_index = Some(idx);
-                                if let Some(sess) = this.find_session_by_key(&key_click) {
-                                    this.open_session_with_tracking(sess, true, cx);
+                                if let Some((host, sess)) = this.host_for_session_key(&key_click) {
+                                    this.open_session_on_host(host, sess, true, cx);
                                     window.focus(&this.root_focus_handle, cx);
                                 }
                             }),

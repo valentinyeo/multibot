@@ -164,11 +164,61 @@ impl MultibotView {
         self.connected_host.as_deref().unwrap_or("local")
     }
 
+    pub(crate) fn tx_for_host(
+        &self,
+        host: &str,
+    ) -> Option<&tokio::sync::mpsc::UnboundedSender<ClientRequest>> {
+        self.host_txs.get(host).or_else(|| {
+            // Never send a disconnected host's requests to another server.
+            if self.host_statuses.is_empty() {
+                self.daemon_tx.as_ref()
+            } else {
+                None
+            }
+        })
+    }
+
+    pub(crate) fn active_session_host(&self) -> &str {
+        self.selected_session_host
+            .as_deref()
+            .unwrap_or_else(|| self.current_host_label())
+    }
+
+    pub(crate) fn active_session_tx(
+        &self,
+    ) -> Option<&tokio::sync::mpsc::UnboundedSender<ClientRequest>> {
+        self.tx_for_host(self.active_session_host())
+    }
+
+    pub(crate) fn host_for_summary(&self, session: &SessionSummary) -> String {
+        self.host_sessions
+            .iter()
+            .find(|(_, s)| s == session)
+            .map(|(host, _)| host.clone())
+            .unwrap_or_else(|| self.active_session_host().to_string())
+    }
+
     pub(crate) fn session_key_for(&self, session: &SessionSummary) -> String {
-        canonical_session_key(self.current_host_label(), session.agent, &session.id)
+        let host = if self.selected_session.as_ref().is_some_and(|s| s == session) {
+            self.active_session_host().to_string()
+        } else {
+            self.host_for_summary(session)
+        };
+        canonical_session_key(&host, session.agent, &session.id)
     }
 
     pub(crate) fn session_inputs(&self) -> Vec<SessionInput<'_>> {
+        if !self.host_sessions.is_empty() {
+            return self
+                .host_sessions
+                .iter()
+                .map(|(host, summary)| SessionInput {
+                    key: canonical_session_key(host, summary.agent, &summary.id),
+                    host,
+                    summary,
+                })
+                .collect();
+        }
         let host = self.current_host_label();
         self.sessions
             .iter()
@@ -180,11 +230,26 @@ impl MultibotView {
             .collect()
     }
 
+    pub(crate) fn host_for_session_key(&self, key: &str) -> Option<(String, SessionSummary)> {
+        self.session_inputs()
+            .into_iter()
+            .find(|s| s.key == key || s.summary.id == key)
+            .map(|s| (s.host.to_string(), s.summary.clone()))
+    }
+
     pub(crate) fn find_session_by_key(&self, key: &str) -> Option<SessionSummary> {
-        self.sessions
-            .iter()
-            .find(|s| self.session_key_for(s) == key || s.id == key)
-            .cloned()
+        self.host_for_session_key(key).map(|(_, s)| s)
+    }
+
+    pub(crate) fn open_session_key_with_tracking(
+        &mut self,
+        key: &str,
+        from_inbox: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((host, session)) = self.host_for_session_key(key) {
+            self.open_session_on_host(host, session, from_inbox, cx);
+        }
     }
 
     /// Loads persisted `workspaces.json` and `palette-stats.json` (called by M6 startup wiring).
@@ -211,7 +276,18 @@ impl MultibotView {
         from_inbox: bool,
         cx: &mut Context<Self>,
     ) {
-        let next_key = self.session_key_for(&session);
+        let host = self.host_for_summary(&session);
+        self.open_session_on_host(host, session, from_inbox, cx);
+    }
+
+    pub(crate) fn open_session_on_host(
+        &mut self,
+        host: String,
+        session: SessionSummary,
+        from_inbox: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let next_key = canonical_session_key(&host, session.agent, &session.id);
         if let Some(ref current) = self.selected_session {
             let cur_key = self.session_key_for(current);
             if cur_key != next_key {
@@ -236,7 +312,7 @@ impl MultibotView {
         }
         self.persist_workspace_store_if_enabled();
         self.sync_workspace_to_shared(cx);
-        self.select_session(session, cx);
+        self.select_session_on_host(host, session, cx);
     }
 
     pub(crate) fn commit_session_rename(
@@ -256,28 +332,36 @@ impl MultibotView {
             return false;
         };
 
-        let host = self.current_host_label().to_string();
-        let mut rename_req: Option<ClientRequest> = None;
-        for sess in &mut self.sessions {
-            let key = canonical_session_key(&host, sess.agent, &sess.id);
-            if key == session_key || sess.id == session_key {
-                sess.title = clean.clone();
-                rename_req = Some(ClientRequest::RenameSession {
-                    session_id: sess.id.clone(),
-                    agent: sess.agent,
-                    source_path: sess.source_path.clone(),
-                    title: clean.clone(),
+        if let Some((host, mut session)) = self.host_for_session_key(session_key) {
+            session.title = clean.clone();
+            if let Some(tx) = self.tx_for_host(&host) {
+                let _ = tx.send(ClientRequest::RenameSession {
+                    session_id: session.id.clone(),
+                    agent: session.agent,
+                    source_path: session.source_path.clone(),
+                    title: clean,
                 });
             }
-        }
-        if let Some(ref mut sel) = self.selected_session {
-            let key = canonical_session_key(&host, sel.agent, &sel.id);
-            if key == session_key || sel.id == session_key {
-                sel.title = clean.clone();
+            for (h, s) in &mut self.host_sessions {
+                if h == &host && s.id == session.id && s.agent == session.agent {
+                    *s = session.clone();
+                }
             }
-        }
-        if let (Some(tx), Some(req)) = (&self.daemon_tx, rename_req) {
-            let _ = tx.send(req);
+            if self.host_statuses.is_empty() {
+                for s in &mut self.sessions {
+                    if s.id == session.id && s.agent == session.agent {
+                        *s = session.clone();
+                    }
+                }
+            }
+            if self.active_session_host() == host
+                && self
+                    .selected_session
+                    .as_ref()
+                    .is_some_and(|s| s.id == session.id && s.agent == session.agent)
+            {
+                self.selected_session = Some(session);
+            }
         }
 
         self.sidebar_state.rename = None;
@@ -434,13 +518,16 @@ impl MultibotView {
         let key = self.session_key_for(&sel);
         let ws_id = self.sidebar_state.active_workspace_id.clone();
         let now = now_unix_ms();
-        let host = self.current_host_label().to_string();
-        let sessions_clone = self.sessions.clone();
-        let inputs: Vec<SessionInput<'_>> = sessions_clone
+        let sessions: Vec<_> = self
+            .session_inputs()
+            .into_iter()
+            .map(|s| (s.host.to_string(), s.summary.clone()))
+            .collect();
+        let inputs: Vec<_> = sessions
             .iter()
-            .map(|summary| SessionInput {
-                key: canonical_session_key(&host, summary.agent, &summary.id),
-                host: &host,
+            .map(|(host, summary)| SessionInput {
+                key: canonical_session_key(host, summary.agent, &summary.id),
+                host,
                 summary,
             })
             .collect();
@@ -832,8 +919,8 @@ impl MultibotView {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _, _, cx| {
-                                if let Some(sess) = this.find_session_by_key(&key_left) {
-                                    this.open_session_with_tracking(sess, false, cx);
+                                if let Some((host, sess)) = this.host_for_session_key(&key_left) {
+                                    this.open_session_on_host(host, sess, false, cx);
                                 }
                             }),
                         )
@@ -1327,8 +1414,8 @@ impl MultibotView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
-                    if let Some(sess) = this.find_session_by_key(&key_left) {
-                        this.open_session_with_tracking(sess, false, cx);
+                    if let Some((host, sess)) = this.host_for_session_key(&key_left) {
+                        this.open_session_on_host(host, sess, false, cx);
                     }
                 }),
             )
@@ -1634,8 +1721,8 @@ impl MultibotView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
-                            if let Some(sess) = this.find_session_by_key(&key_left) {
-                                this.open_session_with_tracking(sess, false, cx);
+                            if let Some((host, sess)) = this.host_for_session_key(&key_left) {
+                                this.open_session_on_host(host, sess, false, cx);
                             }
                         }),
                     )

@@ -4,9 +4,9 @@ use crate::palette::PaletteState;
 use crate::sidebar::{InlineRenameState, RenameKeyOutcome, SidebarState};
 use crate::slash_picker::SlashPickerState;
 use crate::state::{
-    ActiveModal, DaemonBroadcastEvent, MainSurface, SharedAppStore, SharedChatOutbox,
-    UiBridgeEvent, UpdateBridgeEvent, format_footprint, settings_visible_eq,
-    update_footprint_if_changed,
+    ActiveModal, DaemonBroadcastEvent, HostConnectionState, HostStatusSnapshot, MainSurface,
+    SharedAppStore, SharedChatOutbox, UiBridgeEvent, UpdateBridgeEvent, format_footprint,
+    settings_visible_eq, update_footprint_if_changed,
 };
 use crate::table_modal::TableModalState;
 use crate::theme::{self, RADIUS_CHIP};
@@ -307,12 +307,17 @@ pub struct MultibotView {
     pub(crate) connection_status: String,
     pub(crate) daemon_tx: Option<mpsc::UnboundedSender<ClientRequest>>,
     pub(crate) sessions: Vec<SessionSummary>,
+    pub(crate) host_sessions: Vec<(String, SessionSummary)>,
+    pub(crate) host_txs: HashMap<String, mpsc::UnboundedSender<ClientRequest>>,
+    pub(crate) host_statuses: Vec<HostStatusSnapshot>,
+    pub(crate) selected_session_host: Option<String>,
+    pub(crate) pending_spawn_host: Option<String>,
     pub(crate) selected_session: Option<SessionSummary>,
     pub(crate) messages: Vec<ChatMessage>,
 
     // Session lifecycle & multi-window SharedAppStore sync
     pub(crate) view_id: u64,
-    pub(crate) closed_sessions: Vec<SessionSummary>,
+    pub(crate) closed_sessions: Vec<(String, SessionSummary)>,
     pub(crate) pending_archive_confirm: Option<(String, Instant)>,
     pub(crate) last_synced_revision: u64,
     pub(crate) last_synced_connection_gen: u64,
@@ -517,6 +522,7 @@ impl MultibotView {
                 match daemon_event_rx.recv().await {
                     Ok(DaemonBroadcastEvent {
                         origin_view_id,
+                        host_label,
                         is_older_page_hint,
                         event,
                     }) => {
@@ -525,6 +531,7 @@ impl MultibotView {
                         }
                         let res = this.update(cx, |view, cx| {
                             view.handle_daemon_server_event_with_hint(
+                                &host_label,
                                 event,
                                 is_older_page_hint,
                                 cx,
@@ -552,6 +559,8 @@ impl MultibotView {
                     store.update_action_tx = None;
                     store.update_poller_started = false;
                     store.update_in_flight = false;
+                    store.host_connections.clear();
+                    store.rebuild_merged_sessions();
                     store.connection_shutdown_tx = None;
                     store.daemon_tx = None;
                     store.pending_older_page_before.clear();
@@ -613,6 +622,16 @@ impl MultibotView {
             connection_status,
             daemon_tx,
             sessions,
+            host_sessions: cx.global::<SharedAppStore>().host_sessions.clone(),
+            host_txs: cx
+                .global::<SharedAppStore>()
+                .host_connections
+                .iter()
+                .filter_map(|(h, c)| c.daemon_tx.clone().map(|tx| (h.clone(), tx)))
+                .collect(),
+            host_statuses: cx.global::<SharedAppStore>().host_status_snapshots(),
+            selected_session_host: None,
+            pending_spawn_host: None,
             selected_session: None,
             messages: Vec::new(),
             view_id,
@@ -699,13 +718,30 @@ impl MultibotView {
         if cx.has_global::<SharedAppStore>() {
             let rev = {
                 let store = cx.global_mut::<SharedAppStore>();
-                store.sessions = self.sessions.clone();
-                store.connected_host = self.connected_host.clone();
-                store.connection_status = self.connection_status.clone();
-                store.daemon_tx = self.daemon_tx.clone();
-                store.daemon_version = self.daemon_version.clone();
-                store.daemon_binary_hash = self.daemon_binary_hash.clone();
-                store.bump_revision()
+                if !store.host_connections.is_empty() && !self.host_statuses.is_empty() {
+                    for (host, entry) in &mut store.host_connections {
+                        entry.sessions = self
+                            .host_sessions
+                            .iter()
+                            .filter(|(h, _)| h == host)
+                            .map(|(_, s)| s.clone())
+                            .collect();
+                    }
+                    store.rebuild_merged_sessions();
+                    store.refresh_connection_summary();
+                    self.sessions = store.sessions.clone();
+                    self.host_statuses = store.host_status_snapshots();
+                    self.connection_status = store.connection_status.clone();
+                    store.bump_revision()
+                } else {
+                    store.sessions = self.sessions.clone();
+                    store.connected_host = self.connected_host.clone();
+                    store.connection_status = self.connection_status.clone();
+                    store.daemon_tx = self.daemon_tx.clone();
+                    store.daemon_version = self.daemon_version.clone();
+                    store.daemon_binary_hash = self.daemon_binary_hash.clone();
+                    store.bump_revision()
+                }
             };
             self.last_synced_revision = rev;
         }
@@ -811,6 +847,19 @@ impl MultibotView {
         }
 
         if rev != self.last_synced_revision {
+            let store = cx.global::<SharedAppStore>();
+            if self.host_sessions != store.host_sessions
+                || self.host_statuses != store.host_status_snapshots()
+            {
+                changed = true;
+            }
+            self.host_sessions = store.host_sessions.clone();
+            self.host_statuses = store.host_status_snapshots();
+            self.host_txs = store
+                .host_connections
+                .iter()
+                .filter_map(|(host, entry)| entry.daemon_tx.clone().map(|tx| (host.clone(), tx)))
+                .collect();
             let (
                 sessions,
                 workspace_store,
@@ -846,7 +895,9 @@ impl MultibotView {
                 )
             };
 
-            if connection_gen != self.last_synced_connection_gen {
+            if connection_gen != self.last_synced_connection_gen
+                && cx.global::<SharedAppStore>().host_connections.is_empty()
+            {
                 self.last_synced_connection_gen = connection_gen;
                 self.clear_active_session_view();
                 self.pending_switch_tokens.clear();
@@ -858,11 +909,11 @@ impl MultibotView {
             if self.sessions != sessions {
                 self.sessions = sessions;
                 if let Some(ref sel) = self.selected_session.clone()
-                    && let Some(fresh) = self
-                        .sessions
-                        .iter()
-                        .find(|s| s.id == sel.id && s.agent == sel.agent)
-                        .cloned()
+                    && let Some((_, fresh)) = self.host_for_session_key(&canonical_session_key(
+                        self.active_session_host(),
+                        sel.agent,
+                        &sel.id,
+                    ))
                 {
                     self.selected_session = Some(fresh);
                 }
@@ -1785,6 +1836,121 @@ impl MultibotView {
     // Live Daemon Connection, Cache, Outbox & M3/M5 RPC Helpers
     // =========================================================================
 
+    pub(crate) fn auto_connect_configured_hosts(&mut self, cx: &mut Context<Self>) {
+        let targets: Vec<_> = if self.settings.ssh_hosts.is_empty() {
+            Self::find_local_daemon()
+                .map(|bin| ("localhost".to_string(), DaemonTarget::LocalBinary(bin)))
+                .into_iter()
+                .collect()
+        } else {
+            self.settings
+                .ssh_hosts
+                .iter()
+                .cloned()
+                .map(|host| {
+                    (
+                        host.name.clone(),
+                        DaemonTarget::RemoteSsh {
+                            host,
+                            bundled_linux_binary: Self::find_bundled_linux_daemon(),
+                        },
+                    )
+                })
+                .collect()
+        };
+        for (label, target) in targets {
+            let skip = cx
+                .global::<SharedAppStore>()
+                .host_connections
+                .get(&label)
+                .is_some_and(|h| {
+                    h.manually_disconnected
+                        || h.shutdown_tx.is_some()
+                        || h.daemon_tx.as_ref().is_some_and(|tx| !tx.is_closed())
+                });
+            if !skip {
+                Self::connect_host_on_app(self.runtime.clone(), label, target, true, cx);
+            }
+        }
+        self.sync_from_shared_store(cx);
+    }
+
+    pub(crate) fn disconnect_host_on_app(host_label: &str, cx: &mut App) {
+        let store = cx.global_mut::<SharedAppStore>();
+        if let Some(entry) = store.host_connections.get_mut(host_label) {
+            entry.manually_disconnected = true;
+            entry.connection_gen = entry.connection_gen.wrapping_add(1);
+            entry.shutdown_tx = None;
+            entry.daemon_tx = None;
+            entry.connected = false;
+            entry.status = "Disconnected".into();
+            entry.sessions.clear();
+            store.rebuild_merged_sessions();
+            store.refresh_connection_summary();
+            store.bump_revision();
+        }
+    }
+
+    pub(crate) fn disconnect_all_hosts(cx: &mut App) {
+        let hosts: Vec<_> = cx
+            .global::<SharedAppStore>()
+            .host_connections
+            .keys()
+            .cloned()
+            .collect();
+        for host in hosts {
+            Self::disconnect_host_on_app(&host, cx);
+        }
+    }
+
+    pub(crate) fn refresh_all_hosts(&self) -> bool {
+        if self.host_txs.is_empty() && self.host_statuses.is_empty() {
+            return self.daemon_tx.as_ref().is_some_and(|tx| {
+                tx.send(ClientRequest::ListSessions { limit: Some(500) })
+                    .is_ok()
+            });
+        }
+        let mut refreshed = false;
+        for tx in self.host_txs.values() {
+            refreshed |= tx
+                .send(ClientRequest::ListSessions { limit: Some(500) })
+                .is_ok();
+        }
+        refreshed
+    }
+
+    pub(crate) fn reconnect_all_hosts(&mut self, cx: &mut Context<Self>) {
+        let refreshed = self.refresh_all_hosts();
+        let targets: Vec<_> = cx
+            .global::<SharedAppStore>()
+            .host_connections
+            .iter()
+            .filter(|(_, h)| h.daemon_tx.as_ref().is_none_or(|tx| tx.is_closed()))
+            .map(|(label, h)| (label.clone(), h.target.clone()))
+            .collect();
+        for (label, target) in targets {
+            Self::connect_host_on_app(self.runtime.clone(), label, target, true, cx);
+        }
+        if !self.settings.ssh_hosts.is_empty() || self.host_statuses.is_empty() {
+            self.auto_connect_configured_hosts(cx);
+        } else {
+            self.sync_from_shared_store(cx);
+        }
+        if let Some(s) = &self.selected_session
+            && let Some(tx) = self.active_session_tx()
+        {
+            let _ = tx.send(ClientRequest::WatchSession {
+                session_id: s.id.clone(),
+                source_path: s.source_path.clone(),
+                agent: s.agent,
+            });
+        }
+        if refreshed {
+            self.notice = Some("Refreshed daemon sessions.".into());
+        }
+        cx.notify();
+    }
+
     pub(crate) fn connect_to_target(
         &mut self,
         label: String,
@@ -1806,9 +1972,6 @@ impl MultibotView {
         self.sync_from_shared_store(cx);
     }
 
-    /// Starts an App-scoped daemon connection stored on [`SharedAppStore`] so closing Window 1
-    /// while Window 2 stays open keeps the connection alive, and switching hosts from ANY window
-    /// globally increments `SharedAppStore.connection_gen` and terminates the previous Tokio task.
     pub(crate) fn connect_to_target_on_app(
         runtime: Arc<tokio::runtime::Runtime>,
         label: String,
@@ -1816,36 +1979,68 @@ impl MultibotView {
         reset_upgrade_guard: bool,
         cx: &mut App,
     ) -> u64 {
+        Self::connect_host_on_app(runtime, label, target, reset_upgrade_guard, cx)
+    }
+
+    pub(crate) fn connect_host_on_app(
+        runtime: Arc<tokio::runtime::Runtime>,
+        label: String,
+        target: DaemonTarget,
+        reset_upgrade_guard: bool,
+        cx: &mut App,
+    ) -> u64 {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
-        let conn_gen = if cx.has_global::<SharedAppStore>() {
-            let store = cx.global_mut::<SharedAppStore>();
-            store.connection_gen = store.connection_gen.wrapping_add(1);
-            let next_gen = store.connection_gen;
-            // Dropping the previous `connection_shutdown_tx` immediately terminates any superseded
-            // Tokio connection task even if another window still holds a cloned `daemon_tx`.
-            store.connection_shutdown_tx = Some(shutdown_tx);
-            store.connected_target = Some(target.clone());
-            if reset_upgrade_guard {
-                store.daemon_upgrade_attempted = false;
-            }
-            store.connection_status = format!("Connecting to {label}...");
-            store.connected_host = Some(label.clone());
-            store.sessions.clear();
-            store.pending_older_page_before.clear();
-            store.daemon_tx = None;
-            store.daemon_version = None;
-            store.daemon_binary_hash = None;
-            store.bump_revision();
-            next_gen
-        } else {
-            1
-        };
+        let store = cx.global_mut::<SharedAppStore>();
+        let entry = store
+            .host_connections
+            .entry(label.clone())
+            .or_insert_with(|| HostConnectionState {
+                host_label: label.clone(),
+                target: target.clone(),
+                status: String::new(),
+                connected: false,
+                manually_disconnected: false,
+                reconnect_attempt: 0,
+                daemon_tx: None,
+                shutdown_tx: None,
+                connection_gen: 0,
+                daemon_version: None,
+                daemon_binary_hash: None,
+                daemon_upgrade_attempted: false,
+                sessions: Vec::new(),
+            });
+        entry.connection_gen = entry.connection_gen.wrapping_add(1);
+        let conn_gen = entry.connection_gen;
+        entry.shutdown_tx = Some(shutdown_tx);
+        entry.target = target.clone();
+        entry.status = format!("Connecting to {label}...");
+        entry.connected = false;
+        entry.manually_disconnected = false;
+        entry.daemon_tx = None;
+        entry.daemon_version = None;
+        entry.daemon_binary_hash = None;
+        entry.sessions.clear();
+        if reset_upgrade_guard {
+            entry.daemon_upgrade_attempted = false;
+            entry.reconnect_attempt = 0;
+        }
+        // Legacy fields remain available to single-host callers.
+        store.connection_gen = store.connection_gen.wrapping_add(1);
+        store.connection_shutdown_tx = None;
+        store.rebuild_merged_sessions();
+        store.refresh_connection_summary();
+        store.bump_revision();
 
         let (bridge_tx, mut bridge_rx) = mpsc::unbounded_channel::<UiBridgeEvent>();
         let rt_for_conn = runtime.clone();
 
+        let event_host = label.clone();
         rt_for_conn.spawn(async move {
-            match DaemonConnection::connect(target).await {
+            let result = tokio::select! {
+                _ = &mut shutdown_rx => return,
+                result = DaemonConnection::connect(target) => result,
+            };
+            match result {
                 Ok(mut conn) => {
                     let (req_tx, mut req_rx) = mpsc::unbounded_channel::<ClientRequest>();
                     if bridge_tx
@@ -1858,7 +2053,7 @@ impl MultibotView {
                         return;
                     }
                     let _ = conn.send(ClientRequest::WatchDirectory);
-                    let _ = conn.send(ClientRequest::ListSessions { limit: Some(250) });
+                    let _ = conn.send(ClientRequest::ListSessions { limit: Some(500) });
 
                     loop {
                         tokio::select! {
@@ -1903,7 +2098,13 @@ impl MultibotView {
         cx.spawn(async move |cx| {
             while let Some(event) = bridge_rx.recv().await {
                 let keep_going = cx.update(|cx| {
-                    Self::apply_daemon_bridge_event_to_app(conn_gen, event, &rt_for_events, cx)
+                    Self::apply_host_bridge_event_to_app(
+                        &event_host,
+                        conn_gen,
+                        event,
+                        &rt_for_events,
+                        cx,
+                    )
                 });
                 if !keep_going {
                     break;
@@ -1915,6 +2116,426 @@ impl MultibotView {
         conn_gen
     }
 
+    pub(crate) fn apply_host_bridge_event_to_app(
+        host_label: &str,
+        conn_gen: u64,
+        event: UiBridgeEvent,
+        runtime: &Arc<tokio::runtime::Runtime>,
+        cx: &mut App,
+    ) -> bool {
+        if !cx.has_global::<SharedAppStore>() {
+            return false;
+        }
+        {
+            let store = cx.global::<SharedAppStore>();
+            if store.window_count == 0
+                || store
+                    .host_connections
+                    .get(host_label)
+                    .is_none_or(|h| h.connection_gen != conn_gen || h.manually_disconnected)
+            {
+                return false;
+            }
+        }
+
+        match event {
+            UiBridgeEvent::Connected { req_tx, .. } => {
+                let store = cx.global_mut::<SharedAppStore>();
+                let entry = store.host_connections.get_mut(host_label).unwrap();
+                entry.daemon_tx = Some(req_tx);
+                entry.connected = true;
+                entry.reconnect_attempt = 0;
+                entry.status = format!("Connected: {host_label}");
+                store.refresh_connection_summary();
+                store.bump_revision();
+            }
+            UiBridgeEvent::Disconnected(reason) => {
+                let store = cx.global_mut::<SharedAppStore>();
+                let entry = store.host_connections.get_mut(host_label).unwrap();
+                entry.daemon_tx = None;
+                entry.shutdown_tx = None;
+                entry.connected = false;
+                entry.status = reason;
+                entry.sessions.clear();
+                let delay = [5, 10, 30, 60][(entry.reconnect_attempt as usize).min(3)];
+                entry.reconnect_attempt = entry.reconnect_attempt.saturating_add(1);
+                let target = entry.target.clone();
+                store.rebuild_merged_sessions();
+                store.refresh_connection_summary();
+                store.bump_revision();
+                let host = host_label.to_string();
+                let rt_timer = runtime.clone();
+                let rt_connect = runtime.clone();
+                cx.spawn(async move |cx| {
+                    let _ = rt_timer
+                        .spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(delay)).await;
+                        })
+                        .await;
+                    cx.update(|cx| {
+                        let store = cx.global::<SharedAppStore>();
+                        if store.window_count > 0
+                            && store.host_connections.get(&host).is_some_and(|h| {
+                                h.connection_gen == conn_gen
+                                    && !h.manually_disconnected
+                                    && !h.connected
+                            })
+                        {
+                            Self::connect_host_on_app(rt_connect, host, target, false, cx);
+                        }
+                    });
+                })
+                .detach();
+            }
+            UiBridgeEvent::Server(server_ev) => {
+                if matches!(server_ev, ServerEvent::Pong { .. }) {
+                    return true;
+                }
+                match &server_ev {
+                    ServerEvent::HelloAck {
+                        hostname,
+                        daemon_version,
+                        binary_hash,
+                        ..
+                    } => {
+                        let expected_ver = multibot_proto::build_version();
+                        let upgrade_job = {
+                            let store = cx.global_mut::<SharedAppStore>();
+                            let entry = store.host_connections.get_mut(host_label).unwrap();
+                            entry.reconnect_attempt = 0;
+                            entry.daemon_version = Some(daemon_version.clone());
+                            entry.daemon_binary_hash = Some(binary_hash.clone());
+                            entry.status = format!("{hostname} · multibotd v{daemon_version}");
+
+                            let bundled_path = match &entry.target {
+                                DaemonTarget::RemoteSsh {
+                                    bundled_linux_binary,
+                                    ..
+                                } => bundled_linux_binary.clone(),
+                                _ => None,
+                            };
+                            let expected_hash = bundled_path
+                                .as_deref()
+                                .and_then(|p| {
+                                    multibot_core::daemon_deploy::sha256_file_prefix_12(p).ok()
+                                })
+                                .unwrap_or_default();
+
+                            let mut job = None;
+                            if multibot_core::daemon_deploy::needs_remote_upgrade(
+                                daemon_version,
+                                binary_hash,
+                                expected_ver,
+                                &expected_hash,
+                            ) {
+                                if !entry.daemon_upgrade_attempted
+                                    && let Some(DaemonTarget::RemoteSsh {
+                                        host,
+                                        bundled_linux_binary: Some(local_bin),
+                                    }) = Some(entry.target.clone())
+                                {
+                                    entry.daemon_upgrade_attempted = true;
+                                    store.daemon_notice = Some(format!(
+                                        "Upgrading remote multibotd to v{expected_ver}..."
+                                    ));
+                                    store.daemon_notice_seq =
+                                        store.daemon_notice_seq.wrapping_add(1);
+                                    let host_label = host_label.to_string();
+                                    let expected_target = Some(entry.target.clone());
+                                    job = Some((host, local_bin, host_label, expected_target));
+                                } else {
+                                    store.daemon_notice = Some(format!(
+                                        "Remote multibotd v{daemon_version} differs from desktop v{expected_ver}."
+                                    ));
+                                    store.daemon_notice_seq =
+                                        store.daemon_notice_seq.wrapping_add(1);
+                                }
+                            }
+                            store.bump_revision();
+                            job
+                        };
+
+                        if let Some((host, local_bin, host_label, expected_target)) = upgrade_job {
+                            let rt_deploy = runtime.clone();
+                            let rt_reconnect = runtime.clone();
+                            let host_c = host.clone();
+                            let bin_c = local_bin.clone();
+                            cx.spawn(async move |cx| {
+                                let res = rt_deploy
+                                    .spawn(async move {
+                                        multibot_core::daemon_deploy::ensure_remote_daemon_deployed(
+                                            &host_c, &bin_c,
+                                        )
+                                        .await
+                                    })
+                                    .await;
+                                cx.update(|cx| {
+                                    if !cx.has_global::<SharedAppStore>() {
+                                        return;
+                                    }
+                                    {
+                                        let store = cx.global::<SharedAppStore>();
+                                        if store.window_count == 0
+                                            || store.host_connections.get(&host_label).is_none_or(
+                                                |h| {
+                                                    h.connection_gen != conn_gen
+                                                        || h.manually_disconnected
+                                                        || Some(h.target.clone()) != expected_target
+                                                },
+                                            )
+                                        {
+                                            return;
+                                        }
+                                    }
+                                    match res {
+                                        Ok(Ok(_)) => {
+                                            Self::connect_to_target_on_app(
+                                                rt_reconnect,
+                                                host_label,
+                                                DaemonTarget::RemoteSsh {
+                                                    host,
+                                                    bundled_linux_binary: Some(local_bin),
+                                                },
+                                                false,
+                                                cx,
+                                            );
+                                        }
+                                        Ok(Err(err)) => {
+                                            let store = cx.global_mut::<SharedAppStore>();
+                                            store.daemon_notice = Some(format!(
+                                                "Remote multibotd upgrade failed: {err}"
+                                            ));
+                                            store.daemon_notice_seq =
+                                                store.daemon_notice_seq.wrapping_add(1);
+                                            store.bump_revision();
+                                        }
+                                        Err(err) => {
+                                            let store = cx.global_mut::<SharedAppStore>();
+                                            store.daemon_notice = Some(format!(
+                                                "Remote multibotd upgrade failed: {err}"
+                                            ));
+                                            store.daemon_notice_seq =
+                                                store.daemon_notice_seq.wrapping_add(1);
+                                            store.bump_revision();
+                                        }
+                                    }
+                                });
+                            })
+                            .detach();
+                        }
+                    }
+                    ServerEvent::Sessions { sessions } => {
+                        let store = cx.global_mut::<SharedAppStore>();
+                        store.host_connections.get_mut(host_label).unwrap().sessions =
+                            sessions.clone();
+                        store.rebuild_merged_sessions();
+                        let live_keys: Vec<_> = store
+                            .host_sessions
+                            .iter()
+                            .map(|(host, s)| canonical_session_key(host, s.agent, &s.id))
+                            .collect();
+                        if store
+                            .workspace_store
+                            .reconcile_live_session_keys(&live_keys)
+                            > 0
+                            && store.persist_to_disk
+                        {
+                            let _ = store.workspace_store.save();
+                        }
+                        store.bump_revision();
+                    }
+                    ServerEvent::SessionUpdated { session } => {
+                        let store = cx.global_mut::<SharedAppStore>();
+                        if let Some(existing) = store
+                            .host_connections
+                            .get_mut(host_label)
+                            .unwrap()
+                            .sessions
+                            .iter_mut()
+                            .find(|s| s.id == session.id && s.agent == session.agent)
+                        {
+                            *existing = session.clone();
+                        } else {
+                            store
+                                .host_connections
+                                .get_mut(host_label)
+                                .unwrap()
+                                .sessions
+                                .insert(0, session.clone());
+                        }
+                        let key = canonical_session_key(host_label, session.agent, &session.id);
+                        store
+                            .workspace_store
+                            .auto_unarchive_waiting_if_active(&key, session);
+                        if store.persist_to_disk {
+                            let _ = store.workspace_store.save();
+                        }
+                        store.bump_revision();
+                    }
+                    ServerEvent::SessionSpawned { session } => {
+                        let store = cx.global_mut::<SharedAppStore>();
+                        if let Some(existing) = store
+                            .host_connections
+                            .get_mut(host_label)
+                            .unwrap()
+                            .sessions
+                            .iter_mut()
+                            .find(|s| s.id == session.id && s.agent == session.agent)
+                        {
+                            *existing = session.clone();
+                        } else {
+                            store
+                                .host_connections
+                                .get_mut(host_label)
+                                .unwrap()
+                                .sessions
+                                .insert(0, session.clone());
+                        }
+                        store.daemon_notice = Some(format!(
+                            "Started {} session: {}",
+                            session.agent.label(),
+                            session.title
+                        ));
+                        store.daemon_notice_seq = store.daemon_notice_seq.wrapping_add(1);
+                        store.bump_revision();
+                    }
+                    ServerEvent::SessionArchived {
+                        session_id,
+                        archived,
+                    } => {
+                        let store = cx.global_mut::<SharedAppStore>();
+                        for s in &mut store.host_connections.get_mut(host_label).unwrap().sessions {
+                            if s.id == *session_id {
+                                s.archived = *archived;
+                            }
+                        }
+                        store.daemon_notice = Some(if *archived {
+                            format!("Archived session {session_id}.")
+                        } else {
+                            format!("Restored session {session_id}.")
+                        });
+                        store.daemon_notice_seq = store.daemon_notice_seq.wrapping_add(1);
+                        store.bump_revision();
+                    }
+                    ServerEvent::SessionInterrupted {
+                        session_id,
+                        ok,
+                        detail,
+                    } => {
+                        let store = cx.global_mut::<SharedAppStore>();
+                        if *ok {
+                            for s in
+                                &mut store.host_connections.get_mut(host_label).unwrap().sessions
+                            {
+                                if s.id == *session_id {
+                                    s.working = false;
+                                }
+                            }
+                        }
+                        store.daemon_notice = Some(if detail.is_empty() {
+                            if *ok {
+                                "Interrupted session.".to_string()
+                            } else {
+                                format!("Could not interrupt {session_id}.")
+                            }
+                        } else {
+                            detail.clone()
+                        });
+                        store.daemon_notice_seq = store.daemon_notice_seq.wrapping_add(1);
+                        store.bump_revision();
+                    }
+                    ServerEvent::HistoryAppend {
+                        session_id,
+                        messages,
+                        working,
+                        ..
+                    } => {
+                        let mut sessions_changed = false;
+                        let store = cx.global_mut::<SharedAppStore>();
+                        if let Some(is_working) = working {
+                            for s in
+                                &mut store.host_connections.get_mut(host_label).unwrap().sessions
+                            {
+                                if s.id == *session_id && s.working != *is_working {
+                                    s.working = *is_working;
+                                    sessions_changed = true;
+                                }
+                            }
+                        }
+                        if let Some(last_asst) = messages
+                            .iter()
+                            .rev()
+                            .find(|m| m.role == MessageRole::Assistant)
+                        {
+                            let preview: String = last_asst.text.trim().chars().take(120).collect();
+                            for s in
+                                &mut store.host_connections.get_mut(host_label).unwrap().sessions
+                            {
+                                if s.id == *session_id {
+                                    s.last_assistant_id = Some(last_asst.id.clone());
+                                    if !preview.is_empty() {
+                                        s.last_assistant_preview = Some(preview.clone());
+                                    }
+                                    if let Some(ts) = last_asst.timestamp_ms {
+                                        s.last_assistant_ms = Some(ts);
+                                        s.updated_at_ms = s.updated_at_ms.max(ts);
+                                    }
+                                    sessions_changed = true;
+                                }
+                            }
+                        }
+                        if sessions_changed {
+                            store.bump_revision();
+                        }
+                    }
+                    _ => {}
+                }
+
+                {
+                    let store = cx.global_mut::<SharedAppStore>();
+                    store.rebuild_merged_sessions();
+                    store.refresh_connection_summary();
+                }
+
+                // Match & consume App-scoped `pending_older_page_before` for `ServerEvent::History`
+                // (pruning stale entries where the file truncated past `req_before`) so ALL sibling
+                // windows receive an exact `is_older_page_hint` without misclassifying partial
+                // trailing `.jsonl` lines.
+                let is_older_page_hint =
+                    Self::consume_host_older_page_hint(cx, host_label, &server_ev);
+
+                // Broadcast uniformly to ALL open windows (origin_id = 0 != any view_id >= 1).
+                let tx = &cx.global::<SharedAppStore>().daemon_event_tx;
+                if tx.receiver_count() > 0 {
+                    let _ = tx.send(DaemonBroadcastEvent {
+                        origin_view_id: 0,
+                        host_label: host_label.to_string(),
+                        is_older_page_hint,
+                        event: server_ev,
+                    });
+                }
+            }
+        }
+        true
+    }
+
+    #[cfg(not(test))]
+    #[allow(dead_code)]
+    pub(crate) fn apply_daemon_bridge_event_to_app(
+        conn_gen: u64,
+        event: UiBridgeEvent,
+        runtime: &Arc<tokio::runtime::Runtime>,
+        cx: &mut App,
+    ) -> bool {
+        let host = cx
+            .global::<SharedAppStore>()
+            .connected_host
+            .clone()
+            .unwrap_or_else(|| "local".into());
+        Self::apply_host_bridge_event_to_app(&host, conn_gen, event, runtime, cx)
+    }
+
+    #[cfg(test)]
     /// Applies a daemon [`UiBridgeEvent`] at App scope onto [`SharedAppStore`], gated on
     /// `store.connection_gen == conn_gen` and `store.window_count > 0`, and broadcasts
     /// [`ServerEvent`]s uniformly to all open windows via `SharedAppStore.daemon_event_tx`.
@@ -2238,11 +2859,26 @@ impl MultibotView {
                 if tx.receiver_count() > 0 {
                     let _ = tx.send(DaemonBroadcastEvent {
                         origin_view_id: 0,
+                        host_label: cx
+                            .global::<SharedAppStore>()
+                            .connected_host
+                            .clone()
+                            .unwrap_or_else(|| "local".into()),
                         is_older_page_hint,
                         event: server_ev,
                     });
                 }
             }
+        }
+        let store = cx.global_mut::<SharedAppStore>();
+        if let Some(host) = &store.connected_host
+            && let Some(entry) = store.host_connections.get_mut(host)
+        {
+            entry.daemon_tx = store.daemon_tx.clone();
+            entry.connected = entry.daemon_tx.is_some();
+            entry.sessions = store.sessions.clone();
+            entry.status = store.connection_status.clone();
+            store.rebuild_merged_sessions();
         }
         true
     }
@@ -2265,14 +2901,37 @@ impl MultibotView {
         if !cx.has_global::<SharedAppStore>() {
             return false;
         }
+        Self::consume_older_page_hint(cx, session_id, *latest_offset, *file_size)
+    }
+
+    fn consume_host_older_page_hint(cx: &mut App, host: &str, event: &ServerEvent) -> bool {
+        let ServerEvent::History {
+            session_id,
+            latest_offset,
+            file_size,
+            ..
+        } = event
+        else {
+            return false;
+        };
+        let key = format!("{}:{host}{session_id}", host.len());
+        Self::consume_older_page_hint(cx, &key, *latest_offset, *file_size)
+    }
+
+    fn consume_older_page_hint(
+        cx: &mut App,
+        session_id: &str,
+        latest_offset: Option<u64>,
+        file_size: Option<u64>,
+    ) -> bool {
         let store = cx.global_mut::<SharedAppStore>();
         let Some(queue) = store.pending_older_page_before.get_mut(session_id) else {
             return false;
         };
-        if let Some(fs) = *file_size {
+        if let Some(fs) = file_size {
             queue.retain(|&req_before| req_before <= fs);
         }
-        let matched = if let Some(lo) = *latest_offset {
+        let matched = if let Some(lo) = latest_offset {
             if let Some(pos) = queue
                 .iter()
                 .position(|&req_before| lo == req_before)
@@ -2319,6 +2978,7 @@ impl MultibotView {
             if tx.receiver_count() > 1 {
                 let _ = tx.send(DaemonBroadcastEvent {
                     origin_view_id: self.view_id,
+                    host_label: self.current_host_label().to_string(),
                     is_older_page_hint,
                     event: server_ev.clone(),
                 });
@@ -2760,15 +3420,11 @@ impl MultibotView {
                     .map(|t| t.key.clone())
             })
             .or_else(|| {
-                self.sessions
-                    .iter()
-                    .find(|s| s.id == *session_id)
-                    .or_else(|| {
-                        self.selected_session
-                            .as_ref()
-                            .filter(|s| s.id == *session_id)
-                    })
-                    .map(|s| CacheKey::new(self.current_host_label(), s.agent, &s.id))
+                self.session_inputs().into_iter()
+                    .find(|s| s.host == self.active_session_host() && s.summary.id == *session_id)
+                    .map(|s| CacheKey::new(s.host, s.summary.agent, &s.summary.id))
+                    .or_else(|| self.selected_session.as_ref().filter(|s| s.id == *session_id)
+                        .map(|s| CacheKey::new(self.active_session_host(), s.agent, &s.id)))
             });
         let cached_entry = cache_key.as_ref().and_then(|k| self.chat_cache.get(k));
         let cached_oldest_offset = cached_entry.map(|c| c.oldest_offset);
@@ -2851,12 +3507,10 @@ impl MultibotView {
         // truncated/rotated tail can never be misclassified as an older page.
         self.pending_older_page_before.remove(session_id);
 
-        let source_path = self
-            .sessions
-            .iter()
-            .find(|s| s.id == *session_id)
-            .or(self.selected_session.as_ref())
-            .map(|s| s.source_path.clone())
+        let source_path = self.session_inputs().into_iter()
+            .find(|s| s.host == self.active_session_host() && s.summary.id == *session_id)
+            .map(|s| s.summary.source_path.clone())
+            .or_else(|| self.selected_session.as_ref().map(|s| s.source_path.clone()))
             .unwrap_or_default();
 
         let token = self
@@ -2930,12 +3584,10 @@ impl MultibotView {
         };
 
         let mut visible_changed = false;
-        let source_path = self
-            .sessions
-            .iter()
-            .find(|s| s.id == *session_id)
-            .or(self.selected_session.as_ref())
-            .map(|s| s.source_path.clone())
+        let source_path = self.session_inputs().into_iter()
+            .find(|s| s.host == self.active_session_host() && s.summary.id == *session_id)
+            .map(|s| s.summary.source_path.clone())
+            .or_else(|| self.selected_session.as_ref().map(|s| s.source_path.clone()))
             .unwrap_or_default();
 
         let token = self
@@ -2993,7 +3645,7 @@ impl MultibotView {
 
         let mut sessions_changed = false;
         if let Some(is_working) = working {
-            for s in &mut self.sessions {
+            for s in self.sessions.iter_mut().filter(|_| self.host_statuses.is_empty()) {
                 if s.id == *session_id {
                     s.working = is_working;
                     sessions_changed = true;
@@ -3017,7 +3669,7 @@ impl MultibotView {
             .find(|m| m.role == MessageRole::Assistant)
         {
             let preview: String = last_asst.text.trim().chars().take(120).collect();
-            for s in &mut self.sessions {
+            for s in self.sessions.iter_mut().filter(|_| self.host_statuses.is_empty()) {
                 if s.id == *session_id {
                     s.last_assistant_id = Some(last_asst.id.clone());
                     if !preview.is_empty() {
@@ -3056,21 +3708,41 @@ impl MultibotView {
         event: ServerEvent,
         cx: &mut Context<Self>,
     ) {
-        self.handle_daemon_server_event_with_hint(event, false, cx);
+        let host = self.active_session_host().to_string();
+        self.handle_daemon_server_event_with_hint(&host, event, false, cx);
     }
 
     pub(crate) fn handle_daemon_server_event_with_hint(
         &mut self,
+        host_label: &str,
         event: ServerEvent,
         is_older_page_hint: bool,
         cx: &mut Context<Self>,
     ) {
         self.sync_from_shared_store(cx);
+        let matches_active_host = self
+            .selected_session_host
+            .as_deref()
+            .is_none_or(|h| h == host_label);
+        if !matches_active_host
+            && matches!(
+                &event,
+                ServerEvent::History { .. }
+                    | ServerEvent::HistoryAppend { .. }
+                    | ServerEvent::SearchResults { .. }
+                    | ServerEvent::PromptStatus { .. }
+                    | ServerEvent::SendAccepted { .. }
+                    | ServerEvent::Commands { .. }
+                    | ServerEvent::Error { .. }
+            )
+        {
+            return;
+        }
         let mut changed = false;
         match event {
             ServerEvent::HelloAck { .. } => {
-                self.flush_outbox_for_current_host();
-                if let Some(ref sel) = self.selected_session {
+                self.flush_outbox_for_host(host_label);
+                if matches_active_host && let Some(ref sel) = self.selected_session {
                     self.request_daemon_commands(sel.agent, sel.cwd.clone());
                 }
             }
@@ -3083,15 +3755,17 @@ impl MultibotView {
                         .or_else(|| self.sessions.first())
                         .cloned()
                 {
-                    self.open_session_with_tracking(first, false, cx);
+                    let host = self.host_for_summary(&first);
+                    self.open_session_on_host(host, first, false, cx);
                 }
-                self.flush_outbox_for_current_host();
+                self.flush_outbox_for_host(host_label);
             }
             ServerEvent::SessionUpdated { session } => {
-                if self
-                    .selected_session
-                    .as_ref()
-                    .is_some_and(|s| s.id == session.id && s.agent == session.agent)
+                if matches_active_host
+                    && self
+                        .selected_session
+                        .as_ref()
+                        .is_some_and(|s| s.id == session.id && s.agent == session.agent)
                     && self.main_surface == MainSurface::Chat
                 {
                     let key = self.session_key_for(&session);
@@ -3118,13 +3792,20 @@ impl MultibotView {
                 }
             }
             ServerEvent::SessionSpawned { session } => {
-                if self.pending_spawn_open || self.selected_session.is_none() {
+                if (self.pending_spawn_open
+                    && self
+                        .pending_spawn_host
+                        .as_deref()
+                        .is_none_or(|h| h == host_label))
+                    || self.selected_session.is_none()
+                {
                     self.pending_spawn_open = false;
+                    self.pending_spawn_host = None;
                     if let Some(options) = self.chat_state.pending_spawn_options.take() {
-                        let key = self.session_key_for(&session);
+                        let key = canonical_session_key(host_label, session.agent, &session.id);
                         self.chat_state.composer_options.insert(key, options);
                     }
-                    self.open_session_with_tracking(session, false, cx);
+                    self.open_session_on_host(host_label.to_string(), session, false, cx);
                 }
             }
             ev @ ServerEvent::History { .. } => {
@@ -3182,10 +3863,11 @@ impl MultibotView {
                 detail,
             } => {
                 self.track_queued_prompt(&session_id, &message_id, &status);
-                if self
-                    .selected_session
-                    .as_ref()
-                    .is_some_and(|s| s.id == session_id)
+                if matches_active_host
+                    && self
+                        .selected_session
+                        .as_ref()
+                        .is_some_and(|s| s.id == session_id)
                 {
                     match status.as_str() {
                         "failed"
@@ -3283,6 +3965,7 @@ impl MultibotView {
 
     fn clear_active_session_view(&mut self) {
         self.selected_session = None;
+        self.selected_session_host = None;
         self.sidebar_state.rename = None;
         self.active_switch_token = None;
         self.messages.clear();
@@ -3299,6 +3982,19 @@ impl MultibotView {
     }
 
     pub(crate) fn select_session(&mut self, session: SessionSummary, cx: &mut Context<Self>) {
+        let host = self.host_for_summary(&session);
+        self.select_session_on_host(host, session, cx);
+    }
+
+    pub(crate) fn select_session_on_host(
+        &mut self,
+        host: String,
+        session: SessionSummary,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_session_host = Some(host.clone());
+        self.pending_switch_tokens.clear();
+        self.pending_older_page_before.clear();
         self.chat_state.composer_menu_open = false;
         // Reset per-session transient Chat View overlays, active inline rename & stale pagination
         self.sidebar_state.rename = None;
@@ -3311,7 +4007,7 @@ impl MultibotView {
         self.chat_state.message_action_menu_open = false;
         self.chat_state.message_action_index = 0;
 
-        let key = CacheKey::new(self.current_host_label(), session.agent, &session.id);
+        let key = CacheKey::new(&host, session.agent, &session.id);
 
         // Frame-0 synchronous switch: Tier 1 memory (<1ms) -> Tier 2 bounded disk (<5ms)
         let (token, mem_hit) = self.chat_cache.switch_memory(key.clone());
@@ -3341,7 +4037,7 @@ impl MultibotView {
         self.remote_search_hits.clear();
         self.remote_search_truncated = false;
 
-        if let Some(ref tx) = self.daemon_tx {
+        if let Some(tx) = self.active_session_tx() {
             let _ = tx.send(ClientRequest::ReadHistory {
                 session_id: session.id.clone(),
                 source_path: session.source_path.clone(),
@@ -3372,8 +4068,15 @@ impl MultibotView {
         msg_id: String,
         text: String,
     ) {
-        let options = self.composer_options_for(session);
-        if let Some(ref tx) = self.daemon_tx {
+        let host = self.active_session_host().to_string();
+        self.send_or_queue_prompt_on_host(&host, session, msg_id, text);
+    }
+
+    pub(crate) fn send_or_queue_prompt_on_host(&mut self, host: &str, session: &SessionSummary, msg_id: String, text: String) {
+        let key = canonical_session_key(host, session.agent, &session.id);
+        let options = self.chat_state.composer_options.get(&key)
+            .filter(|options| !options.is_default()).cloned();
+        if let Some(tx) = self.tx_for_host(host) {
             let req = if session.working && self.settings.queue_while_working {
                 ClientRequest::SteerSession {
                     session_id: session.id.clone(),
@@ -3398,11 +4101,7 @@ impl MultibotView {
         }
 
         // Offline or broken pipe: enqueue in App-scoped FIFO ChatOutbox (max 20/session).
-        let outbox_key = ChatOutbox::session_key(
-            self.current_host_label(),
-            session.agent,
-            &session.id,
-        );
+        let outbox_key = ChatOutbox::session_key(host, session.agent, &session.id);
         let enqueue_res = if let Ok(mut shared) = self.shared_chat_outbox.lock() {
             let res = shared.outbox.enqueue_with_options(
                 &outbox_key,
@@ -3464,10 +4163,15 @@ impl MultibotView {
     }
 
     pub(crate) fn flush_outbox_for_current_host(&mut self) -> usize {
-        let Some(tx) = self.daemon_tx.clone() else {
+        let host = self.current_host_label().to_string();
+        self.flush_outbox_for_host(&host)
+    }
+
+    pub(crate) fn flush_outbox_for_host(&mut self, host: &str) -> usize {
+        let Some(tx) = self.tx_for_host(host).cloned() else {
             return 0;
         };
-        let current_host = self.current_host_label().to_string();
+        let current_host = host;
         let Ok(mut shared) = self.shared_chat_outbox.lock() else {
             return 0;
         };
@@ -3488,10 +4192,16 @@ impl MultibotView {
                 remaining.push(entry);
                 continue;
             }
-            let matched_sess = self
-                .sessions
-                .iter()
-                .find(|s| s.id == sid && s.agent == agent);
+            let matched_sess = if self.host_statuses.is_empty() {
+                self.sessions
+                    .iter()
+                    .find(|s| s.id == sid && s.agent == agent)
+            } else {
+                self.host_sessions
+                    .iter()
+                    .find(|(h, s)| h == host && s.id == sid && s.agent == agent)
+                    .map(|(_, s)| s)
+            };
             let cwd = matched_sess.and_then(|s| s.cwd.clone());
             let is_working = matched_sess.is_some_and(|s| s.working);
             let req = if is_working && self.settings.queue_while_working {
@@ -3541,7 +4251,7 @@ impl MultibotView {
         let Some(ref sess) = self.selected_session else {
             return false;
         };
-        let Some(ref tx) = self.daemon_tx else {
+        let Some(tx) = self.active_session_tx().cloned() else {
             self.notice = Some("Connect to a host first.".to_string());
             cx.notify();
             return false;
@@ -3564,7 +4274,7 @@ impl MultibotView {
         let Some(ref sess) = self.selected_session else {
             return false;
         };
-        let Some(ref tx) = self.daemon_tx else {
+        let Some(tx) = self.active_session_tx().cloned() else {
             return false;
         };
         let ok = tx
@@ -3588,7 +4298,7 @@ impl MultibotView {
         initial_prompt: Option<String>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(ref tx) = self.daemon_tx else {
+        let Some(tx) = self.active_session_tx().cloned() else {
             self.notice = Some("Connect to a host before starting a new session.".to_string());
             cx.notify();
             return false;
@@ -3606,6 +4316,7 @@ impl MultibotView {
         if ok {
             self.pending_spawn_open = true;
             self.chat_state.pending_spawn_options = options;
+            self.pending_spawn_host = Some(self.active_session_host().to_string());
             self.notice = Some(format!("Starting new {} session...", agent.label()));
         }
         cx.notify();
@@ -3613,7 +4324,17 @@ impl MultibotView {
     }
 
     pub(crate) fn unarchive_session(&mut self, session_id: String, cx: &mut Context<Self>) -> bool {
-        let Some(ref tx) = self.daemon_tx else {
+        let host = self.active_session_host().to_string();
+        self.unarchive_session_on_host(&host, session_id, cx)
+    }
+
+    pub(crate) fn unarchive_session_on_host(
+        &mut self,
+        host: &str,
+        session_id: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tx) = self.tx_for_host(host) else {
             return false;
         };
         let ok = tx
@@ -3635,7 +4356,7 @@ impl MultibotView {
         let Some(ref sess) = self.selected_session else {
             return false;
         };
-        let Some(ref tx) = self.daemon_tx else {
+        let Some(tx) = self.active_session_tx().cloned() else {
             return false;
         };
         self.next_search_request_seq = self.next_search_request_seq.wrapping_add(1);
@@ -3665,7 +4386,7 @@ impl MultibotView {
         let Some(ref sess) = self.selected_session else {
             return false;
         };
-        let Some(ref tx) = self.daemon_tx else {
+        let Some(tx) = self.active_session_tx().cloned() else {
             return false;
         };
         let Some(token) = self.active_switch_token.as_ref() else {
@@ -3699,7 +4420,16 @@ impl MultibotView {
                 let store = cx.global_mut::<SharedAppStore>();
                 let queue = store
                     .pending_older_page_before
-                    .entry(sess_id)
+                    .entry(if self.host_statuses.is_empty() {
+                        sess_id
+                    } else {
+                        format!(
+                            "{}:{}{}",
+                            self.active_session_host().len(),
+                            self.active_session_host(),
+                            sess_id
+                        )
+                    })
                     .or_default();
                 if queue.len() >= 64 {
                     queue.pop_front();
@@ -3712,7 +4442,7 @@ impl MultibotView {
     }
 
     pub(crate) fn request_daemon_commands(&self, agent: AgentKind, cwd: Option<String>) {
-        if let Some(ref tx) = self.daemon_tx {
+        if let Some(tx) = self.active_session_tx() {
             let _ = tx.send(ClientRequest::ListCommands { agent, cwd });
         }
     }
@@ -3743,18 +4473,13 @@ impl MultibotView {
 
     pub(crate) fn jump_session_index(&mut self, index: usize, cx: &mut Context<Self>) {
         let order = self.active_ctrl_digit_order();
-        let target = order
-            .get(index)
-            .and_then(|key| self.find_session_by_key(key))
-            .or_else(|| {
-                if order.is_empty() {
-                    self.sessions.get(index).cloned()
-                } else {
-                    None
-                }
-            });
-        if let Some(sess) = target {
-            self.open_session_with_tracking(sess, false, cx);
+        if let Some(key) = order.get(index) {
+            self.open_session_key_with_tracking(key, false, cx);
+            self.sync_workspace_to_shared(cx);
+        } else if order.is_empty()
+            && let Some(session) = self.sessions.get(index).cloned()
+        {
+            self.open_session_with_tracking(session, false, cx);
             self.sync_workspace_to_shared(cx);
         }
     }
@@ -3770,12 +4495,9 @@ impl MultibotView {
                 .as_deref()
                 .and_then(|k| order.iter().position(|x| x == k))
                 .unwrap_or(0);
-            let len = order.len() as isize;
-            let next = ((current as isize + delta).rem_euclid(len)) as usize;
-            if let Some(sess) = order.get(next).and_then(|k| self.find_session_by_key(k)) {
-                self.open_session_with_tracking(sess, false, cx);
-                self.sync_workspace_to_shared(cx);
-            }
+            let next = (current as isize + delta).rem_euclid(order.len() as isize) as usize;
+            self.open_session_key_with_tracking(&order[next], false, cx);
+            self.sync_workspace_to_shared(cx);
             return;
         }
         if self.sessions.is_empty() {
@@ -3786,10 +4508,9 @@ impl MultibotView {
             .as_ref()
             .and_then(|sel| self.sessions.iter().position(|s| s.id == sel.id))
             .unwrap_or(0);
-        let len = self.sessions.len() as isize;
-        let next = ((current as isize + delta).rem_euclid(len)) as usize;
-        if let Some(sess) = self.sessions.get(next).cloned() {
-            self.open_session_with_tracking(sess, false, cx);
+        let next = (current as isize + delta).rem_euclid(self.sessions.len() as isize) as usize;
+        if let Some(session) = self.sessions.get(next).cloned() {
+            self.open_session_with_tracking(session, false, cx);
             self.sync_workspace_to_shared(cx);
         }
     }
@@ -4433,7 +5154,7 @@ impl Render for MultibotView {
                     && sess.working
                 {
                     // 13. Interrupt working agent on Esc in Chat View
-                    if let Some(ref tx) = this.daemon_tx {
+                    if let Some(tx) = this.active_session_tx() {
                         let _ = tx.send(ClientRequest::InterruptSession {
                             session_id: sess.id.clone(),
                             agent: sess.agent,
@@ -4515,8 +5236,9 @@ impl Render for MultibotView {
                     return;
                 }
                 if let Some(sess) = this.selected_session.clone() {
-                    this.closed_sessions.push(sess.clone());
-                    if let Some(ref tx) = this.daemon_tx {
+                    this.closed_sessions
+                        .push((this.active_session_host().to_string(), sess.clone()));
+                    if let Some(tx) = this.active_session_tx() {
                         let _ = tx.send(ClientRequest::ArchiveSession {
                             session_id: sess.id.clone(),
                             agent: sess.agent,
@@ -4524,8 +5246,14 @@ impl Render for MultibotView {
                             kill_process: true,
                         });
                     }
+                    let host = this.active_session_host().to_string();
+                    this.host_sessions
+                        .retain(|(h, s)| !(h == &host && s.id == sess.id && s.agent == sess.agent));
                     this.sessions
                         .retain(|s| !(s.id == sess.id && s.agent == sess.agent));
+                    if !this.host_statuses.is_empty() {
+                        this.sessions = this.host_sessions.iter().map(|(_, s)| s.clone()).collect();
+                    }
                     this.sidebar_state.rename = None;
                     this.pending_older_page_before.remove(&sess.id);
                     this.pending_switch_tokens.remove(&sess.id);
@@ -4562,8 +5290,9 @@ impl Render for MultibotView {
                     return;
                 }
                 this.pending_archive_confirm = None;
-                this.closed_sessions.push(sess.clone());
-                if let Some(ref tx) = this.daemon_tx {
+                this.closed_sessions
+                    .push((this.active_session_host().to_string(), sess.clone()));
+                if let Some(tx) = this.active_session_tx() {
                     let _ = tx.send(ClientRequest::ArchiveSession {
                         session_id: sess.id.clone(),
                         agent: sess.agent,
@@ -4571,8 +5300,14 @@ impl Render for MultibotView {
                         kill_process: false,
                     });
                 }
+                let host = this.active_session_host().to_string();
+                this.host_sessions
+                    .retain(|(h, s)| !(h == &host && s.id == sess.id && s.agent == sess.agent));
                 this.sessions
                     .retain(|s| !(s.id == sess.id && s.agent == sess.agent));
+                if !this.host_statuses.is_empty() {
+                    this.sessions = this.host_sessions.iter().map(|(_, s)| s.clone()).collect();
+                }
                 this.sidebar_state.rename = None;
                 this.pending_older_page_before.remove(&sess.id);
                 this.pending_switch_tokens.remove(&sess.id);
@@ -4591,17 +5326,20 @@ impl Render for MultibotView {
                 if this.table_modal_state.is_open() || this.active_modal != ActiveModal::None {
                     return;
                 }
-                if let Some(sess) = this.closed_sessions.pop() {
+                if let Some((host, sess)) = this.closed_sessions.pop() {
+                    this.selected_session_host = Some(host.clone());
                     this.unarchive_session(sess.id.clone(), cx);
-                    if !this
-                        .sessions
-                        .iter()
-                        .any(|s| s.id == sess.id && s.agent == sess.agent)
+                    if this
+                        .host_for_session_key(&canonical_session_key(&host, sess.agent, &sess.id))
+                        .is_none()
                     {
+                        if !this.host_statuses.is_empty() {
+                            this.host_sessions.insert(0, (host.clone(), sess.clone()));
+                        }
                         this.sessions.insert(0, sess.clone());
                         this.sync_sessions_to_shared(cx);
                     }
-                    this.open_session_with_tracking(sess, false, cx);
+                    this.open_session_on_host(host, sess, false, cx);
                     this.sync_workspace_to_shared(cx);
                 } else {
                     this.notice = Some("No closed sessions to reopen.".to_string());
@@ -4612,10 +5350,14 @@ impl Render for MultibotView {
                 if this.table_modal_state.is_open() || this.active_modal != ActiveModal::None {
                     return;
                 }
+                if !this.host_statuses.is_empty() || !this.settings.ssh_hosts.is_empty() {
+                    this.reconnect_all_hosts(cx);
+                    return;
+                }
                 if let Some(ref tx) = this.daemon_tx
                     && !tx.is_closed()
                     && tx
-                        .send(ClientRequest::ListSessions { limit: Some(250) })
+                        .send(ClientRequest::ListSessions { limit: Some(500) })
                         .is_ok()
                 {
                     if let Some(ref s) = this.selected_session {
@@ -5096,6 +5838,317 @@ mod tests {
             source_path: format!("/tmp/{id}.jsonl"),
             ..Default::default()
         }
+    }
+
+    fn install_test_host(
+        cx: &mut App,
+        label: &str,
+    ) -> (
+        mpsc::UnboundedReceiver<ClientRequest>,
+        oneshot::Receiver<()>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let store = cx.global_mut::<SharedAppStore>();
+        store.host_connections.insert(
+            label.into(),
+            HostConnectionState {
+                host_label: label.into(),
+                target: DaemonTarget::LocalBinary("/unused-in-headless-tests".into()),
+                status: "Connected".into(),
+                connected: true,
+                manually_disconnected: false,
+                reconnect_attempt: 0,
+                daemon_tx: Some(tx),
+                shutdown_tx: Some(shutdown_tx),
+                connection_gen: 1,
+                daemon_version: Some("0.1.0".into()),
+                daemon_binary_hash: None,
+                daemon_upgrade_attempted: false,
+                sessions: Vec::new(),
+            },
+        );
+        store.refresh_connection_summary();
+        store.bump_revision();
+        (rx, shutdown_rx)
+    }
+
+    #[gpui_kit::test]
+    fn multi_host_sessions_merge_with_real_host_keys_and_workspace_metadata(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let rt = cx
+            .update_window(handle, |_, _, cx| view.read(cx).runtime.clone())
+            .unwrap();
+        let (_rx_a, _shutdown_a) = cx.update(|cx| install_test_host(cx, "host-a"));
+        let (_rx_b, _shutdown_b) = cx.update(|cx| install_test_host(cx, "host-b"));
+        let a = make_session("shared-session-id", AgentKind::Claude, "A", false);
+        let mut b = a.clone();
+        b.title = "B".into();
+        b.updated_at_ms += 1;
+        let key_a = canonical_session_key("host-a", a.agent, &a.id);
+        let key_b = canonical_session_key("host-b", b.agent, &b.id);
+        cx.update(|cx| {
+            let store = cx.global_mut::<SharedAppStore>();
+            let workspace_a = store.workspace_store.create_workspace("A", None).unwrap();
+            let workspace_b = store.workspace_store.create_workspace("B", None).unwrap();
+            store
+                .workspace_store
+                .assign_session_workspace(&key_a, &workspace_a.id);
+            store
+                .workspace_store
+                .assign_session_workspace(&key_b, &workspace_b.id);
+            for (host, session) in [("host-a", a.clone()), ("host-b", b.clone())] {
+                assert!(MultibotView::apply_host_bridge_event_to_app(
+                    host,
+                    1,
+                    UiBridgeEvent::Server(ServerEvent::Sessions {
+                        sessions: vec![session]
+                    }),
+                    &rt,
+                    cx
+                ));
+            }
+            let store = cx.global::<SharedAppStore>();
+            assert_eq!(store.connection_status, "2/2 hosts · 2 sessions");
+            assert_eq!(
+                store.host_sessions,
+                vec![("host-b".into(), b.clone()), ("host-a".into(), a.clone())]
+            );
+            assert_eq!(store.sessions, vec![b, a]);
+            assert_eq!(
+                store.workspace_store.session_meta[&key_a]
+                    .workspace_id
+                    .as_deref(),
+                Some(workspace_a.id.as_str())
+            );
+            assert_eq!(
+                store.workspace_store.session_meta[&key_b]
+                    .workspace_id
+                    .as_deref(),
+                Some(workspace_b.id.as_str())
+            );
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, _, cx| {
+            view.update(cx, |v, cx| {
+                v.sync_from_shared_store(cx);
+                let inputs = v.session_inputs();
+                assert_eq!(
+                    inputs.iter().map(|s| s.host).collect::<Vec<_>>(),
+                    vec!["host-b", "host-a"]
+                );
+                assert_eq!(
+                    inputs.iter().map(|s| s.key.as_str()).collect::<Vec<_>>(),
+                    vec![key_b.as_str(), key_a.as_str()]
+                );
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn multi_host_chat_routes_identical_session_ids_and_rejects_other_host_history(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let rt = cx
+            .update_window(handle, |_, _, cx| view.read(cx).runtime.clone())
+            .unwrap();
+        let (mut rx_a, _shutdown_a) = cx.update(|cx| install_test_host(cx, "host-a"));
+        let (mut rx_b, _shutdown_b) = cx.update(|cx| install_test_host(cx, "host-b"));
+        let session = make_session("same-session", AgentKind::Claude, "Same", false);
+        cx.update(|cx| {
+            for host in ["host-a", "host-b"] {
+                MultibotView::apply_host_bridge_event_to_app(
+                    host,
+                    1,
+                    UiBridgeEvent::Server(ServerEvent::Sessions {
+                        sessions: vec![session.clone()],
+                    }),
+                    &rt,
+                    cx,
+                );
+            }
+        });
+        cx.run_until_parked();
+        while rx_a.try_recv().is_ok() {}
+        while rx_b.try_recv().is_ok() {}
+        for host in ["host-a", "host-b"] {
+            cx.update_window(handle, |_, _, cx| {
+                view.update(cx, |v, cx| {
+                    let key = canonical_session_key(host, session.agent, &session.id);
+                    v.open_session_key_with_tracking(&key, false, cx);
+                    assert_eq!(v.selected_session_host.as_deref(), Some(host));
+                    assert_eq!(v.active_switch_token.as_ref().unwrap().key.host, host);
+                    v.send_or_queue_prompt(&session, "msg".into(), "hello".into());
+                    assert!(v.interrupt_active_session(cx));
+                });
+            })
+            .unwrap();
+            let (rx, other) = if host == "host-a" {
+                (&mut rx_a, &mut rx_b)
+            } else {
+                (&mut rx_b, &mut rx_a)
+            };
+            assert!(matches!(
+                rx.try_recv().unwrap(),
+                ClientRequest::ReadHistory { .. }
+            ));
+            assert!(matches!(
+                rx.try_recv().unwrap(),
+                ClientRequest::WatchSession { .. }
+            ));
+            assert!(matches!(
+                rx.try_recv().unwrap(),
+                ClientRequest::ListCommands { .. }
+            ));
+            assert!(
+                matches!(rx.try_recv().unwrap(), ClientRequest::SendPrompt { text, .. } if text == "hello")
+            );
+            assert!(matches!(
+                rx.try_recv().unwrap(),
+                ClientRequest::InterruptSession { .. }
+            ));
+            assert!(other.try_recv().is_err());
+        }
+        cx.update_window(handle, |_, _, cx| {
+            view.update(cx, |v, cx| {
+                let message = ChatMessage {
+                    id: "keep-b".into(),
+                    role: MessageRole::Assistant,
+                    text: "B".into(),
+                    ..Default::default()
+                };
+                v.messages = vec![message.clone()];
+                v.handle_daemon_server_event_with_hint(
+                    "host-a",
+                    ServerEvent::History {
+                        session_id: session.id.clone(),
+                        messages: Vec::new(),
+                        todos: Vec::new(),
+                        oldest_offset: None,
+                        latest_offset: None,
+                        has_more: false,
+                        file_size: None,
+                        file_mtime_ms: None,
+                        probe_sha256: None,
+                    },
+                    false,
+                    cx,
+                );
+                assert_eq!(v.messages, vec![message]);
+                MultibotView::disconnect_host_on_app("host-b", cx);
+                v.sync_from_shared_store(cx);
+                v.send_or_queue_prompt(&session, "offline".into(), "only for B".into());
+                assert!(v.chat_outbox.entries.iter().any(|e| e.session_key
+                    == ChatOutbox::session_key("host-b", session.agent, &session.id)));
+                assert_eq!(v.flush_outbox_for_host("host-a"), 0);
+                assert!(rx_a.try_recv().is_err());
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn multi_host_disconnect_preserves_other_host_and_rejects_stale_events(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let rt = cx
+            .update_window(handle, |_, _, cx| view.read(cx).runtime.clone())
+            .unwrap();
+        let (_rx_a, mut shutdown_a) = cx.update(|cx| install_test_host(cx, "host-a"));
+        let (_rx_b, mut shutdown_b) = cx.update(|cx| install_test_host(cx, "host-b"));
+        cx.update(|cx| {
+            for host in ["host-a", "host-b"] {
+                MultibotView::apply_host_bridge_event_to_app(
+                    host,
+                    1,
+                    UiBridgeEvent::Server(ServerEvent::Sessions {
+                        sessions: vec![make_session("same", AgentKind::Claude, host, false)],
+                    }),
+                    &rt,
+                    cx,
+                );
+            }
+            MultibotView::disconnect_host_on_app("host-a", cx);
+            assert!(!MultibotView::apply_host_bridge_event_to_app(
+                "host-a",
+                1,
+                UiBridgeEvent::Server(ServerEvent::Sessions {
+                    sessions: Vec::new()
+                }),
+                &rt,
+                cx
+            ));
+            let store = cx.global::<SharedAppStore>();
+            assert_eq!(store.connection_status, "1/2 hosts · 1 sessions");
+            assert_eq!(store.host_sessions.len(), 1);
+            assert_eq!(store.host_sessions[0].0, "host-b");
+            assert!(store.host_connections["host-a"].manually_disconnected);
+            assert!(store.host_connections["host-b"].connected);
+            assert!(store.host_connections["host-b"].daemon_tx.is_some());
+        });
+        assert!(matches!(
+            shutdown_a.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+        assert!(matches!(
+            shutdown_b.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[gpui_kit::test]
+    fn multi_host_connections_live_until_last_window_closes(cx: &mut TestAppContext) {
+        let (handle1, view1) = open_test_view_with_entity(cx);
+        let (handle2, view2) = open_test_view_with_entity(cx);
+        let (_rx_a, mut shutdown_a) = cx.update(|cx| install_test_host(cx, "host-a"));
+        let (_rx_b, mut shutdown_b) = cx.update(|cx| install_test_host(cx, "host-b"));
+        drop(view1);
+        cx.update_window(handle1, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let store = cx.global::<SharedAppStore>();
+            assert_eq!(store.window_count, 1);
+            assert_eq!(store.host_connections.len(), 2);
+            assert!(
+                store
+                    .host_connections
+                    .values()
+                    .all(|h| h.connected && h.daemon_tx.is_some())
+            );
+        });
+        assert!(matches!(
+            shutdown_a.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            shutdown_b.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        drop(view2);
+        cx.update_window(handle2, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let store = cx.global::<SharedAppStore>();
+            assert_eq!(store.window_count, 0);
+            assert!(store.host_connections.is_empty());
+            assert!(store.host_sessions.is_empty());
+            assert!(store.daemon_tx.is_none());
+        });
+        assert!(matches!(
+            shutdown_a.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+        assert!(matches!(
+            shutdown_b.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
     }
 
     #[gpui_kit::test]
