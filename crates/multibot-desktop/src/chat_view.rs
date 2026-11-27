@@ -4906,6 +4906,11 @@ impl MultibotView {
                 this.schedule_slash_picker_sync(window, cx);
             }))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                // The Computer View URL field owns Escape while it has focus, so the pane
+                // closes instead of the chat surface losing the key to a modal handler.
+                if this.handle_computer_view_key_down(ev, window, cx) {
+                    return;
+                }
                 // The terminal grid owns printable keys, arrows and Ctrl+C/D/L/Z while the
                 // pane has focus. `Alt+C` never matches here: it closes the pane instead.
                 if this.handle_terminal_key_down(ev, window, cx) {

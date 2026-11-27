@@ -183,6 +183,18 @@ public sealed class MultibotUiSession : IDisposable {
         foreach (ushort key in keys.Reverse()) inputs.Add(new INPUT { type = 1, data = new INPUT_UNION { keyboard = new KEYBDINPUT { key = key, flags = 2 } } });
         Check(SendInput((uint)inputs.Count, inputs.ToArray(), Marshal.SizeOf(typeof(INPUT))) == inputs.Count);
     }
+    // Types text into the focused control as Unicode characters, so a journey can reach a
+    // palette command by name without depending on the keyboard layout.
+    public void Text(IntPtr hwnd, string text) {
+        Focus(hwnd);
+        foreach (char character in text) {
+            var inputs = new[] {
+                new INPUT { type = 1, data = new INPUT_UNION { keyboard = new KEYBDINPUT { scan = character, flags = 4 } } },
+                new INPUT { type = 1, data = new INPUT_UNION { keyboard = new KEYBDINPUT { scan = character, flags = 6 } } }
+            };
+            Check(SendInput(2, inputs, Marshal.SizeOf(typeof(INPUT))) == 2);
+        }
+    }
     public sealed class CaptureResult {
         public string filename; public int width, height; public bool nonBlank;
         public long changedPixels; public double changedFraction;
@@ -298,7 +310,12 @@ public sealed class MultibotUiSession : IDisposable {
         @{ name = 'shortcuts'; file = '05-shortcuts.png'; keys = @(0x70); dismiss = $true },
         # Alt+C opens the built-in terminal pane, then Alt+C again closes it (MBRU-6).
         @{ name = 'terminal'; file = '06-terminal.png'; keys = @(0x12, 0x43); dismiss = $false },
-        @{ name = 'terminal-close'; file = '07-terminal-close.png'; keys = @(0x12, 0x43); dismiss = $false }
+        @{ name = 'terminal-close'; file = '07-terminal-close.png'; keys = @(0x12, 0x43); dismiss = $false },
+        # Ctrl+K -> "Toggle Computer View" opens the lazy pane, and the same row closes it
+        # again (MBRU-7). Typed by name so the journey does not depend on a chord the pane
+        # deliberately does not claim.
+        @{ name = 'computer-view'; file = '08-computer-view.png'; keys = @(0x11, 0x4B); text = 'computer view'; dismiss = $false },
+        @{ name = 'computer-view-close'; file = '09-computer-view-close.png'; keys = @(0x11, 0x4B); text = 'computer view'; dismiss = $false }
     )
     $reference = $null
     foreach ($journey in $journeys) {
@@ -309,6 +326,13 @@ public sealed class MultibotUiSession : IDisposable {
             if ($journey.keys.Count) {
                 $session.Keys($hwnd, [ushort[]]$journey.keys)
                 Start-Sleep -Milliseconds 600
+            }
+            if ($journey.text) {
+                $session.Text($hwnd, [string]$journey.text)
+                Start-Sleep -Milliseconds 500
+                # Enter runs the highlighted palette row.
+                $session.Keys($hwnd, [ushort[]]@(0x0D))
+                Start-Sleep -Milliseconds 900
             }
             $path = Join-Path $EvidenceDir $journey.file
             $capture = $session.Capture($hwnd, $path, $reference)

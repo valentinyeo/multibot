@@ -461,6 +461,26 @@ impl MultibotView {
                 tab_context: false,
                 global: true,
             },
+            // Computer View (Slice 5, MBRU-7): no dedicated chord by design
+            PaletteCommandSpec {
+                id: "pal-cmd-toggle-computer-view".into(),
+                label: "Toggle Computer View".into(),
+                chord: String::new(),
+                category: PaletteCategory::LookAndSettings,
+                destructive: false,
+                aliases: vec![
+                    "computer".into(),
+                    "vnc".into(),
+                    "novnc".into(),
+                    "desktop".into(),
+                    "remote screen".into(),
+                    "preview".into(),
+                ],
+                // Reachable from Ctrl+K everywhere and from the chat `...` menu, which
+                // opens the palette in tab context.
+                tab_context: true,
+                global: true,
+            },
             // Browser (Phase 2 placeholders)
             PaletteCommandSpec {
                 id: "pal-cmd-browser-toggle".into(),
@@ -762,6 +782,13 @@ impl MultibotView {
                     }
                     "pal-cmd-toggle-terminal" => {
                         self.toggle_terminal_pane(cx);
+                        return;
+                    }
+                    "pal-cmd-toggle-computer-view" => {
+                        // The palette runs over the chat surface; the pane docks beside it.
+                        if let Some(win) = window {
+                            self.toggle_computer_view(win, cx);
+                        }
                         return;
                     }
                     "pal-cmd-hosts" => {

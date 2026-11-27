@@ -18,7 +18,7 @@
 1. **First check:** Confirm the `42a4e7a` GitHub Release (`https://github.com/valentinyeo/multibot/releases`) built green on Windows and test live VPS connect + auto-update on Valentin's Windows laptop (fix any real-world Windows/SSH/UI rough edges directly).
 2. **Slice 5 — Built-in Terminal & Computer View:**
    - Native GPU terminal toggle (`Alt+C`) shipped in `crates/multibot-desktop/src/terminal_pane.rs`: lazy `portable-pty` + `alacritty_terminal` grid, `ssh -tt` on the active host with a single-quoted safe `cd`, local login shell when offline, obsidian header with Clear / Reconnect / Close. Zero PTY, zero child and zero polling loop while closed.
-   - Lazy-loaded GPUI Kit WebView2 Computer View (0 MB RAM when closed).
+   - Lazy-loaded Computer View shipped in `crates/multibot-desktop/src/computer_view.rs` (MBRU-7): `Ctrl+K → Toggle Computer View` docks a right-hand pane beside the chat. Closed owns no webview, no process and no loop. On Windows the page renders in WebView2 with an isolated `%APPDATA%\Multibot\webview2` profile and Chromium's GPU stack disabled, created on connect and torn down on Close; on Linux the same toolbar and URL state render over a dark preview surface.
 3. **Slice 6 — Docked Chrome/Edge Browser Pane & Extras:**
    - Isolated `platform/windows/browser_dock` with its own Chrome profile & native-messaging host (`zsb` bridge, `Alt+A`, `Alt+Q`, `Ctrl+Shift+S`, per-chat auto-switching, idle hibernation).
    - Rooms (multi-bot group chats), Deepgram voice dictation (`Ctrl+Shift+Space`), Reminders & Workspace Snooze (`Ctrl+H`, `Ctrl+Shift+Y`), plus Pi & Cursor providers.

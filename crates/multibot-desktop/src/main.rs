@@ -5,6 +5,7 @@
 
 mod app;
 mod chat_view;
+mod computer_view;
 mod inbox;
 mod palette;
 mod settings;
