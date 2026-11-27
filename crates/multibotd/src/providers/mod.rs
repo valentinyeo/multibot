@@ -292,7 +292,12 @@ pub fn discover_all_sessions_owned(
     let archive = ArchiveStore::load(home);
     let live = LiveActivity::load(home);
     let none = HashSet::new();
-    let server_workspaces = ServerWorkspaceIndex::load_default_cached();
+    // Read the legacy state seeded under the fake `home`, never this host's real state dir:
+    // tests assert against ids sampled from a real machine, so a live index would leak its
+    // names into the assertions.
+    let server_workspaces = ServerWorkspaceIndex::load_from_state_dir(
+        &home.join(".local").join("state").join("multiprompt"),
+    );
     let ctx = DiscoveryContext {
         active_session_ids: &none,
         connected_session_ids: &none,
@@ -396,7 +401,8 @@ pub fn discover_all_sessions_with_ctx(
         let title = meta
             .title
             .clone()
-            .filter(|t| !t.trim().is_empty())
+            .and_then(non_blank)
+            .or_else(|| ctx.server_workspaces.name_for(sid).map(str::to_string))
             .unwrap_or_else(|| sid.clone());
         let summary = SessionSummary {
             id: sid.clone(),
@@ -500,6 +506,11 @@ impl DiscoveryContext<'_> {
     }
 }
 
+/// True when a title has something in it once trimmed, so an empty hint never wins a slot.
+fn non_blank(title: String) -> Option<String> {
+    (!title.trim().is_empty()).then_some(title)
+}
+
 /// True when a live id such as a Codex session uuid ends the file name's last path segment.
 fn is_uuid_suffix(id: &str, file_name: &str) -> bool {
     file_name
@@ -550,9 +561,12 @@ pub fn summarize_session(
 
     let title = meta_entry
         .and_then(|m| m.title.clone())
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| tail.title_hint.clone().filter(|s| !s.trim().is_empty()))
-        .or_else(|| header.title_hint.clone().filter(|s| !s.trim().is_empty()))
+        .and_then(non_blank)
+        // A chat the user renamed in the legacy app keeps that name here, so the same chat
+        // reads `"Poteto"` in both apps instead of its first prompt.
+        .or_else(|| ctx.server_workspaces.name_for(&id).map(str::to_string))
+        .or_else(|| tail.title_hint.clone().and_then(non_blank))
+        .or_else(|| header.title_hint.clone().and_then(non_blank))
         .unwrap_or_else(|| id.clone());
 
     let now = now_ms();
@@ -3272,6 +3286,114 @@ mod tests {
             ids.contains(sid),
             "an archived chat must stay reachable with include_archived: {ids:?}"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_custom_chat_names_win_over_the_transcript_title_but_lose_to_a_manual_rename() {
+        let dir = unique_temp_dir("legacy-names");
+        let state_root = dir.join(".local").join("state").join("multiprompt");
+        // One live chat per provider, each named in the legacy app.
+        let claude = "6f353a80-d3df-4e44-88aa-edcc6c2b8999";
+        let agy = "cfcfd749-fda1-40bb-b70b-0b3db1c69b2f";
+        let codex_sid = "9738e6e1-a533-4db7-823d-3e04af268ccb";
+        let codex_rollout = "01a213db-1d2a-7783-8245-01b6e818b48a";
+        seed_claude_transcript_named(&dir, claude, "first prompt of the claude chat", 60);
+        write_live_chat(&dir, claude, "live-8bc7bac", 60);
+        seed_antigravity_transcript(&dir, agy, "first prompt of the agy chat", 60);
+        write_live_antigravity_chat(&dir, agy);
+        let rollout = dir
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("11")
+            .join("26")
+            .join(format!("rollout-2026-11-26-{codex_rollout}.jsonl"));
+        fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        fs::write(
+            &rollout,
+            format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{codex_rollout}\"}}}}\n"),
+        )
+        .unwrap();
+        set_age(&rollout, 60);
+        let host = state_root.join("agent-host");
+        fs::create_dir_all(&host).unwrap();
+        let stem = &sha256_hex(format!("codex:{codex_sid}").as_bytes())[..32];
+        fs::write(
+            host.join(format!("{stem}.config.json")),
+            format!(
+                r#"{{"enabled":true,"provider":"codex","sid":"{codex_sid}","tmux":"live-4b135e3"}}"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            host.join(format!("{stem}.state.json")),
+            format!(
+                r#"{{"pid":{},"sid":"{codex_sid}","provider":"codex","native_session":"{codex_rollout}","tmux":"live-4b135e3"}}"#,
+                std::process::id()
+            ),
+        )
+        .unwrap();
+        // Antigravity's own helper already wrote a `chat-names.json`, so rewrite it once with
+        // every chat this test needs. Both legacy files stay read-only from here on.
+        let chat_names = state_root.join("chat-names.json");
+        fs::write(
+            &chat_names,
+            format!(
+                concat!(
+                    r#"{{"live-8bc7bac":{{"name":"Poteto","sid":"{claude}"}},"#,
+                    r#""live-agy":{{"name":"HT AGY Lead","conversation":"{agy}"}},"#,
+                    r#""live-4b135e3":{{"name":"HT Features","sid":"{codex_sid}"}}}}"#,
+                ),
+                claude = claude,
+                agy = agy,
+                codex_sid = codex_sid,
+            ),
+        )
+        .unwrap();
+        let names_before = fs::read(&chat_names).unwrap();
+
+        let sessions = discover_all_sessions_owned(&dir, 50, false);
+        let title_of = |id: &str| {
+            sessions
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.title.clone())
+                .unwrap_or_else(|| panic!("session {id} missing: {sessions:?}"))
+        };
+        assert_eq!(title_of(claude), "Poteto", "Claude sid");
+        assert_eq!(title_of(agy), "HT AGY Lead", "Antigravity conversation");
+        assert_eq!(
+            title_of(codex_rollout),
+            "HT Features",
+            "Codex native_session rollout id"
+        );
+
+        // A rename saved in Multibot's own metadata outranks the legacy name.
+        let mut metadata = MetadataStore::load(&dir);
+        metadata.sessions.insert(
+            claude.to_string(),
+            SessionMetaEntry {
+                title: Some("Renamed In Multibot".to_string()),
+                agent: Some(AgentKind::Claude),
+                updated_at_ms: now_ms(),
+                ..Default::default()
+            },
+        );
+        metadata.save(&dir).unwrap();
+        let sessions = discover_all_sessions_owned(&dir, 50, false);
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|s| s.id == claude)
+                .map(|s| s.title.as_str()),
+            Some("Renamed In Multibot")
+        );
+
+        // Invariant #2: reading the legacy state never writes to it.
+        assert_eq!(fs::read(&chat_names).unwrap(), names_before);
+        assert!(!dir.join(".config/ZigShell").exists());
 
         let _ = fs::remove_dir_all(&dir);
     }

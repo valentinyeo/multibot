@@ -881,6 +881,8 @@ impl ProcessManager {
             SessionSummary {
                 id: session_id.clone(),
                 agent,
+                // `clean_title` was just written to `metadata.json`, so the manual rename is
+                // authoritative and outranks any legacy name.
                 title: clean_title,
                 cwd: meta.get(&session_id).and_then(|e| e.cwd.clone()),
                 source_path,

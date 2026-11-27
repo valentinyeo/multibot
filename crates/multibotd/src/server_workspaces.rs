@@ -11,8 +11,10 @@
 //!   (the rollout id), because `sid` stays the Claude provider id after a provider switch.
 //!
 //! Building an index over both is what lets a live transcript id resolve to the workspace a
-//! chat really belongs to. Everything here is strictly read-only: no file in the legacy state
-//! directory is ever created, modified or deleted, and every read is size-capped.
+//! chat really belongs to, and to the display name the user gave it in the legacy app
+//! (`"Poteto"`, `"HT Design Lead"`), rather than to a first-prompt guess. Everything here is
+//! strictly read-only: no file in the legacy state directory is ever created, modified or
+//! deleted, and every read is size-capped.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -32,10 +34,15 @@ const MIN_INDEXED_ID_CHARS: usize = 8;
 /// Workspace name length cap, matching `MAX_WORKSPACE_NAME_CHARS`.
 const MAX_WORKSPACE_NAME_CHARS: usize = 63;
 
-/// Resolves transcript session ids to the workspace names recorded by the legacy server.
+/// Chat display-name length cap, matching `MAX_SESSION_TITLE_CHARS`.
+const MAX_CHAT_NAME_CHARS: usize = 63;
+
+/// Resolves transcript session ids to the workspace names and custom chat names recorded by
+/// the legacy server.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServerWorkspaceIndex {
     assignments: HashMap<String, String>,
+    names: HashMap<String, String>,
 }
 
 /// Cached index together with the state stamp it was built from.
@@ -47,6 +54,11 @@ impl ServerWorkspaceIndex {
         self.assignments.get(session_id).map(String::as_str)
     }
 
+    /// Custom chat name the user gave `session_id` in the legacy app, if any.
+    pub fn name_for(&self, session_id: &str) -> Option<&str> {
+        self.names.get(session_id).map(String::as_str)
+    }
+
     /// Builds the index from an explicit legacy state directory (used by tests).
     pub fn load_from_state_dir(state_dir: &Path) -> Self {
         let mut index = Self::default();
@@ -54,7 +66,10 @@ impl ServerWorkspaceIndex {
         for (session_id, workspace) in &chat_names.by_session_id {
             index.insert(session_id, workspace);
         }
-        index.add_agent_host(&state_dir.join("agent-host"), &chat_names.by_tmux);
+        for (session_id, name) in &chat_names.name_by_session_id {
+            index.insert_name(session_id, name);
+        }
+        index.add_agent_host(&state_dir.join("agent-host"), &chat_names);
         index
     }
 
@@ -89,7 +104,7 @@ impl ServerWorkspaceIndex {
         index
     }
 
-    fn add_agent_host(&mut self, dir: &Path, by_tmux: &HashMap<String, String>) {
+    fn add_agent_host(&mut self, dir: &Path, chat_names: &ChatNames) {
         if !is_regular_non_symlink_dir(dir) {
             return;
         }
@@ -156,12 +171,18 @@ impl ServerWorkspaceIndex {
             }
         }
 
-        for (tmux, workspace) in by_tmux {
-            let Some(ids) = tmux_ids.get(tmux) else {
-                continue;
-            };
-            for id in ids {
-                self.insert(id, workspace);
+        for (tmux, ids) in &tmux_ids {
+            // A Codex chat writes its transcript under the rollout id from `state.json`, so
+            // both its workspace and its name have to follow the tmux key, not the sid.
+            if let Some(workspace) = chat_names.by_tmux.get(tmux) {
+                for id in ids {
+                    self.insert(id, workspace);
+                }
+            }
+            if let Some(name) = chat_names.name_by_tmux.get(tmux) {
+                for id in ids {
+                    self.insert_name(id, name);
+                }
             }
         }
     }
@@ -174,6 +195,16 @@ impl ServerWorkspaceIndex {
         self.assignments
             .entry(id.to_string())
             .or_insert_with(|| workspace.to_string());
+    }
+
+    fn insert_name(&mut self, id: &str, name: &str) {
+        let id = id.trim();
+        if id.chars().count() < MIN_INDEXED_ID_CHARS {
+            return;
+        }
+        self.names
+            .entry(id.to_string())
+            .or_insert_with(|| name.to_string());
     }
 }
 
@@ -236,13 +267,18 @@ fn dir_stamp(path: &Path) -> Option<(usize, i64)> {
     Some((count, newest))
 }
 
-/// Workspace names recorded in `chat-names.json`, keyed the two ways the file records them.
+/// Workspaces and names recorded in `chat-names.json`, keyed the two ways the file records
+/// them.
 #[derive(Debug, Default)]
 struct ChatNames {
     /// `sid` / `conversation` -> workspace name.
     by_session_id: HashMap<String, String>,
     /// tmux session key (`live-xxxxxxx`) -> workspace name.
     by_tmux: HashMap<String, String>,
+    /// `sid` / `conversation` -> custom chat name.
+    name_by_session_id: HashMap<String, String>,
+    /// tmux session key (`live-xxxxxxx`) -> custom chat name.
+    name_by_tmux: HashMap<String, String>,
 }
 
 fn read_chat_names(path: &Path) -> ChatNames {
@@ -260,17 +296,30 @@ fn read_chat_names(path: &Path) -> ChatNames {
         let Some(obj) = entry.as_object() else {
             continue;
         };
-        let Some(workspace) = obj
+        // Workspace and name are independent: a chat can be named and not yet placed in a
+        // workspace, which is the common case for `"Poteto"` and friends.
+        let workspace = obj
             .get("workspace")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|s| !s.is_empty())
-        else {
+            .map(|s| truncate_chars(s, MAX_WORKSPACE_NAME_CHARS));
+        let name = obj
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| truncate_chars(s, MAX_CHAT_NAME_CHARS));
+        if workspace.is_none() && name.is_none() {
             continue;
-        };
-        let workspace = truncate_chars(workspace, MAX_WORKSPACE_NAME_CHARS);
+        }
         if key.starts_with("live-") {
-            out.by_tmux.insert(key.clone(), workspace.clone());
+            if let Some(workspace) = &workspace {
+                out.by_tmux.insert(key.clone(), workspace.clone());
+            }
+            if let Some(name) = &name {
+                out.name_by_tmux.insert(key.clone(), name.clone());
+            }
         }
         for field in ["sid", "conversation"] {
             let Some(id) = obj
@@ -281,9 +330,16 @@ fn read_chat_names(path: &Path) -> ChatNames {
             else {
                 continue;
             };
-            out.by_session_id
-                .entry(id.to_string())
-                .or_insert_with(|| workspace.clone());
+            if let Some(workspace) = &workspace {
+                out.by_session_id
+                    .entry(id.to_string())
+                    .or_insert_with(|| workspace.clone());
+            }
+            if let Some(name) = &name {
+                out.name_by_session_id
+                    .entry(id.to_string())
+                    .or_insert_with(|| name.clone());
+            }
         }
     }
     out
@@ -506,6 +562,92 @@ mod tests {
         assert_eq!(index.workspace_for("short"), None);
         let resolved = index.workspace_for("long-enough-id").unwrap();
         assert_eq!(resolved.chars().count(), MAX_WORKSPACE_NAME_CHARS);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn custom_chat_names_resolve_for_claude_antigravity_and_codex_ids() {
+        let dir = temp_state_dir("names");
+        write(
+            &dir.join("chat-names.json"),
+            r#"{
+                "live-8bc7bac": { "name": "Poteto", "sid": "6f353a80-d3df-4e44-88aa-edcc6c2b8999" },
+                "live-8587837": {
+                    "name": "HT AGY Lead",
+                    "sid": "ce8f0043-0187-4e02-b651-d4153725c61e",
+                    "workspace": "HT Product",
+                    "conversation": "cfcfd749-fda1-40bb-b70b-0b3db1c69b2f"
+                },
+                "live-4b135e3": { "name": "HT Features", "sid": "9738e6e1-a533-4db7-823d-3e04af268ccb" },
+                "@agents": { "live-8bc7bac": "2f26726a-ab85-4e39-954c-1f1634227bb6" }
+            }"#,
+        );
+        // A Codex chat keeps the Claude `sid` in `chat-names.json` but writes its transcript
+        // under the rollout id, so the name has to follow the tmux key.
+        write(
+            &dir.join("agent-host/e2f2f8d3b2de2c172927d3beef065f6d.config.json"),
+            r#"{"provider": "codex", "sid": "9738e6e1-a533-4db7-823d-3e04af268ccb", "tmux": "live-4b135e3"}"#,
+        );
+        write(
+            &dir.join("agent-host/e2f2f8d3b2de2c172927d3beef065f6d.state.json"),
+            r#"{"sid": "9738e6e1-a533-4db7-823d-3e04af268ccb", "native_session": "01a213db-1d2a-7783-8245-01b6e818b48a", "tmux": "live-4b135e3"}"#,
+        );
+        let before = fs::read(dir.join("chat-names.json")).unwrap();
+        let host_before = fs::read(dir.join("agent-host/e2f2f8d3b2de2c172927d3beef065f6d.state.json")).unwrap();
+
+        let index = ServerWorkspaceIndex::load_from_state_dir(&dir);
+        // Claude `sid`.
+        assert_eq!(
+            index.name_for("6f353a80-d3df-4e44-88aa-edcc6c2b8999"),
+            Some("Poteto")
+        );
+        // Antigravity `conversation`.
+        assert_eq!(
+            index.name_for("cfcfd749-fda1-40bb-b70b-0b3db1c69b2f"),
+            Some("HT AGY Lead")
+        );
+        // Codex `native_session` rollout id, and the provider id it switched from.
+        assert_eq!(
+            index.name_for("01a213db-1d2a-7783-8245-01b6e818b48a"),
+            Some("HT Features")
+        );
+        assert_eq!(
+            index.name_for("9738e6e1-a533-4db7-823d-3e04af268ccb"),
+            Some("HT Features")
+        );
+        // The tmux -> agent map is not a chat and must not produce a name.
+        assert_eq!(index.name_for("2f26726a-ab85-4e39-954c-1f1634227bb6"), None);
+        // Workspaces still resolve from the same single read.
+        assert_eq!(
+            index.workspace_for("cfcfd749-fda1-40bb-b70b-0b3db1c69b2f"),
+            Some("HT Product")
+        );
+
+        // Invariant #2: the legacy state stays byte-for-byte untouched.
+        assert_eq!(fs::read(dir.join("chat-names.json")).unwrap(), before);
+        assert_eq!(
+            fs::read(dir.join("agent-host/e2f2f8d3b2de2c172927d3beef065f6d.state.json")).unwrap(),
+            host_before
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn chat_names_and_workspace_names_are_capped_independently() {
+        let dir = temp_state_dir("cap-name");
+        let long = "🚀Kraków".repeat(20);
+        write(
+            &dir.join("chat-names.json"),
+            &format!(
+                r#"{{"live-1": {{"sid": "long-enough-id", "name": "  {long}  ", "workspace": "{long}"}}}}"#
+            ),
+        );
+        let index = ServerWorkspaceIndex::load_from_state_dir(&dir);
+        let name = index.name_for("long-enough-id").unwrap();
+        assert_eq!(name.chars().count(), MAX_CHAT_NAME_CHARS);
+        assert!(name.starts_with('🚀'), "name keeps its own leading glyph");
+        let workspace = index.workspace_for("long-enough-id").unwrap();
+        assert_eq!(workspace.chars().count(), MAX_WORKSPACE_NAME_CHARS);
         fs::remove_dir_all(&dir).unwrap();
     }
 
