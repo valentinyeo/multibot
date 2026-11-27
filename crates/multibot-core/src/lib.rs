@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod chat_scroll;
 pub mod daemon_client;
 pub mod daemon_deploy;
 pub mod footprint;

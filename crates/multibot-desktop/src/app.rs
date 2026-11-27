@@ -30,6 +30,7 @@ use gpui_kit::{
 use multibot_core::cache::{
     CacheKey, ChatCache, MAX_SESSION_CACHE_BYTES, ReconcileOutcome, SwitchToken,
 };
+use multibot_core::chat_scroll::PendingScrollTarget;
 use multibot_core::outbox::ChatOutbox;
 use multibot_core::settings::{MAX_CHAT_FONT_SIZE_PT, MIN_CHAT_FONT_SIZE_PT};
 use multibot_core::workspaces::{
@@ -3602,6 +3603,16 @@ impl MultibotView {
                 .as_ref()
                 .is_some_and(|s| s.id == *session_id)
             {
+                if added_count > 0 {
+                    if self.chat_state.scroll.pending_scroll
+                        == PendingScrollTarget::None
+                    {
+                        let handle = &self.chat_state.scroll_handle;
+                        self.chat_state.prepend_scroll_anchor =
+                            Some((handle.max_offset().y, handle.offset()));
+                    }
+                    self.chat_state.scroll.prepended(added_count);
+                }
                 self.messages = self.preserve_failed_local_messages(cached.messages);
                 self.chat_state.reconcile_local_reactions(&self.messages);
                 if self.chat_state.find_open {
@@ -3638,8 +3649,10 @@ impl MultibotView {
             match self.chat_cache.reconcile_server_event(&token, source_path, &ev) {
                 Some(ReconcileOutcome::AppliedToActive) => {
                     if let Some(cached) = self.chat_cache.get(&token.key) {
-                        self.messages = self.preserve_failed_local_messages(cached.messages.clone());
+                        self.messages =
+                            self.preserve_failed_local_messages(cached.messages.clone());
                     }
+                    self.chat_state.scroll.history_loaded(&self.messages, false);
                     self.chat_state.reconcile_local_reactions(&self.messages);
                     if !todos.is_empty() || self.chat_state.session_todos.contains_key(session_id) {
                         self.chat_state
@@ -3665,6 +3678,7 @@ impl MultibotView {
             .is_some_and(|s| s.id == *session_id)
         {
             self.messages = self.preserve_failed_local_messages(messages.clone());
+            self.chat_state.scroll.history_loaded(&self.messages, false);
             self.chat_state.reconcile_local_reactions(&self.messages);
             if !todos.is_empty() {
                 self.chat_state
@@ -3693,6 +3707,28 @@ impl MultibotView {
             return (false, false);
         };
 
+        let is_active = self
+            .selected_session
+            .as_ref()
+            .is_some_and(|s| s.id == *session_id);
+        let added_count = if is_active {
+            if self.chat_state.scroll.pending_scroll
+                == PendingScrollTarget::None
+            {
+                let handle = &self.chat_state.scroll_handle;
+                let distance = f32::from(handle.max_offset().y + handle.offset().y);
+                self.chat_state.scroll.sync_position(distance);
+            }
+            let existing: HashSet<&str> = self.messages.iter().map(|m| m.id.as_str()).collect();
+            messages
+                .iter()
+                .filter(|m| !existing.contains(m.id.as_str()))
+                .map(|m| m.id.as_str())
+                .collect::<HashSet<_>>()
+                .len()
+        } else {
+            0
+        };
         let mut visible_changed = false;
         let source_path = self.session_inputs().into_iter()
             .find(|s| s.host == self.active_session_host() && s.summary.id == *session_id)
@@ -3807,6 +3843,9 @@ impl MultibotView {
             }
         }
 
+        if is_active && visible_changed {
+            self.chat_state.scroll.appended(added_count);
+        }
         (visible_changed, sessions_changed)
     }
 
@@ -4110,6 +4149,10 @@ impl MultibotView {
             self.chat_state.session_todos.clear();
         }
         self.selected_session_host = Some(host.clone());
+        self.chat_state.scroll.open_visit(None);
+        self.chat_state.scroll_handle = gpui_kit::ScrollHandle::default();
+        self.chat_state.prepend_scroll_anchor = None;
+        self.chat_state.newest_chord.reset();
         self.chat_state.composer_menu_open = false;
         // Reset per-session transient Chat View overlays, active inline rename & stale pagination
         self.sidebar_state.rename = None;

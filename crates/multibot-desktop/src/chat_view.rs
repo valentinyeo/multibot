@@ -1,12 +1,12 @@
 use crate::app::{CloseOverlay, MultibotView};
 use crate::slash_picker::SlashKeyOutcome;
-use crate::state::{ActiveModal, SharedAppStore};
+use crate::state::{ActiveModal, MainSurface, SharedAppStore};
 use crate::table_modal::{TableSource, extract_tables_from_markdown};
 use crate::theme::{self, RADIUS_BUBBLE, RADIUS_CHIP, RADIUS_ROW};
 use gpui_kit::{
-    AnyElement, ClipboardEntry, ClipboardItem, Context, ExternalPaths, FocusHandle,
+    AnyElement, ClipboardEntry, ClipboardItem, Context, ExternalPaths, FocusHandle, Focusable,
     Hsla, InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, MouseButton,
-    MouseDownEvent, MouseUpEvent, ParentElement, Role, ScrollHandle, SharedString,
+    MouseDownEvent, MouseUpEvent, ParentElement, Pixels, Point, Role, ScrollHandle, SharedString,
     StatefulInteractiveElement, Styled, TestSupportExt, Window,
     base::text::CodeBlock,
     component::{
@@ -22,6 +22,7 @@ use gpui_kit::{
     px, rgb,
 };
 use multibot_core::cache::sha256_hex;
+use multibot_core::chat_scroll::{ChatScrollTracker, NewestChord, PendingScrollTarget};
 use multibot_core::daemon_client::DaemonTarget;
 use multibot_core::settings::{
     DEFAULT_CHAT_FONT_SIZE_PT, MAX_CHAT_FONT_SIZE_PT, MIN_CHAT_FONT_SIZE_PT, MultibotSettings,
@@ -43,7 +44,6 @@ pub(crate) const MAX_PROMPT_OPTIONS: usize = 4;
 pub(crate) const MAX_QUOTE_LINES: usize = 10;
 pub(crate) const DOUBLE_CLICK_DRAG_THRESHOLD_PX: f32 = 4.0;
 pub(crate) const DOUBLE_CLICK_WINDOW_MS: u64 = 500;
-pub(crate) const DOUBLE_G_WINDOW_MS: u64 = 600;
 pub(crate) const MAX_IMAGE_ATTACHMENTS: usize = 10;
 pub(crate) const MAX_FILE_ATTACHMENTS: usize = 10;
 pub(crate) const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
@@ -204,46 +204,11 @@ pub(crate) enum MessageNavOutcome {
     ReturnedToComposer,
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct NewestChord {
-    first_ms: Option<u64>,
-}
-
-impl NewestChord {
-    pub(crate) fn reset(&mut self) {
-        self.first_ms = None;
-    }
-
-    /// Evaluates a character keystroke for the `GG` jump-to-newest chord (`<= 600ms`)
-    /// starting strictly from an empty composer. Never blocks typing `"GG"` in a non-empty composer.
-    pub(crate) fn on_char(
-        &mut self,
-        ch: char,
-        composer_text_before: &str,
-        now_ms: u64,
-        shift_only: bool,
-        is_held: bool,
-    ) -> bool {
-        let first = self.first_ms.take();
-        if ch != 'G' || !shift_only || is_held {
-            return false;
-        }
-        if composer_text_before.is_empty() {
-            self.first_ms = Some(now_ms);
-            return false;
-        }
-        match first {
-            Some(start) => {
-                composer_text_before == "G" && now_ms.saturating_sub(start) <= DOUBLE_G_WINDOW_MS
-            }
-            None => false,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct ChatViewState {
     pub scroll_handle: ScrollHandle,
+    pub scroll: ChatScrollTracker,
+    pub prepend_scroll_anchor: Option<(Pixels, Point<Pixels>)>,
     pub busy_tick_phase: u8,
     pub failed_sends: HashMap<String, FailedSend>,
     pub expanded_tools: HashSet<String>,
@@ -282,6 +247,8 @@ impl Default for ChatViewState {
     fn default() -> Self {
         Self {
             scroll_handle: ScrollHandle::default(),
+            scroll: ChatScrollTracker::default(),
+            prepend_scroll_anchor: None,
             busy_tick_phase: 0,
             failed_sends: HashMap::new(),
             expanded_tools: HashSet::new(),
@@ -1998,7 +1965,7 @@ impl MultibotView {
     }
 
     pub(crate) fn jump_to_newest(&mut self, cx: &mut Context<Self>) {
-        self.chat_state.scroll_handle.scroll_to_bottom();
+        self.chat_state.scroll.jump_to_bottom();
         self.chat_state.focused_message_idx = None;
         self.chat_state.message_action_menu_open = false;
         cx.notify();
@@ -2146,6 +2113,8 @@ impl MultibotView {
             .is_some_and(|s| s.id == session.id && s.agent == session.agent);
         let msg_id = format!("local-msg-{}", self.messages.len());
         if is_selected {
+            self.chat_state.scroll.sent_message();
+            self.chat_state.prepend_scroll_anchor = None;
             self.messages.push(ChatMessage {
                 id: msg_id.clone(),
                 role: MessageRole::User,
@@ -2863,6 +2832,7 @@ impl MultibotView {
         cx: &mut Context<Self>,
     ) {
         if self.has_higher_priority_modal() {
+            self.chat_state.newest_chord.reset();
             let ks = &ev.keystroke;
             let is_escape = ks.key.eq_ignore_ascii_case("escape");
             let is_fn_key = ks.key.len() >= 2
@@ -2880,6 +2850,44 @@ impl MultibotView {
             return;
         }
         let ks = &ev.keystroke;
+        let is_shift_only_g = ks.key.eq_ignore_ascii_case("g")
+            && ks.modifiers.shift
+            && !ks.modifiers.control
+            && !ks.modifiers.alt
+            && !ks.modifiers.platform;
+        if !is_shift_only_g || self.chat_state.find_open {
+            self.chat_state.newest_chord.reset();
+        } else if self.main_surface == MainSurface::Chat {
+            let composer_focused = self
+                .prompt_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window);
+            let now_ms = self.chat_state.chord_epoch.elapsed().as_millis() as u64;
+            let jump = if composer_focused {
+                let text = self.prompt_input.read(cx).value().to_string();
+                self.chat_state
+                    .newest_chord
+                    .on_char('G', &text, now_ms, true, ev.is_held)
+            } else {
+                self.chat_state
+                    .newest_chord
+                    .on_transcript_g(now_ms, ev.is_held)
+            };
+            if jump {
+                if composer_focused {
+                    self.prompt_input
+                        .update(cx, |state, cx| state.set_value("", window, cx));
+                }
+                self.chat_state.slash_sync_pending = false;
+                self.jump_to_newest(cx);
+            }
+            if jump || !composer_focused {
+                cx.stop_propagation();
+                window.prevent_default();
+                return;
+            }
+        }
         let plain_key = !ks.modifiers.control
             && !ks.modifiers.alt
             && !ks.modifiers.platform
@@ -3044,15 +3052,6 @@ impl MultibotView {
             return;
         }
         let ks = &ev.keystroke;
-        let is_shift_only_g = ks.key.eq_ignore_ascii_case("g")
-            && ks.modifiers.shift
-            && !ks.modifiers.control
-            && !ks.modifiers.alt
-            && !ks.modifiers.platform;
-        if !is_shift_only_g {
-            self.chat_state.newest_chord.reset();
-        }
-
         // Ctrl+Shift+D (strictly !alt for AltGr safety) -> copy latest code block
         if is_copy_latest_code_block_chord(ks) {
             self.chat_state.slash_sync_pending = false;
@@ -3166,25 +3165,6 @@ impl MultibotView {
             let composer_val = self.prompt_input.read(cx).value().to_string();
             if composer_val.is_empty() {
                 self.chat_state.slash_sync_pending = false;
-                self.jump_to_newest(cx);
-                cx.stop_propagation();
-                return;
-            }
-        }
-
-        // GG (two Shift+G within 600ms from empty composer only) -> jump to newest
-        if is_shift_only_g {
-            let composer_val = self.prompt_input.read(cx).value().to_string();
-            let now_ms = self.chat_state.chord_epoch.elapsed().as_millis() as u64;
-            if self
-                .chat_state
-                .newest_chord
-                .on_char('G', &composer_val, now_ms, true, ev.is_held)
-            {
-                self.chat_state.slash_sync_pending = false;
-                self.prompt_input.update(cx, |state, cx| {
-                    state.set_value("", window, cx);
-                });
                 self.jump_to_newest(cx);
                 cx.stop_propagation();
                 return;
@@ -4226,17 +4206,66 @@ impl MultibotView {
             );
         }
 
+        let unread_visible_idx = self
+            .chat_state
+            .scroll
+            .unread_divider_msg_idx
+            .and_then(|idx| {
+                visible_messages
+                    .iter()
+                    .position(|message| message.original_index >= idx)
+            });
+        match std::mem::take(&mut self.chat_state.scroll.pending_scroll) {
+            // GPUI latches this request and applies it against the NEW layout's scroll_max.
+            PendingScrollTarget::Bottom => self.chat_state.scroll_handle.scroll_to_bottom(),
+            PendingScrollTarget::UnreadDivider(_) => {
+                if let Some(idx) = unread_visible_idx {
+                    self.chat_state.scroll_handle.scroll_to_top_of_item(idx);
+                } else {
+                    self.chat_state.scroll.jump_to_bottom();
+                    self.chat_state.scroll.pending_scroll = PendingScrollTarget::None;
+                    self.chat_state.scroll_handle.scroll_to_bottom();
+                }
+            }
+            PendingScrollTarget::None => {}
+        }
+        let view = cx.entity().downgrade();
         let mut msg_col = v_flex()
+            .on_children_prepainted(move |_, _, cx| {
+                let _ = view.update(cx, |this, cx| {
+                    if let Some((old_max, old_offset)) =
+                        this.chat_state.prepend_scroll_anchor.take()
+                    {
+                        let handle = &this.chat_state.scroll_handle;
+                        let mut offset = old_offset;
+                        offset.y -= handle.max_offset().y - old_max;
+                        handle.set_offset(offset);
+                        cx.notify();
+                    } else {
+                        let handle = &this.chat_state.scroll_handle;
+                        let distance = f32::from(handle.max_offset().y + handle.offset().y);
+                        if this.chat_state.scroll.sync_position(distance) {
+                            cx.notify();
+                        }
+                    }
+                });
+            })
+            .id("chat-scroll")
+            .flex_1()
+            .min_h_0()
             .w_full()
-            .max_w(px(760.0))
-            .mx_auto()
             .gap_3()
             .py_4()
-            .px_4();
+            .px_4()
+            .overflow_y_scroll()
+            .track_scroll(&self.chat_state.scroll_handle);
 
         if visible_messages.is_empty() {
             msg_col = msg_col.child(
                 v_flex()
+                    .w_full()
+                    .max_w(px(760.0))
+                    .mx_auto()
                     .p_5()
                     .gap_2()
                     .rounded(RADIUS_BUBBLE)
@@ -4590,7 +4619,37 @@ impl MultibotView {
                         .child(body_col)
                 };
 
-                let mut msg_wrapper = v_flex().w_full().gap_1();
+                let mut msg_wrapper = v_flex()
+                    .w_full()
+                    .max_w(px(760.0))
+                    .mx_auto()
+                    .flex_shrink_0()
+                    .gap_1();
+                if unread_visible_idx == Some(vis_idx) {
+                    msg_wrapper = msg_wrapper.child(
+                        h_flex()
+                            .id("chat-unread-divider")
+                            .test_support()
+                            .w_full()
+                            .items_center()
+                            .gap_3()
+                            .py_2()
+                            .child(div().flex_1().h(px(1.0)).bg(theme::accent_blue()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                    .text_color(theme::accent_blue())
+                                    .rounded(RADIUS_CHIP)
+                                    .border_1()
+                                    .border_color(theme::border_subtle())
+                                    .px_2()
+                                    .py_0p5()
+                                    .child("NEW"),
+                            )
+                            .child(div().flex_1().h(px(1.0)).bg(theme::accent_blue())),
+                    );
+                }
                 if is_user {
                     msg_wrapper = msg_wrapper.child(h_flex().w_full().justify_end().child(bubble));
                 } else {
@@ -4691,7 +4750,11 @@ impl MultibotView {
             msg_col = msg_col.child(
                 h_flex()
                     .id("chat-busy-dots")
+                    .flex_shrink_0()
                     .test_support()
+                    .w_full()
+                    .max_w(px(760.0))
+                    .mx_auto()
                     .px_2()
                     .py_1()
                     .gap_1()
@@ -4953,12 +5016,49 @@ impl MultibotView {
             })
             .when_some(self.render_find_bar(cx), |el, bar| el.child(bar))
             .child(
-                div()
-                    .id("chat-scroll")
+                v_flex()
+                    .relative()
                     .flex_1()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.chat_state.scroll_handle)
-                    .child(msg_col),
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(msg_col)
+                    .when(
+                        !self.messages.is_empty()
+                            && (self.chat_state.scroll.scrolled_up
+                                || self.chat_state.scroll.new_messages_while_scrolled_up > 0),
+                        |el| {
+                            let count = self.chat_state.scroll.new_messages_while_scrolled_up;
+                            el.child(
+                                div()
+                                    .id("chat-jump-to-bottom-btn")
+                                    .role(Role::Button)
+                                    .test_support()
+                                    .absolute()
+                                    .bottom_4()
+                                    .right_6()
+                                    .rounded(RADIUS_CHIP)
+                                    .bg(theme::bg_surface())
+                                    .border_1()
+                                    .border_color(theme::border_subtle())
+                                    .px_3()
+                                    .py_2()
+                                    .text_sm()
+                                    .text_color(if count > 0 {
+                                        theme::accent_blue()
+                                    } else {
+                                        theme::text_primary()
+                                    })
+                                    .hover(|s| s.bg(theme::bg_hover()))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| this.jump_to_newest(cx)))
+                                    .child(if count > 0 {
+                                        format!("↓ {count} new")
+                                    } else {
+                                        "↓".into()
+                                    }),
+                            )
+                        },
+                    ),
             )
             .when_some(self.notice.clone(), |el, note| {
                 el.child(
@@ -5681,17 +5781,17 @@ mod tests {
     }
 
     #[test]
-    fn double_g_requires_empty_composer_and_600ms_window() {
+    fn double_g_requires_empty_composer_and_500ms_window() {
         let mut chord = NewestChord::default();
-        // Empty composer -> first G arms, second G within 600ms fires
+        // Empty composer -> first G arms, second G within 500ms fires
         assert!(!chord.on_char('G', "", 1000, true, false));
-        assert!(chord.on_char('G', "G", 1599, true, false));
+        assert!(chord.on_char('G', "G", 1499, true, false));
         // Third G must not immediately fire
         assert!(!chord.on_char('G', "G", 1650, true, false));
 
-        // > 600ms does NOT fire
+        // > 500ms does NOT fire
         assert!(!chord.on_char('G', "", 2000, true, false));
-        assert!(!chord.on_char('G', "G", 2601, true, false));
+        assert!(!chord.on_char('G', "G", 2501, true, false));
 
         // Non-empty composer NEVER fires
         assert!(!chord.on_char('G', "hello", 3000, true, false));
@@ -5731,6 +5831,244 @@ mod tests {
             })
             .unwrap()
         })
+    }
+
+    fn chat_scroll_messages() -> Vec<ChatMessage> {
+        (0..40)
+            .map(|i| ChatMessage {
+                id: format!("scroll-{i}"),
+                role: MessageRole::User,
+                text: format!("Message {i}\nSecond line\nThird line"),
+                timestamp_ms: Some(i * 100),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    #[gpui_kit::test]
+    fn chat_scroll_late_history_follow_send_and_jump(cx: &mut TestAppContext) {
+        use multibot_proto::ServerEvent;
+        let (handle, view) = open_test_chat_window(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.selected_session = Some(SessionSummary {
+                    id: "scroll".into(),
+                    ..Default::default()
+                });
+                cx.notify();
+            });
+            window.render_frame(cx);
+            view.update(cx, |v, cx| {
+                v.handle_daemon_server_event(
+                    ServerEvent::History {
+                        session_id: "scroll".into(),
+                        messages: chat_scroll_messages(),
+                        oldest_offset: None,
+                        latest_offset: None,
+                        has_more: false,
+                        file_size: None,
+                        file_mtime_ms: None,
+                        probe_sha256: None,
+                        todos: vec![],
+                    },
+                    cx,
+                )
+            });
+            window.render_frame(cx);
+            let scroll = view.read(cx).chat_state.scroll_handle.clone();
+            assert!(scroll.max_offset().y > px(100.0));
+            assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+            assert_eq!(scroll.children_count(), 40);
+            assert_eq!(
+                view.read(cx).chat_state.scroll.pending_scroll,
+                PendingScrollTarget::None
+            );
+
+            let append = |id: &str| ServerEvent::HistoryAppend {
+                session_id: "scroll".into(),
+                messages: vec![ChatMessage {
+                    id: id.into(),
+                    role: MessageRole::Assistant,
+                    text: "New reply".into(),
+                    ..Default::default()
+                }],
+                latest_offset: None,
+                working: None,
+                todos: vec![],
+                probe_sha256: None,
+            };
+            view.update(cx, |v, cx| {
+                v.handle_daemon_server_event(append("reply-1"), cx)
+            });
+            window.render_frame(cx);
+            assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+
+            view.update(cx, |_, cx| {
+                scroll.set_offset(gpui_kit::point(px(0.0), px(-100.0)));
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(view.read(cx).chat_state.scroll.scrolled_up);
+            let old_offset = scroll.offset();
+            view.update(cx, |v, cx| {
+                v.handle_daemon_server_event(append("reply-2"), cx)
+            });
+            window.render_frame(cx);
+            assert_eq!(scroll.offset(), old_offset);
+            assert_eq!(
+                view.read(cx)
+                    .chat_state
+                    .scroll
+                    .new_messages_while_scrolled_up,
+                1
+            );
+            window.click("chat-jump-to-bottom-btn", cx);
+            window.render_frame(cx);
+            assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+            assert_eq!(
+                view.read(cx)
+                    .chat_state
+                    .scroll
+                    .new_messages_while_scrolled_up,
+                0
+            );
+
+            view.update(cx, |v, cx| {
+                scroll.set_offset(gpui_kit::point(px(0.0), px(-100.0)));
+                v.chat_state.scroll.sync_position(200.0);
+                v.chat_state.scroll.unread_divider_msg_idx = Some(10);
+                v.dispatch_text_prompt("Sent message".into(), None, cx);
+            });
+            window.render_frame(cx);
+            assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+            assert!(view.read(cx).chat_state.scroll.follow_bottom);
+            assert_eq!(view.read(cx).chat_state.scroll.unread_divider_msg_idx, None);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn chat_scroll_unread_cache_and_older_page_keep_the_cutoff(cx: &mut TestAppContext) {
+        use multibot_core::{
+            cache::{CacheKey, CachedSession},
+            workspaces::{UnreadBoundary, canonical_session_key},
+        };
+        use multibot_proto::ServerEvent;
+        let (handle, view) = open_test_chat_window(cx);
+        cx.update_window(handle, |_, window, cx| {
+            let session = SessionSummary {
+                id: "unread-scroll".into(),
+                agent: AgentKind::Claude,
+                needs_attention: true,
+                last_assistant_id: Some("scroll-39".into()),
+                ..Default::default()
+            };
+            view.update(cx, |v, cx| {
+                v.chat_cache.put(
+                    CacheKey::new("local", session.agent, &session.id),
+                    CachedSession {
+                        messages: chat_scroll_messages(),
+                        oldest_offset: 100,
+                        consumed_offset: 200,
+                        file_size: 200,
+                        has_more: true,
+                        ..Default::default()
+                    },
+                );
+                let key = canonical_session_key("local", session.agent, &session.id);
+                v.sidebar_state.workspace_store.unread_boundaries.insert(
+                    key.clone(),
+                    UnreadBoundary {
+                        last_read_assistant_id: Some("scroll-9".into()),
+                        ..Default::default()
+                    },
+                );
+                v.open_session_on_host("local".into(), session.clone(), false, cx);
+                assert_eq!(v.chat_state.scroll.unread_divider_msg_idx, Some(10));
+                assert_eq!(
+                    v.sidebar_state.workspace_store.unread_boundaries[&key].last_read_assistant_id,
+                    session.last_assistant_id
+                );
+            });
+            window.render_frame(cx);
+            let scroll = view.read(cx).chat_state.scroll_handle.clone();
+            let cutoff_top = scroll.bounds_for_item(10).unwrap().top();
+            assert_eq!(cutoff_top + scroll.offset().y, scroll.bounds().top());
+            assert!(view.read(cx).chat_state.scroll.scrolled_up);
+            let previous_cutoff_screen_y = cutoff_top + scroll.offset().y;
+            view.update(cx, |v, cx| {
+                v.handle_daemon_server_event_with_hint(
+                    "local",
+                    ServerEvent::History {
+                        session_id: session.id.clone(),
+                        messages: vec![ChatMessage {
+                            id: "older".into(),
+                            role: MessageRole::User,
+                            text: "Earlier message\nMore history".into(),
+                            ..Default::default()
+                        }],
+                        oldest_offset: Some(0),
+                        latest_offset: Some(100),
+                        has_more: false,
+                        file_size: Some(200),
+                        file_mtime_ms: None,
+                        probe_sha256: None,
+                        todos: vec![],
+                    },
+                    true,
+                    cx,
+                )
+            });
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).chat_state.scroll.unread_divider_msg_idx,
+                Some(11)
+            );
+            assert_eq!(
+                scroll.bounds_for_item(11).unwrap().top() + scroll.offset().y,
+                previous_cutoff_screen_y
+            );
+            assert_eq!(scroll.children_count(), 41);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn chat_scroll_shift_gg_capture_preserves_typing_and_drafts(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_chat_window(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.prompt_input.update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                    input.focus(window, cx);
+                });
+                v.chat_state.focused_message_idx = Some(0);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.press("shift-g", cx);
+            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "G");
+            window.press("shift-g", cx);
+            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "");
+            assert_eq!(view.read(cx).chat_state.focused_message_idx, None);
+            window.press("shift-g", cx);
+            window.press("o", cx);
+            window.press("o", cx);
+            window.press("d", cx);
+            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "Good");
+            view.update(cx, |v, cx| {
+                v.focus_chat_panel(window, cx);
+                v.chat_state.focused_message_idx = Some(0);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.press("shift-g", cx);
+            window.press("shift-g", cx);
+            assert_eq!(view.read(cx).chat_state.focused_message_idx, None);
+            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "Good");
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
@@ -6377,7 +6715,7 @@ mod tests {
         let mut chord = NewestChord::default();
         assert!(!chord.on_char('G', "", 1000, true, false));
         chord.reset();
-        // Even if composer is back to "G" within 600ms, reset disarmed the chord.
+        // Even if composer is back to "G" within 500ms, reset disarmed the chord.
         assert!(!chord.on_char('G', "G", 1100, true, false));
     }
 

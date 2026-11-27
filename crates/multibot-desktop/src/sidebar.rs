@@ -295,6 +295,19 @@ impl MultibotView {
             }
         }
 
+        let was_unread = self
+            .sidebar_state
+            .workspace_store
+            .is_session_unread(&next_key, &session);
+        let boundary = if was_unread {
+            self.sidebar_state
+                .workspace_store
+                .unread_boundaries
+                .get(&next_key)
+                .cloned()
+        } else {
+            None
+        };
         let now = now_unix_ms();
         self.sidebar_state
             .workspace_store
@@ -313,6 +326,10 @@ impl MultibotView {
         self.persist_workspace_store_if_enabled();
         self.sync_workspace_to_shared(cx);
         self.select_session_on_host(host, session, cx);
+        self.chat_state.scroll.open_visit(boundary);
+        if !self.messages.is_empty() {
+            self.chat_state.scroll.history_loaded(&self.messages, true);
+        }
     }
 
     pub(crate) fn commit_session_rename(

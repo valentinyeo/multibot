@@ -533,7 +533,7 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         wired: false,
     },
     // =========================================================================
-    // Chat & Voice (13 entries)
+    // Chat & Voice (14 entries)
     // =========================================================================
     ShortcutSpec {
         id: "chat.copy_code",
@@ -541,6 +541,14 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         gpui_key: "ctrl-shift-d",
         category: ShortcutCategory::Chat,
         description: "Copy latest nonempty code block",
+        wired: true,
+    },
+    ShortcutSpec {
+        id: "chat.jump_to_newest",
+        display: "Shift+G twice",
+        gpui_key: "shift-g shift-g",
+        category: ShortcutCategory::Chat,
+        description: "Jump to newest from the transcript or an empty composer (within 500 ms)",
         wired: true,
     },
     ShortcutSpec {
@@ -1047,7 +1055,7 @@ mod tests {
             }
         }
 
-        assert_eq!(SHORTCUTS.len(), 96);
+        assert_eq!(SHORTCUTS.len(), 97);
     }
 
     #[test]
@@ -1117,6 +1125,10 @@ mod tests {
         assert_eq!(by_id("system.shortcuts").unwrap().gpui_key, "f1");
         assert_eq!(by_id("system.new_window").unwrap().gpui_key, "ctrl-n");
         assert_eq!(by_id("system.escape").unwrap().gpui_key, "escape");
+        assert_eq!(
+            by_id("chat.jump_to_newest").unwrap().gpui_key,
+            "shift-g shift-g"
+        );
         assert_eq!(by_id("session.next").unwrap().gpui_key, "ctrl-tab");
         assert_eq!(by_id("session.prev").unwrap().gpui_key, "ctrl-shift-tab");
         for digit in 1..=9 {
@@ -1315,6 +1327,7 @@ mod tests {
             "view.font_dec",
             "view.font_reset",
             "chat.copy_code",
+            "chat.jump_to_newest",
             "chat.find",
             "chat.commands",
             "view.chat_terminal_toggle",
@@ -1324,7 +1337,7 @@ mod tests {
             let spec = by_id(id).unwrap_or_else(|| panic!("missing shortcut {id}"));
             assert!(spec.wired, "expected {id} ({}) to be wired: true", spec.gpui_key);
         }
-        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 62);
+        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 63);
         assert!(!by_id("browser.close_tab").unwrap().wired);
         assert!(!by_id("chat.steer").unwrap().wired);
         assert!(by_gpui_key("ctrl-shift-j").is_none());

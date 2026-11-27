@@ -257,7 +257,7 @@ The search bar stays hidden so the Inbox opens clean. Ctrl+F or / opens and focu
 | Ctrl+K / right-click tab → Bot face / Bot color | Remote faces, colors and pictures sync. |
 | Ctrl+K -&gt; Workspace color | Choose a workspace default color or Auto. Manual bot colors stay unchanged. |
 | Ctrl+F in Chat View | Chat View: Find in conversation; Enter / F3 next, Shift+Enter / Shift+F3 previous, Esc closes |
-| Shift+G twice / End / Ctrl+K "Jump to newest message" | Chat View: jump to the newest message; capital GG works only from an empty message box with two Shift+G presses within 600 ms and leaves the box empty; also the round down-arrow button above the message box that shows when you are scrolled up; Page Up / Page Down / Home scroll, the thin scrollbar on the right drags, the mouse wheel moves about 3 lines per notch |
+| Shift+G twice / End / Ctrl+K "Jump to newest message" | Chat View: jump to the newest message; two Shift+G presses within 500 ms work from the transcript or an empty message box and leave the box empty; also the floating down-arrow button above the message box when scrolled up, with a new-message count when replies arrive; Page Up / Page Down / Home scroll, the thin scrollbar on the right drags, the mouse wheel moves about 3 lines per notch |
 | Double-click empty space | Switch between Chat View and the shell (without selecting text) |
 | Alt+C | Switch terminal tabs between the shell and the chat view; off for live chats, which have no terminal; also the Ctrl+K row and the tab menu for terminal tabs |
 | Ctrl+K -&gt; Switch to chat view / Switch to shell | Show a terminal tab as the chat view or the shell; hidden for live chats; same as Alt+C and the right-click tab menu |
@@ -338,6 +338,8 @@ The search bar stays hidden so the Inbox opens clean. Ctrl+F or / opens and focu
 | Ctrl+K → Restart Multi Bot | Save session and relaunch the app |
 | Ctrl+K → Restart to update | Restart when an update is ready (same as the sidebar card) |
 | F1 | This shortcuts overview |
+
+Read chats open at the bottom. Unread chats open at the NEW divider above the first unread message when a previous read position is known; first visits open at the bottom. Sending jumps to the bottom. Replies follow only while near the bottom, so reading older messages is not interrupted.
 
 ### Clipboard
 
