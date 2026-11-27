@@ -18,7 +18,7 @@ use gpui_kit::{
     Task, TestSupportExt, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
     component::{
         Sizable,
-        button::{Button, ButtonVariants},
+        button::Button,
         h_flex,
         input::InputState,
     },
