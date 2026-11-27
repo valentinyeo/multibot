@@ -57,7 +57,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use sysinfo::System;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -104,6 +104,11 @@ actions!(
         MoveSessionWaiting,
         RemindSession,
         UndoWaiting,
+        OpenDone,
+        OpenHibernated,
+        OpenDissolved,
+        GoLeader,
+        ToggleHibernateMode,
         // Slice 3 — Workspaces & views (16 actions)
         ToggleFavorite,
         SnoozeWorkspace,
@@ -342,7 +347,6 @@ pub struct MultibotView {
     // Session lifecycle & multi-window SharedAppStore sync
     pub(crate) view_id: u64,
     pub(crate) closed_sessions: Vec<(String, SessionSummary)>,
-    pub(crate) pending_archive_confirm: Option<(String, Instant)>,
     pub(crate) last_synced_revision: u64,
     pub(crate) last_synced_connection_gen: u64,
     pub(crate) last_daemon_notice_seq: u64,
@@ -712,7 +716,6 @@ impl MultibotView {
             messages: Vec::new(),
             view_id,
             closed_sessions: Vec::new(),
-            pending_archive_confirm: None,
             last_synced_revision: revision,
             last_synced_connection_gen: connection_gen,
             last_daemon_notice_seq: daemon_notice_seq,
@@ -2034,9 +2037,8 @@ impl MultibotView {
     pub(crate) fn refresh_all_hosts(&self) -> bool {
         if self.host_txs.is_empty() && self.host_statuses.is_empty() {
             return self.daemon_tx.as_ref().is_some_and(|tx| {
-                tx.send(ClientRequest::ListSessions {
+                tx.send(ClientRequest::ListLifecycleSessions {
                     limit: Some(SESSION_LIST_LIMIT),
-                    include_archived: None,
                 })
                 .is_ok()
             });
@@ -2044,9 +2046,8 @@ impl MultibotView {
         let mut refreshed = false;
         for tx in self.host_txs.values() {
             refreshed |= tx
-                .send(ClientRequest::ListSessions {
+                .send(ClientRequest::ListLifecycleSessions {
                     limit: Some(SESSION_LIST_LIMIT),
-                    include_archived: None,
                 })
                 .is_ok();
         }
@@ -2189,9 +2190,8 @@ impl MultibotView {
                         return;
                     }
                     let _ = conn.send(ClientRequest::WatchDirectory);
-                    let _ = conn.send(ClientRequest::ListSessions {
+                    let _ = conn.send(ClientRequest::ListLifecycleSessions {
                         limit: Some(SESSION_LIST_LIMIT),
-                        include_archived: None,
                     });
 
                     loop {
@@ -2468,14 +2468,39 @@ impl MultibotView {
                         let store = cx.global_mut::<SharedAppStore>();
                         store.host_connections.get_mut(host_label).unwrap().sessions =
                             sessions.clone();
+                        let tx = store
+                            .host_connections
+                            .get(host_label)
+                            .and_then(|h| h.daemon_tx.clone());
+                        for session in
+                            &mut store.host_connections.get_mut(host_label).unwrap().sessions
+                        {
+                            let key = canonical_session_key(host_label, session.agent, &session.id);
+                            if store
+                                .workspace_store
+                                .auto_unarchive_waiting_if_active(&key, session)
+                                && session.archived
+                            {
+                                if let Some(tx) = &tx {
+                                    if tx
+                                        .send(ClientRequest::UnarchiveSession {
+                                            session_id: session.id.clone(),
+                                        })
+                                        .is_ok()
+                                    {
+                                        session.archived = false;
+                                    }
+                                }
+                            }
+                        }
                         store.rebuild_merged_sessions();
-                        let changed = store.workspace_store.reconcile_live_sessions(
+                        store.workspace_store.reconcile_live_sessions(
                             store
                                 .host_sessions
                                 .iter()
                                 .map(|(host, summary)| (host.as_str(), summary)),
                         );
-                        if changed > 0 && store.persist_to_disk {
+                        if store.persist_to_disk {
                             let _ = store.workspace_store.save();
                         }
                         store.bump_revision();
@@ -2500,9 +2525,22 @@ impl MultibotView {
                                 .insert(0, session.clone());
                         }
                         let key = canonical_session_key(host_label, session.agent, &session.id);
-                        store
+                        if store
                             .workspace_store
-                            .auto_unarchive_waiting_if_active(&key, session);
+                            .auto_unarchive_waiting_if_active(&key, session)
+                            && session.archived
+                        {
+                            if let Some(tx) = store
+                                .host_connections
+                                .get(host_label)
+                                .and_then(|h| h.daemon_tx.as_ref())
+                                .or(store.daemon_tx.as_ref())
+                            {
+                                let _ = tx.send(ClientRequest::UnarchiveSession {
+                                    session_id: session.id.clone(),
+                                });
+                            }
+                        }
                         store.workspace_store.reconcile_session(host_label, &session);
                         if store.persist_to_disk {
                             let _ = store.workspace_store.save();
@@ -2548,6 +2586,7 @@ impl MultibotView {
                         for s in &mut store.host_connections.get_mut(host_label).unwrap().sessions {
                             if s.id == *session_id {
                                 s.archived = *archived;
+                                s.archive_kill_process = *archived;
                             }
                         }
                         store.daemon_notice = Some(if *archived {
@@ -2849,10 +2888,29 @@ impl MultibotView {
                         let store = cx.global_mut::<SharedAppStore>();
                         store.sessions = sessions.clone();
                         let host = store.connected_host.as_deref().unwrap_or("local");
-                        let changed = store.workspace_store.reconcile_live_sessions(
+                        for session in &mut store.sessions {
+                            let key = canonical_session_key(host, session.agent, &session.id);
+                            if store
+                                .workspace_store
+                                .auto_unarchive_waiting_if_active(&key, session)
+                                && session.archived
+                            {
+                                if let Some(tx) = &store.daemon_tx {
+                                    if tx
+                                        .send(ClientRequest::UnarchiveSession {
+                                            session_id: session.id.clone(),
+                                        })
+                                        .is_ok()
+                                    {
+                                        session.archived = false;
+                                    }
+                                }
+                            }
+                        }
+                        store.workspace_store.reconcile_live_sessions(
                             sessions.iter().map(|summary| (host, summary)),
                         );
-                        if changed > 0 && store.persist_to_disk {
+                        if store.persist_to_disk {
                             let _ = store.workspace_store.save();
                         }
                         store.bump_revision();
@@ -2870,9 +2928,22 @@ impl MultibotView {
                         }
                         let host_label = store.connected_host.as_deref().unwrap_or("local");
                         let key = canonical_session_key(host_label, session.agent, &session.id);
-                        store
+                        if store
                             .workspace_store
-                            .auto_unarchive_waiting_if_active(&key, session);
+                            .auto_unarchive_waiting_if_active(&key, session)
+                            && session.archived
+                        {
+                            if let Some(tx) = store
+                                .host_connections
+                                .get(host_label)
+                                .and_then(|h| h.daemon_tx.as_ref())
+                                .or(store.daemon_tx.as_ref())
+                            {
+                                let _ = tx.send(ClientRequest::UnarchiveSession {
+                                    session_id: session.id.clone(),
+                                });
+                            }
+                        }
                         store.workspace_store.reconcile_session(host_label, &session);
                         if store.persist_to_disk {
                             let _ = store.workspace_store.save();
@@ -2911,6 +2982,7 @@ impl MultibotView {
                         for s in &mut store.sessions {
                             if s.id == *session_id {
                                 s.archived = *archived;
+                                s.archive_kill_process = *archived;
                             }
                         }
                         store.daemon_notice = Some(if *archived {
@@ -3275,21 +3347,30 @@ impl MultibotView {
                 }
                 ServerEvent::Sessions { sessions } => {
                     self.sessions = sessions;
+                    for session in self.sessions.clone() {
+                        let key = self.session_key_for(&session);
+                        if self
+                            .sidebar_state
+                            .workspace_store
+                            .auto_unarchive_waiting_if_active(&key, &session)
+                            && session.archived
+                        {
+                            let host = self.host_for_summary(&session);
+                            self.unarchive_session_on_host(&host, session.id.clone(), cx);
+                        }
+                    }
                     let live: Vec<(String, multibot_proto::SessionSummary)> = self
                         .sessions
                         .iter()
                         .map(|s| (self.host_for_summary(s), s.clone()))
                         .collect();
-                    let changed = self
-                        .sidebar_state
+                    self.sidebar_state
                         .workspace_store
                         .reconcile_live_sessions(
                             live.iter().map(|(host, s)| (host.as_str(), s)),
                         );
-                    if changed > 0 {
-                        self.persist_workspace_store_if_enabled();
-                        self.sync_workspace_to_shared(cx);
-                    }
+                    self.persist_workspace_store_if_enabled();
+                    self.sync_workspace_to_shared(cx);
                     if let Some(ref sel) = self.selected_session.clone()
                         && let Some(fresh) = self
                             .sessions
@@ -3323,9 +3404,15 @@ impl MultibotView {
                         self.sessions.insert(0, session.clone());
                     }
                     let key = self.session_key_for(&session);
-                    self.sidebar_state
+                    if self
+                        .sidebar_state
                         .workspace_store
-                        .auto_unarchive_waiting_if_active(&key, &session);
+                        .auto_unarchive_waiting_if_active(&key, &session)
+                        && session.archived
+                    {
+                        let host = self.active_session_host().to_string();
+                        self.unarchive_session_on_host(&host, session.id.clone(), cx);
+                    }
                     if self
                         .selected_session
                         .as_ref()
@@ -3370,12 +3457,14 @@ impl MultibotView {
                     for s in &mut self.sessions {
                         if s.id == session_id {
                             s.archived = archived;
+                            s.archive_kill_process = archived;
                         }
                     }
                     if let Some(ref mut sel) = self.selected_session
                         && sel.id == session_id
                     {
                         sel.archived = archived;
+                        sel.archive_kill_process = archived;
                     }
                     self.sync_sessions_to_shared(cx);
                     self.notice = Some(if archived {
@@ -4144,7 +4233,7 @@ impl MultibotView {
         }
     }
 
-    fn clear_active_session_view(&mut self) {
+    pub(crate) fn clear_active_session_view(&mut self) {
         self.voice.cancel();
         self.selected_session = None;
         self.selected_session_host = None;
@@ -4185,7 +4274,7 @@ impl MultibotView {
         self.chat_state.scroll_handle = gpui_kit::ScrollHandle::default();
         self.chat_state.prepend_scroll_anchor = None;
         self.chat_state.newest_chord.reset();
-        if session.agent == AgentKind::Shell {
+        if session.agent == AgentKind::Shell && !session.archived {
             self.shell_host.prepare_selection(&canonical_session_key(
                 &host,
                 session.agent,
@@ -4244,15 +4333,22 @@ impl MultibotView {
                 max_bytes: Some(MAX_SESSION_CACHE_BYTES),
                 known_probe,
             });
-            let _ = tx.send(ClientRequest::WatchSession {
-                session_id: session.id.clone(),
-                source_path: session.source_path.clone(),
-                agent: session.agent,
-            });
-            let _ = tx.send(ClientRequest::ListCommands {
-                agent: session.agent,
-                cwd: session.cwd.clone(),
-            });
+            if self.sidebar_state.workspace_store.session_lifecycle(
+                &self.session_key_for(&session),
+                &session,
+                now_unix_ms(),
+            ) != multibot_core::workspaces::SessionLifecycle::Dissolved
+            {
+                let _ = tx.send(ClientRequest::WatchSession {
+                    session_id: session.id.clone(),
+                    source_path: session.source_path.clone(),
+                    agent: session.agent,
+                });
+                let _ = tx.send(ClientRequest::ListCommands {
+                    agent: session.agent,
+                    cwd: session.cwd.clone(),
+                });
+            }
         }
         cx.notify();
     }
@@ -4405,6 +4501,18 @@ impl MultibotView {
                     .find(|(h, s)| h == host && s.id == sid && s.agent == agent)
                     .map(|(_, s)| s)
             };
+            let key = canonical_session_key(host, agent, sid);
+            if self
+                .sidebar_state
+                .workspace_store
+                .session_meta
+                .get(&key)
+                .is_some_and(|m| m.dissolved_at_ms.is_some())
+                || matched_sess.is_some_and(|s| s.archived && s.archive_kill_process)
+            {
+                remaining.push(entry);
+                continue;
+            }
             let cwd = matched_sess.and_then(|s| s.cwd.clone());
             let is_working = matched_sess.is_some_and(|s| s.working);
             let req = if is_working && self.settings.queue_while_working {
@@ -4524,11 +4632,6 @@ impl MultibotView {
         }
         cx.notify();
         ok
-    }
-
-    pub(crate) fn unarchive_session(&mut self, session_id: String, cx: &mut Context<Self>) -> bool {
-        let host = self.active_session_host().to_string();
-        self.unarchive_session_on_host(&host, session_id, cx)
     }
 
     pub(crate) fn unarchive_session_on_host(
@@ -5188,7 +5291,26 @@ impl Render for MultibotView {
             .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, _, cx| {
                 this.handle_modifiers_changed(ev, cx);
             }))
+            .capture_action(cx.listener(|this, _: &CloseOverlay, _, cx| {
+                if this.inbox_state.go_leader {
+                    this.inbox_state.go_leader = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .capture_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Escape, _, cx| {
+                    if this.inbox_state.go_leader {
+                        this.inbox_state.go_leader = false;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }),
+            )
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                if this.handle_lifecycle_keydown(ev, window, cx) {
+                    return;
+                }
                 // Top-pill inline rename fallback when sidebar is Collapsed/Hidden (`F2`).
                 // `#header-rename-input` is only mounted on `MainSurface::Chat` for the active session.
                 if this.active_modal == ActiveModal::None
@@ -5245,7 +5367,34 @@ impl Render for MultibotView {
                 this.sidebar_state.new_workspace_draft = None;
                 this.set_main_surface(MainSurface::Inbox);
                 this.inbox_state.select_all_split();
+                this.inbox_state.lifecycle = multibot_core::workspaces::SessionLifecycle::Active;
+                this.inbox_state.go_leader = false;
                 this.focus_inbox(window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &OpenDone, window, cx| {
+                this.open_lifecycle_view(
+                    multibot_core::workspaces::SessionLifecycle::Done,
+                    window,
+                    cx,
+                );
+            }))
+            .on_action(cx.listener(|this, _: &OpenHibernated, window, cx| {
+                this.open_lifecycle_view(
+                    multibot_core::workspaces::SessionLifecycle::Hibernated,
+                    window,
+                    cx,
+                );
+            }))
+            .on_action(cx.listener(|this, _: &OpenDissolved, window, cx| {
+                this.open_lifecycle_view(
+                    multibot_core::workspaces::SessionLifecycle::Dissolved,
+                    window,
+                    cx,
+                );
+            }))
+            .on_action(cx.listener(|this, _: &GoLeader, _, cx| {
+                this.inbox_state.go_leader = true;
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleInbox, window, cx| {
@@ -5472,120 +5621,17 @@ impl Render for MultibotView {
                 this.spawn_new_session(AgentKind::Claude, cwd, None, None, cx);
             }))
             .on_action(cx.listener(|this, _: &DeleteSession, _, cx| {
-                if this.table_modal_state.is_open() || this.active_modal != ActiveModal::None {
-                    return;
-                }
-                if let Some(sess) = this.selected_session.clone() {
-                    this.closed_sessions
-                        .push((this.active_session_host().to_string(), sess.clone()));
-                    if let Some(tx) = this.active_session_tx() {
-                        let _ = tx.send(ClientRequest::ArchiveSession {
-                            session_id: sess.id.clone(),
-                            agent: sess.agent,
-                            source_path: sess.source_path.clone(),
-                            kill_process: true,
-                        });
-                    }
-                    let host = this.active_session_host().to_string();
-                    this.host_sessions
-                        .retain(|(h, s)| !(h == &host && s.id == sess.id && s.agent == sess.agent));
-                    this.sessions
-                        .retain(|s| !(s.id == sess.id && s.agent == sess.agent));
-                    if !this.host_statuses.is_empty() {
-                        this.sessions = this.host_sessions.iter().map(|(_, s)| s.clone()).collect();
-                    }
-                    this.sidebar_state.rename = None;
-                    this.pending_older_page_before.remove(&sess.id);
-                    this.pending_switch_tokens.remove(&sess.id);
-                    if let Some(next) = this.sessions.first().cloned() {
-                        this.open_session_with_tracking(next, false, cx);
-                    } else {
-                        this.clear_active_session_view();
-                    }
-                    this.cleanup_unmounted_surface_state();
-                    this.sync_sessions_to_shared(cx);
-                    this.sync_workspace_to_shared(cx);
-                    this.notice = Some(format!("Closed session \"{}\".", sess.title));
-                    cx.notify();
+                if let Some(key) = this.target_triage_session_key() {
+                    this.dissolve_session_key(&key, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &ArchiveSession, _, cx| {
-                if this.table_modal_state.is_open() || this.active_modal != ActiveModal::None {
-                    return;
+                if let Some(key) = this.target_triage_session_key() {
+                    this.mark_done_or_inbox(&key, cx);
                 }
-                let Some(sess) = this.selected_session.clone() else {
-                    return;
-                };
-                let session_key = this.session_key_for(&sess);
-                let confirmed = this
-                    .pending_archive_confirm
-                    .as_ref()
-                    .is_some_and(|(id, at)| id == &session_key && at.elapsed() <= Duration::from_secs(3));
-                if !confirmed {
-                    this.pending_archive_confirm = Some((session_key, Instant::now()));
-                    this.notice = Some(format!(
-                        "Press Ctrl+Shift+E again to archive \"{}\".",
-                        sess.title
-                    ));
-                    cx.notify();
-                    return;
-                }
-                this.pending_archive_confirm = None;
-                this.closed_sessions
-                    .push((this.active_session_host().to_string(), sess.clone()));
-                if let Some(tx) = this.active_session_tx() {
-                    let _ = tx.send(ClientRequest::ArchiveSession {
-                        session_id: sess.id.clone(),
-                        agent: sess.agent,
-                        source_path: sess.source_path.clone(),
-                        kill_process: false,
-                    });
-                }
-                let host = this.active_session_host().to_string();
-                this.host_sessions
-                    .retain(|(h, s)| !(h == &host && s.id == sess.id && s.agent == sess.agent));
-                this.sessions
-                    .retain(|s| !(s.id == sess.id && s.agent == sess.agent));
-                if !this.host_statuses.is_empty() {
-                    this.sessions = this.host_sessions.iter().map(|(_, s)| s.clone()).collect();
-                }
-                this.sidebar_state.rename = None;
-                this.pending_older_page_before.remove(&sess.id);
-                this.pending_switch_tokens.remove(&sess.id);
-                if let Some(next) = this.sessions.first().cloned() {
-                    this.open_session_with_tracking(next, false, cx);
-                } else {
-                    this.clear_active_session_view();
-                }
-                this.cleanup_unmounted_surface_state();
-                this.sync_sessions_to_shared(cx);
-                this.sync_workspace_to_shared(cx);
-                this.notice = Some(format!("Archived session \"{}\".", sess.title));
-                cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ReopenClosedSession, _, cx| {
-                if this.table_modal_state.is_open() || this.active_modal != ActiveModal::None {
-                    return;
-                }
-                if let Some((host, sess)) = this.closed_sessions.pop() {
-                    this.selected_session_host = Some(host.clone());
-                    this.unarchive_session(sess.id.clone(), cx);
-                    if this
-                        .host_for_session_key(&canonical_session_key(&host, sess.agent, &sess.id))
-                        .is_none()
-                    {
-                        if !this.host_statuses.is_empty() {
-                            this.host_sessions.insert(0, (host.clone(), sess.clone()));
-                        }
-                        this.sessions.insert(0, sess.clone());
-                        this.sync_sessions_to_shared(cx);
-                    }
-                    this.open_session_on_host(host, sess, false, cx);
-                    this.sync_workspace_to_shared(cx);
-                } else {
-                    this.notice = Some("No closed sessions to reopen.".to_string());
-                    cx.notify();
-                }
+                this.reactivate_last_dissolved(cx);
             }))
             .on_action(cx.listener(|this, _: &ReconnectSession, _, cx| {
                 if this.table_modal_state.is_open() || this.active_modal != ActiveModal::None {
@@ -5606,9 +5652,8 @@ impl Render for MultibotView {
                 if let Some(ref tx) = this.daemon_tx
                     && !tx.is_closed()
                     && tx
-                        .send(ClientRequest::ListSessions {
+                        .send(ClientRequest::ListLifecycleSessions {
                             limit: Some(SESSION_LIST_LIMIT),
-                            include_archived: None,
                         })
                         .is_ok()
                 {
@@ -5778,15 +5823,8 @@ impl Render for MultibotView {
                 {
                     return;
                 }
-                if let Some(key) = this.target_triage_session_key()
-                    && let Some(sess) = this.find_session_by_key(&key)
-                {
-                    this.sidebar_state
-                        .workspace_store
-                        .archive_to_waiting_session(&key, now_unix_ms(), &sess);
-                    this.persist_workspace_store_if_enabled();
-                    this.sync_workspace_to_shared(cx);
-                    cx.notify();
+                if let Some(key) = this.target_triage_session_key() {
+                    this.mark_done_or_inbox(&key, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &UndoWaiting, _, cx| {
@@ -5797,12 +5835,8 @@ impl Render for MultibotView {
                 {
                     return;
                 }
-                if this
-                    .sidebar_state
-                    .workspace_store
-                    .undo_last_waiting()
-                    .is_some()
-                {
+                if let Some(key) = this.sidebar_state.workspace_store.undo_last_waiting() {
+                    this.reactivate_session_key(&key, cx);
                     this.persist_workspace_store_if_enabled();
                     this.sync_workspace_to_shared(cx);
                     cx.notify();
@@ -6041,7 +6075,7 @@ impl Render for MultibotView {
                             if self
                                 .selected_session
                                 .as_ref()
-                                .is_some_and(|s| s.agent == AgentKind::Shell) =>
+                                .is_some_and(|s| s.agent == AgentKind::Shell && !s.archived) =>
                         {
                             self.render_shell_panel(cx).into_any_element()
                         }
@@ -6067,6 +6101,24 @@ impl Render for MultibotView {
                 el.child(self.render_changelog_modal(cx))
             })
             .when_some(self.render_table_modal(cx), |el, modal| el.child(modal))
+            .when(self.inbox_state.go_leader, |el| {
+                el.child(
+                    div()
+                        .id("go-leader-hint")
+                        .test_support()
+                        .absolute()
+                        .bottom(px(20.0))
+                        .left(px(40.0))
+                        .px_4()
+                        .py_2()
+                        .rounded(theme::RADIUS_CHIP)
+                        .bg(theme::bg_surface())
+                        .border_1()
+                        .border_color(theme::border_subtle())
+                        .text_sm()
+                        .child("Go to: I Inbox  E Done  H Hibernated  D Dissolved"),
+                )
+            })
     }
 }
 
@@ -6121,6 +6173,386 @@ mod tests {
             source_path: format!("/tmp/{id}.jsonl"),
             ..Default::default()
         }
+    }
+
+    #[gpui_kit::test]
+    fn lifecycle_each_view_keeps_workspace_and_favorites_splits(cx: &mut TestAppContext) {
+        use multibot_core::workspaces::{InboxSplit, SessionLifecycle};
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            let workspace = view.update(cx, |v, cx| {
+                let workspace = v
+                    .sidebar_state
+                    .workspace_store
+                    .create_workspace("Project", None)
+                    .unwrap();
+                let now = now_unix_ms();
+                for i in 0..4 {
+                    let mut session =
+                        make_session(&format!("view-{i}"), AgentKind::Claude, "View", false);
+                    let key = v.session_key_for(&session);
+                    let store = &mut v.sidebar_state.workspace_store;
+                    store.assign_session_workspace(&key, &workspace.id);
+                    store.toggle_favorite(&key);
+                    match i {
+                        1 => store.archive_to_waiting_session(&key, now, &session),
+                        2 => {
+                            store.hibernate_session(&key, &session, Some(now + 60_000), None, true)
+                        }
+                        3 => {
+                            store.dissolve_session(&key, now);
+                            session.archived = true;
+                            session.archive_kill_process = true;
+                        }
+                        _ => {}
+                    }
+                    v.sessions.push(session);
+                }
+                v.sync_sessions_to_shared(cx);
+                v.sync_workspace_to_shared(cx);
+                workspace.id
+            });
+            for lifecycle in SessionLifecycle::ALL {
+                view.update(cx, |v, cx| v.open_lifecycle_view(lifecycle, window, cx));
+                window.render_frame(cx);
+                assert!(window.find("inbox-tab-all").visible());
+                assert!(window.find("inbox-split-favorites").visible());
+                assert!(window.find("inbox-split-ws-0").visible());
+                window.click("inbox-split-ws-0", cx);
+                window.render_frame(cx);
+                view.read_with(cx, |v, _| {
+                    assert_eq!(
+                        v.inbox_state.active_split,
+                        InboxSplit::Workspace(workspace.clone())
+                    );
+                    let rows = v.compute_inbox_rows(now_unix_ms());
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0].workspace_id, workspace);
+                    assert!(rows[0].favorite);
+                });
+                if lifecycle == SessionLifecycle::Done {
+                    window.press("e", cx);
+                    window.render_frame(cx);
+                    assert!(view.read(cx).compute_inbox_rows(now_unix_ms()).is_empty());
+                } else if lifecycle == SessionLifecycle::Active {
+                    window.press("h", cx);
+                    window.render_frame(cx);
+                    assert!(window.find("pal-reminder-0").visible());
+                    window.press("escape", cx);
+                    window.render_frame(cx);
+                }
+            }
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn lifecycle_global_views_and_go_leader_do_not_type_into_composer(cx: &mut TestAppContext) {
+        use multibot_core::workspaces::SessionLifecycle;
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                let session = make_session("go", AgentKind::Claude, "Go", false);
+                v.sessions = vec![session.clone()];
+                v.select_session(session, cx);
+                v.prompt_input
+                    .update(cx, |input, cx| input.set_value("draft", window, cx));
+                let focus = v.prompt_input.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            });
+            window.render_frame(cx);
+            for (chord, lifecycle) in [
+                ("alt-shift-e", SessionLifecycle::Done),
+                ("alt-shift-h", SessionLifecycle::Hibernated),
+                ("alt-shift-d", SessionLifecycle::Dissolved),
+            ] {
+                view.update(cx, |v, cx| {
+                    v.set_main_surface(MainSurface::Chat);
+                    let focus = v.prompt_input.read(cx).focus_handle(cx);
+                    window.focus(&focus, cx);
+                });
+                window.render_frame(cx);
+                window.press(chord, cx);
+                window.render_frame(cx);
+                assert_eq!(view.read(cx).inbox_state.lifecycle, lifecycle);
+                assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
+                assert_eq!(
+                    view.read(cx).prompt_input.read(cx).value().as_ref(),
+                    "draft"
+                );
+                for id in [
+                    "inbox-view-inbox",
+                    "inbox-view-done",
+                    "inbox-view-hibernated",
+                    "inbox-view-dissolved",
+                ] {
+                    assert!(window.find(id).visible());
+                }
+            }
+            for (key, lifecycle) in [
+                ("i", SessionLifecycle::Active),
+                ("e", SessionLifecycle::Done),
+                ("h", SessionLifecycle::Hibernated),
+                ("d", SessionLifecycle::Dissolved),
+            ] {
+                view.update(cx, |v, cx| {
+                    v.set_main_surface(MainSurface::Chat);
+                    let focus = v.prompt_input.read(cx).focus_handle(cx);
+                    window.focus(&focus, cx);
+                });
+                window.render_frame(cx);
+                window.press("alt-g", cx);
+                window.render_frame(cx);
+                assert!(window.find("go-leader-hint").visible());
+                window.press(key, cx);
+                window.render_frame(cx);
+                assert_eq!(view.read(cx).inbox_state.lifecycle, lifecycle);
+                assert!(!view.read(cx).inbox_state.go_leader);
+                assert_eq!(
+                    view.read(cx).prompt_input.read(cx).value().as_ref(),
+                    "draft"
+                );
+            }
+            view.update(cx, |v, cx| {
+                v.set_main_surface(MainSurface::Chat);
+                let focus = v.prompt_input.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            });
+            window.render_frame(cx);
+            window.press("alt-g", cx);
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
+            assert_eq!(
+                view.read(cx).prompt_input.read(cx).value().as_ref(),
+                "draft"
+            );
+            window.press("alt-i", cx);
+            window.render_frame(cx);
+            window.press("g", cx);
+            window.render_frame(cx);
+            window.press("e", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).inbox_state.lifecycle, SessionLifecycle::Done);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn lifecycle_done_hibernate_modes_peek_reply_and_timer(cx: &mut TestAppContext) {
+        use multibot_core::workspaces::SessionLifecycle;
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                let mut session = make_session("hidden", AgentKind::Claude, "Hidden", false);
+                session.last_assistant_id = Some("reply-1".into());
+                session.last_assistant_ms = Some(100);
+                v.sessions = vec![session.clone()];
+                v.select_session(session, cx);
+                let focus = v.prompt_input.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            });
+            window.render_frame(cx);
+            window.press("alt-e", cx);
+            window.press("alt-shift-e", cx);
+            window.render_frame(cx);
+            assert!(window.find("inbox-row-0").visible());
+            window.click("inbox-row-0", cx);
+            window.render_frame(cx);
+            assert!(window.find("lifecycle-peek-banner").visible());
+            view.read_with(cx, |v, _| {
+                let s = v.selected_session.as_ref().unwrap();
+                let key = v.session_key_for(s);
+                assert_eq!(
+                    v.sidebar_state
+                        .workspace_store
+                        .session_lifecycle(&key, s, now_unix_ms()),
+                    SessionLifecycle::Done
+                );
+                assert_eq!(
+                    v.sidebar_state
+                        .workspace_store
+                        .compute_sidebar_layout(
+                            &v.sidebar_state.active_workspace_id,
+                            &v.session_inputs(),
+                            false,
+                            now_unix_ms()
+                        )
+                        .total_visible_sessions(),
+                    0
+                );
+            });
+            window.press("alt-z", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("lifecycle-peek-banner").is_none());
+            for wake in [false, true] {
+                window.press("ctrl-h", cx);
+                window.render_frame(cx);
+                assert!(view.read(cx).palette_state.hibernate_wake_on_reply);
+                if !wake {
+                    window.press("tab", cx);
+                    window.render_frame(cx);
+                }
+                assert_eq!(view.read(cx).palette_state.hibernate_wake_on_reply, wake);
+                window.click("pal-reminder-0", cx);
+                window.render_frame(cx);
+                window.press("alt-shift-h", cx);
+                window.render_frame(cx);
+                assert!(window.find("inbox-row-0").visible());
+                window.click("inbox-row-0", cx);
+                window.render_frame(cx);
+                view.update(cx, |v, cx| {
+                    let mut s = v.selected_session.clone().unwrap();
+                    let key = v.session_key_for(&s);
+                    assert_eq!(
+                        v.sidebar_state
+                            .workspace_store
+                            .session_lifecycle(&key, &s, now_unix_ms()),
+                        SessionLifecycle::Hibernated
+                    );
+                    s.last_assistant_id = Some(format!("reply-{wake}"));
+                    s.last_assistant_ms = Some(200);
+                    v.handle_bridge_event(
+                        UiBridgeEvent::Server(ServerEvent::SessionUpdated { session: s.clone() }),
+                        cx,
+                    );
+                    assert_eq!(
+                        v.sidebar_state
+                            .workspace_store
+                            .session_lifecycle(&key, &s, now_unix_ms()),
+                        if wake {
+                            SessionLifecycle::Active
+                        } else {
+                            SessionLifecycle::Hibernated
+                        }
+                    );
+                    if !wake {
+                        assert!(
+                            v.sidebar_state
+                                .workspace_store
+                                .wake_due_sessions(now_unix_ms() + 3_600_000)
+                        );
+                        v.sync_workspace_to_shared(cx);
+                    }
+                });
+                window.render_frame(cx);
+            }
+            view.update(cx, |v, cx| {
+                let mut session = v.selected_session.clone().unwrap();
+                let key = v.session_key_for(&session);
+                v.sidebar_state.workspace_store.archive_to_waiting_session(
+                    &key,
+                    now_unix_ms(),
+                    &session,
+                );
+                v.sync_workspace_to_shared(cx);
+                session.last_assistant_id = Some("reply-after-reconnect".into());
+                v.handle_bridge_event(
+                    UiBridgeEvent::Server(ServerEvent::Sessions {
+                        sessions: vec![session.clone()],
+                    }),
+                    cx,
+                );
+                assert_eq!(
+                    v.sidebar_state.workspace_store.session_lifecycle(
+                        &key,
+                        &session,
+                        now_unix_ms()
+                    ),
+                    SessionLifecycle::Active
+                );
+                assert!(
+                    !cx.global::<SharedAppStore>()
+                        .workspace_store
+                        .waiting_sessions
+                        .contains_key(&key)
+                );
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn lifecycle_dissolved_peek_keeps_workspace_and_reactivates_exact_history(
+        cx: &mut TestAppContext,
+    ) {
+        use multibot_core::workspaces::SessionLifecycle;
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            view.update(cx, |v, cx| {
+                let session = make_session("saved", AgentKind::Claude, "Saved", false);
+                let key = v.session_key_for(&session);
+                let workspace = v.sidebar_state.workspace_store.create_workspace("Saved workspace", None).unwrap();
+                v.sidebar_state.workspace_store.assign_session_workspace(&key, &workspace.id);
+                v.sessions = vec![session.clone()];
+                v.daemon_tx = Some(tx);
+                v.chat_cache.put(CacheKey::new("local", AgentKind::Claude, "saved"), CachedSession {
+                    source_path: session.source_path.clone(), messages: vec![ChatMessage {
+                        id: "saved-reply".into(), role: MessageRole::Assistant, text: "Saved full history".into(), ..Default::default()
+                    }], ..Default::default()
+                });
+                v.select_session(session, cx);
+                v.sync_sessions_to_shared(cx);
+            });
+            window.render_frame(cx);
+            while rx.try_recv().is_ok() {}
+            window.press("ctrl-shift-w", cx);
+            window.render_frame(cx);
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::ArchiveSession { ref session_id, kill_process: true, .. }) if session_id == "saved"));
+            window.press("alt-shift-d", cx);
+            window.render_frame(cx);
+            assert!(window.find("inbox-row-0").visible());
+            window.click("inbox-row-0", cx);
+            window.render_frame(cx);
+            assert!(window.find("move-chat-to-inbox").visible());
+            view.read_with(cx, |v, _| {
+                let session = v.selected_session.as_ref().unwrap();
+                let key = v.session_key_for(session);
+                assert_eq!(v.messages[0].text, "Saved full history");
+                let serialized = serde_json::to_string(&v.sidebar_state.workspace_store).unwrap();
+                let restored: multibot_core::workspaces::WorkspaceStore = serde_json::from_str(&serialized).unwrap();
+                assert_eq!(restored.session_lifecycle(&key, session, now_unix_ms()), SessionLifecycle::Dissolved);
+                assert_eq!(restored.workspace_by_id(&restored.effective_workspace_id(&key)).unwrap().name, "Saved workspace");
+            });
+            while let Ok(request) = rx.try_recv() {
+                assert!(matches!(request, ClientRequest::ReadHistory { .. }), "peek must only read history, got {request:?}");
+            }
+            view.update(cx, |v, _| {
+                let session = v.selected_session.as_ref().unwrap();
+                let key = ChatOutbox::session_key("local", session.agent, &session.id);
+                v.shared_chat_outbox.lock().unwrap().outbox.enqueue(&key, "queued before dissolve", now_unix_ms()).unwrap();
+                assert_eq!(v.flush_outbox_for_host("local"), 0);
+            });
+            assert!(rx.try_recv().is_err());
+            window.click("move-chat-to-inbox", cx);
+            window.render_frame(cx);
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::UnarchiveSession { ref session_id }) if session_id == "saved"));
+            assert!(!view.read(cx).selected_session.as_ref().unwrap().archived);
+            window.press("ctrl-shift-w", cx);
+            window.press("ctrl-shift-t", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).selected_session.as_ref().unwrap().id, "saved");
+            assert!(!view.read(cx).selected_session.as_ref().unwrap().archived);
+            assert_eq!(view.read(cx).messages[0].text, "Saved full history");
+            while rx.try_recv().is_ok() {}
+            window.press("ctrl-shift-w", cx);
+            window.press("alt-shift-d", cx);
+            window.render_frame(cx);
+            window.click("inbox-row-0", cx);
+            window.render_frame(cx);
+            while rx.try_recv().is_ok() {}
+            view.update(cx, |v, cx| {
+                v.prompt_input.update(cx, |input, cx| { input.set_value("Continue saved chat", window, cx); input.focus(window, cx); });
+            });
+            window.render_frame(cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::UnarchiveSession { ref session_id }) if session_id == "saved"));
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { ref session_id, ref text, .. }) if session_id == "saved" && text == "Continue saved chat"));
+            assert!(!view.read(cx).selected_session.as_ref().unwrap().archived);
+
+        }).unwrap();
     }
 
     #[gpui_kit::test]
@@ -9002,6 +9434,10 @@ mod tests {
     ) {
         let (handle, view) = open_test_view_with_entity(cx);
         cx.update_window(handle, |_, window, cx| {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            view.update(cx, |v, _| {
+                v.daemon_tx = Some(tx);
+            });
             let s1 = make_session("del1", AgentKind::Claude, "Alpha", false);
             let s2 = make_session("del2", AgentKind::Claude, "Beta", false);
             view.update(cx, |v, cx| {
@@ -9051,15 +9487,20 @@ mod tests {
                 );
             }
 
-            // Two-press ArchiveSession (Ctrl+Shift+E x2) on last session clears messages & token
             window.press("ctrl-shift-e", cx);
             window.press("ctrl-shift-e", cx);
             window.render_frame(cx);
             {
                 let v = view.read(cx);
-                assert!(v.selected_session.is_none());
-                assert!(v.messages.is_empty());
-                assert!(v.active_switch_token.is_none());
+                assert_eq!(v.selected_session.as_ref().unwrap().id, "del2");
+                assert_eq!(v.messages[0].text, "Beta transcript");
+                let key = v.session_key_for(v.selected_session.as_ref().unwrap());
+                assert!(
+                    v.sidebar_state
+                        .workspace_store
+                        .waiting_sessions
+                        .contains_key(&key)
+                );
             }
         })
         .unwrap();
@@ -12468,6 +12909,8 @@ mod tests {
         s2.updated_at_ms = 10_000;
 
         cx.update_window(handle1, |_, window, cx| {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            view1.update(cx, |v, _| v.daemon_tx = Some(tx));
             view1.update(cx, |v, cx| {
                 v.sessions = vec![s1.clone(), s2.clone()];
                 v.selected_session = Some(s1.clone());
@@ -12536,7 +12979,7 @@ mod tests {
 
             window.press("ctrl-shift-w", cx);
             window.render_frame(cx);
-            assert!(view1.read(cx).sessions.is_empty());
+            assert!(view1.read(cx).sessions.iter().all(|s| s.archived));
             assert!(view1.read(cx).selected_session.is_none());
             assert!(
                 view1.read(cx).sidebar_state.rename.is_none(),
@@ -12561,6 +13004,7 @@ mod tests {
                     .sidebar_state
                     .workspace_store
                     .create_workspace("Second WS", None);
+                v.sidebar_state.workspace_store.move_to_inbox(&k1);
                 v.sessions = vec![s1.clone(), s2.clone()];
                 v.selected_session = Some(s1.clone());
                 v.sidebar_state.mode = SidebarMode::Open;

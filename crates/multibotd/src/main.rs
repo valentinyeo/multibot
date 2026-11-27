@@ -135,16 +135,19 @@ async fn async_main(
                     server_time_ms: now_ms(),
                 });
             }
-            ClientRequest::ListSessions {
-                limit,
-                include_archived,
-            } => {
+            ClientRequest::ListSessions { limit, .. }
+            | ClientRequest::ListLifecycleSessions { limit } => {
+                let (include_archived, lifecycle_only) = match req {
+                    ClientRequest::ListSessions {
+                        include_archived, ..
+                    } => (include_archived.unwrap_or(false), false),
+                    _ => (true, true),
+                };
                 let home_c = home.clone();
                 let active_ids = process_mgr.active_session_ids();
                 let connected_ids = process_mgr.connected_session_ids();
                 let tx = out_tx.clone();
                 let lim = limit.unwrap_or(50);
-                let include_archived = include_archived.unwrap_or(false);
                 let _ = disk_tx.send(Box::new(move || {
                     let metadata = MetadataStore::load(&home_c);
                     let archive = ArchiveStore::load(&home_c);
@@ -160,7 +163,11 @@ async fn async_main(
                         include_archived,
                         server_workspaces: &server_workspaces,
                     };
-                    let sessions = discover_live_sessions_with_ctx(&home_c, lim, &ctx);
+                    let sessions = if lifecycle_only {
+                        providers::discover_lifecycle_sessions_with_ctx(&home_c, lim, &ctx)
+                    } else {
+                        discover_live_sessions_with_ctx(&home_c, lim, &ctx)
+                    };
                     let _ = tx.send(ServerEvent::Sessions { sessions });
                 }));
             }

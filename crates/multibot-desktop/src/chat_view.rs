@@ -2109,10 +2109,22 @@ impl MultibotView {
         quoted_message_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let is_selected = self.active_session_host() == host && self
-            .selected_session
-            .as_ref()
-            .is_some_and(|s| s.id == session.id && s.agent == session.agent);
+        let key = canonical_session_key(host, session.agent, &session.id);
+        if (session.archived
+            || self
+                .sidebar_state
+                .workspace_store
+                .session_lifecycle(&key, &session, now_unix_ms())
+                == multibot_core::workspaces::SessionLifecycle::Dissolved)
+            && !self.reactivate_session_key(&key, cx)
+        {
+            return;
+        }
+        let is_selected = self.active_session_host() == host
+            && self
+                .selected_session
+                .as_ref()
+                .is_some_and(|s| s.id == session.id && s.agent == session.agent);
         let msg_id = format!("local-msg-{}", self.messages.len());
         if is_selected {
             self.chat_state.scroll.sent_message();
@@ -2127,7 +2139,6 @@ impl MultibotView {
             });
             self.chat_state.advance_busy_tick();
         }
-        let key = canonical_session_key(host, session.agent, &session.id);
         self.sidebar_state
             .workspace_store
             .record_session_input(&key, now_unix_ms());
@@ -2380,6 +2391,19 @@ impl MultibotView {
             return;
         };
 
+        let key = self.session_key_for(&session);
+        if self
+            .sidebar_state
+            .workspace_store
+            .session_lifecycle(&key, &session, now_unix_ms())
+            == multibot_core::workspaces::SessionLifecycle::Dissolved
+            && !self.reactivate_session_key(&key, cx)
+        {
+            self.notice = Some("Reconnect to this chat's host before reactivating it.".into());
+            cx.notify();
+            return;
+        }
+
         // Intercept `/rename <new title>` locally to rename and sync with `multibotd`.
         if let Some(new_title) = trimmed
             .strip_prefix("/rename ")
@@ -2526,6 +2550,9 @@ impl MultibotView {
         emoji: ReactionEmoji,
         cx: &mut Context<Self>,
     ) {
+        if self.selected_session.as_ref().is_some_and(|s| s.archived) {
+            return;
+        }
         let server_masks = compute_server_reaction_masks(&self.messages);
         let server_has = (server_masks.get(target_id).copied().unwrap_or(0) & emoji.bit()) != 0;
         let local_add_has = self
@@ -4169,6 +4196,17 @@ impl MultibotView {
     }
 
     pub(crate) fn render_chat_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let lifecycle = self
+            .selected_session
+            .as_ref()
+            .map(|session| {
+                self.sidebar_state.workspace_store.session_lifecycle(
+                    &self.session_key_for(session),
+                    session,
+                    now_unix_ms(),
+                )
+            })
+            .unwrap_or_default();
         let header_title = match &self.selected_session {
             Some(s) => format!("{}  {}", s.agent.glyph(), s.title),
             None => "Multibot · Ready".to_string(),
@@ -5219,6 +5257,24 @@ impl MultibotView {
                 }
                 el.child(chips)
             })
+            .when(lifecycle != multibot_core::workspaces::SessionLifecycle::Active, |el| el.child(
+                h_flex().id("lifecycle-peek-banner").test_support().w_full().max_w(px(760.0)).mx_auto()
+                    .px_4().py_2().gap_3().items_center().justify_between().rounded(RADIUS_ROW).bg(theme::bg_surface())
+                    .child(div().text_xs().text_color(theme::text_muted()).child(
+                        if lifecycle == multibot_core::workspaces::SessionLifecycle::Dissolved {
+                            "Dissolved · Saved history · Agent stopped. Sending a prompt reactivates this chat."
+                        } else { "Reading only · This chat stays out of Inbox until you move it back or send a message." }
+                    ))
+                    .child(div().id("move-chat-to-inbox").role(Role::Button).test_support().px_3().py_1p5()
+                        .rounded(RADIUS_CHIP).bg(theme::bg_active_row()).cursor_pointer()
+                        .child(if lifecycle == multibot_core::workspaces::SessionLifecycle::Dissolved { "Reactivate" } else { "Move to Inbox" })
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            if let Some(session) = &this.selected_session {
+                                let key = this.session_key_for(session);
+                                this.reactivate_session_key(&key, cx);
+                            }
+                        })))
+            ))
             .when(!queued_previews.is_empty(), |el| el.child(div().w_full().px_5().pt_2().child(queue_bar)))
             .when_some(self.render_slash_picker(cx), |el, picker| el.child(picker))
             .when(self.chat_state.composer_menu_open, |el| el.child(

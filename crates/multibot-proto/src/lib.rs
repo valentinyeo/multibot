@@ -240,6 +240,9 @@ pub struct SessionSummary {
     pub needs_attention: bool,
     #[serde(default)]
     pub archived: bool,
+    /// False for legacy server archives that hid a still-running agent (now Done).
+    #[serde(default)]
+    pub archive_kill_process: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Workspace name recorded by the server-side session metadata (`multiprompt`
@@ -266,6 +269,7 @@ impl Default for SessionSummary {
             todos_total: 0,
             needs_attention: false,
             archived: false,
+            archive_kill_process: false,
             model: None,
             workspace: None,
         }
@@ -311,6 +315,11 @@ pub enum ClientRequest {
     },
     Ping {
         nonce: u64,
+    },
+    /// Only active sessions and explicitly saved lifecycle history, not every old transcript.
+    ListLifecycleSessions {
+        #[serde(default)]
+        limit: Option<usize>,
     },
     ListSessions {
         #[serde(default)]

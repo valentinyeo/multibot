@@ -12,13 +12,15 @@ use gpui_kit::{
     prelude::FluentBuilder,
     px,
 };
-use multibot_core::workspaces::{InboxRow, InboxSplit, now_unix_ms};
+use multibot_core::workspaces::{InboxRow, InboxSplit, SessionLifecycle, now_unix_ms};
 
 const DOUBLE_G_WINDOW_MS: i64 = 600;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct InboxState {
     pub active_split: InboxSplit,
+    pub lifecycle: SessionLifecycle,
+    pub go_leader: bool,
     pub selected_row: usize,
     pub filter_query: String,
     pub filter_focused: bool,
@@ -39,6 +41,7 @@ pub(crate) enum InboxKeyOutcome {
     CloseInbox,
     MarkWaiting(String),
     UndoWaiting,
+    Hibernate(String),
     ToggleUnread(String),
     ToggleUnreadOnly,
     StartRename(String),
@@ -258,7 +261,7 @@ impl InboxState {
         }
 
         // `h` / `left` -> previous split (CLAMPED; recovers to visible_splits[0] if vanished)
-        if no_mods && (key_low == "h" || key_low == "left") {
+        if no_mods && key_low == "left" {
             if let Some(idx) = visible_splits.iter().position(|s| *s == self.active_split) {
                 if idx > 0 {
                     self.active_split = visible_splits[idx - 1].clone();
@@ -272,7 +275,7 @@ impl InboxState {
         }
 
         // `l` / `right` -> next split (CLAMPED; recovers to visible_splits[0] if vanished)
-        if no_mods && (key_low == "l" || key_low == "right") {
+        if no_mods && key_low == "right" {
             if let Some(idx) = visible_splits.iter().position(|s| *s == self.active_split) {
                 if idx + 1 < visible_splits.len() {
                     self.active_split = visible_splits[idx + 1].clone();
@@ -348,6 +351,13 @@ impl InboxState {
             return InboxKeyOutcome::Handled;
         }
 
+        if no_mods && key_low == "h" {
+            return visible_session_keys
+                .get(self.selected_row.min(max_idx))
+                .map(|key| InboxKeyOutcome::Hibernate(key.clone()))
+                .unwrap_or(InboxKeyOutcome::Handled);
+        }
+
         // `z` / `Alt+Z` -> undo last Waiting
         if (no_mods && key_low == "z") || (modifiers.alt && !modifiers.control && key_low == "z") {
             return InboxKeyOutcome::UndoWaiting;
@@ -392,6 +402,297 @@ pub(crate) fn format_relative_age(timestamp_ms: i64, now_ms: i64) -> String {
 }
 
 impl MultibotView {
+    pub(crate) fn open_lifecycle_view(
+        &mut self,
+        lifecycle: SessionLifecycle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.table_modal_state.close();
+        self.active_modal = ActiveModal::None;
+        self.sidebar_state.rename = None;
+        self.sidebar_state.new_workspace_draft = None;
+        self.inbox_state.rename = None;
+        self.inbox_state.go_leader = false;
+        self.inbox_state.lifecycle = lifecycle;
+        self.inbox_state.selected_row = 0;
+        self.set_main_surface(MainSurface::Inbox);
+        self.focus_inbox(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn mark_done_or_inbox(&mut self, key: &str, cx: &mut Context<Self>) {
+        if let Some(session) = self.find_session_by_key(key) {
+            let store = &mut self.sidebar_state.workspace_store;
+            match store.session_lifecycle(key, &session, now_unix_ms()) {
+                SessionLifecycle::Done => {
+                    if self.main_surface == MainSurface::Inbox
+                        && self.inbox_state.lifecycle == SessionLifecycle::Done
+                    {
+                        self.reactivate_session_key(key, cx);
+                    }
+                    return;
+                }
+                SessionLifecycle::Active | SessionLifecycle::Hibernated => {
+                    store.archive_to_waiting_session(key, now_unix_ms(), &session)
+                }
+                SessionLifecycle::Dissolved => {
+                    return;
+                }
+            }
+            self.cleanup_unmounted_surface_state();
+            self.persist_workspace_store_if_enabled();
+            self.sync_workspace_to_shared(cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn dissolve_session_key(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some((host, session)) = self.host_for_session_key(key) else {
+            return;
+        };
+        if self
+            .sidebar_state
+            .workspace_store
+            .session_lifecycle(key, &session, now_unix_ms())
+            == SessionLifecycle::Dissolved
+        {
+            return;
+        }
+        let Some(tx) = self.tx_for_host(&host) else {
+            return;
+        };
+        if tx
+            .send(multibot_proto::ClientRequest::ArchiveSession {
+                session_id: session.id.clone(),
+                agent: session.agent,
+                source_path: session.source_path.clone(),
+                kill_process: true,
+            })
+            .is_err()
+        {
+            return;
+        }
+        self.closed_sessions.push((host.clone(), session.clone()));
+        self.sidebar_state
+            .workspace_store
+            .dissolve_session(key, now_unix_ms());
+        self.set_session_archived_local(&host, &session, true);
+        if self
+            .selected_session
+            .as_ref()
+            .is_some_and(|s| self.session_key_for(s) == key)
+        {
+            let next = self
+                .session_inputs()
+                .into_iter()
+                .find(|input| {
+                    self.sidebar_state.workspace_store.session_lifecycle(
+                        &input.key,
+                        input.summary,
+                        now_unix_ms(),
+                    ) == SessionLifecycle::Active
+                })
+                .map(|input| (input.host.to_string(), input.summary.clone()));
+            if let Some((host, next)) = next {
+                self.open_session_on_host(host, next, false, cx);
+            } else {
+                self.clear_active_session_view();
+            }
+        }
+        self.cleanup_unmounted_surface_state();
+        self.persist_workspace_store_if_enabled();
+        self.sync_sessions_to_shared(cx);
+        self.sync_workspace_to_shared(cx);
+        cx.notify();
+    }
+
+    fn set_session_archived_local(
+        &mut self,
+        host: &str,
+        session: &multibot_proto::SessionSummary,
+        archived: bool,
+    ) {
+        for (h, s) in &mut self.host_sessions {
+            if h == host && s.id == session.id && s.agent == session.agent {
+                s.archived = archived;
+                s.archive_kill_process = archived;
+                s.working = false;
+            }
+        }
+        if self.host_statuses.is_empty() {
+            for s in &mut self.sessions {
+                if s.id == session.id && s.agent == session.agent {
+                    s.archived = archived;
+                    s.archive_kill_process = archived;
+                    s.working = false;
+                }
+            }
+        } else {
+            self.sessions = self.host_sessions.iter().map(|(_, s)| s.clone()).collect();
+        }
+        if self
+            .selected_session
+            .as_ref()
+            .is_some_and(|s| s.id == session.id && s.agent == session.agent)
+            && self.active_session_host() == host
+        {
+            if let Some(s) = &mut self.selected_session {
+                s.archived = archived;
+                s.archive_kill_process = archived;
+                s.working = false;
+            }
+        }
+    }
+
+    pub(crate) fn reactivate_session_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        let Some((host, session)) = self.host_for_session_key(key) else {
+            return false;
+        };
+        if session.archived
+            || self
+                .sidebar_state
+                .workspace_store
+                .session_lifecycle(key, &session, now_unix_ms())
+                == SessionLifecycle::Dissolved
+        {
+            if !self.unarchive_session_on_host(&host, session.id.clone(), cx) {
+                return false;
+            }
+            self.set_session_archived_local(&host, &session, false);
+        }
+        self.sidebar_state.workspace_store.move_to_inbox(key);
+        self.closed_sessions
+            .retain(|(h, s)| h != &host || s.id != session.id || s.agent != session.agent);
+        self.persist_workspace_store_if_enabled();
+        self.sync_sessions_to_shared(cx);
+        self.sync_workspace_to_shared(cx);
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn reactivate_last_dissolved(&mut self, cx: &mut Context<Self>) {
+        let key = self
+            .closed_sessions
+            .iter()
+            .rev()
+            .find_map(|(h, s)| {
+                let key = multibot_core::workspaces::canonical_session_key(h, s.agent, &s.id);
+                self.find_session_by_key(&key)
+                    .filter(|s| {
+                        self.sidebar_state
+                            .workspace_store
+                            .session_lifecycle(&key, s, now_unix_ms())
+                            == SessionLifecycle::Dissolved
+                    })
+                    .map(|_| key)
+            })
+            .or_else(|| {
+                self.session_inputs()
+                    .into_iter()
+                    .filter(|input| {
+                        self.sidebar_state.workspace_store.session_lifecycle(
+                            &input.key,
+                            input.summary,
+                            now_unix_ms(),
+                        ) == SessionLifecycle::Dissolved
+                    })
+                    .max_by_key(|input| {
+                        self.sidebar_state
+                            .workspace_store
+                            .session_meta
+                            .get(&input.key)
+                            .and_then(|m| m.dissolved_at_ms)
+                            .unwrap_or(input.summary.updated_at_ms)
+                    })
+                    .map(|input| input.key.clone())
+            });
+        if let Some(key) = key {
+            if self.reactivate_session_key(&key, cx) {
+                if let Some((host, session)) = self.host_for_session_key(&key) {
+                    self.open_session_on_host(host, session, false, cx);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn handle_lifecycle_keydown(
+        &mut self,
+        ev: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let key = ev.keystroke.key.to_ascii_lowercase();
+        let m = ev.keystroke.modifiers;
+        if self.inbox_state.go_leader {
+            self.inbox_state.go_leader = false;
+            if let Some(lifecycle) = SessionLifecycle::go_key(&key) {
+                self.open_lifecycle_view(lifecycle, window, cx);
+            } else if key == "g" && self.main_surface == MainSurface::Inbox {
+                self.inbox_state.selected_row = 0;
+            }
+            cx.notify();
+        } else if m.alt && !m.control && !m.platform && !m.shift && key == "g" {
+            self.inbox_state.go_leader = true;
+            cx.notify();
+        } else if m.alt && m.shift && !m.control && !m.platform {
+            let Some(lifecycle) =
+                SessionLifecycle::go_key(&key).filter(|v| *v != SessionLifecycle::Active)
+            else {
+                return false;
+            };
+            self.open_lifecycle_view(lifecycle, window, cx);
+        } else if self.active_modal != ActiveModal::None || self.table_modal_state.is_open() {
+            return false;
+        } else if self.main_surface == MainSurface::Inbox
+            && !self.inbox_state.filter_focused
+            && self.inbox_state.rename.is_none()
+            && !m.alt
+            && !m.control
+            && !m.platform
+            && !m.shift
+            && key == "g"
+        {
+            self.inbox_state.go_leader = true;
+            cx.notify();
+        } else if m.alt && !m.shift && !m.control && !m.platform && key == "i" {
+            self.inbox_state.select_all_split();
+            self.open_lifecycle_view(SessionLifecycle::Active, window, cx);
+        } else if (m.alt && !m.control && !m.shift && !m.platform && key == "e")
+            || (m.control && m.shift && !m.alt && key == "e")
+        {
+            if let Some(key) = self.target_triage_session_key() {
+                self.mark_done_or_inbox(&key, cx);
+            }
+        } else if ((m.alt && !m.control) || (m.control && !m.alt))
+            && !m.shift
+            && !m.platform
+            && key == "h"
+        {
+            if let Some(key) = self.target_triage_session_key() {
+                self.open_reminder_picker(crate::palette::ReminderTarget::Session(key), window, cx);
+            }
+        } else if m.alt && !m.control && !m.shift && !m.platform && key == "z" {
+            if let Some(key) = self.sidebar_state.workspace_store.undo_last_waiting() {
+                self.reactivate_session_key(&key, cx);
+            }
+            self.persist_workspace_store_if_enabled();
+            self.sync_workspace_to_shared(cx);
+            cx.notify();
+        } else if m.control && m.shift && !m.alt && !m.platform && key == "w" {
+            if let Some(key) = self.target_triage_session_key() {
+                self.dissolve_session_key(&key, cx);
+            }
+        } else if m.control && m.shift && !m.alt && !m.platform && key == "t" {
+            self.reactivate_last_dissolved(cx);
+        } else {
+            return false;
+        }
+        cx.stop_propagation();
+        window.prevent_default();
+        true
+    }
+
     pub(crate) fn compute_inbox_rows(&self, now_ms: i64) -> Vec<InboxRow> {
         self.compute_inbox_rows_for(&self.inbox_state.active_split, now_ms)
     }
@@ -402,7 +703,8 @@ impl MultibotView {
         now_ms: i64,
     ) -> Vec<InboxRow> {
         let inputs = self.session_inputs();
-        self.sidebar_state.workspace_store.query_inbox(
+        self.sidebar_state.workspace_store.query_lifecycle(
+            self.inbox_state.lifecycle,
             split,
             &inputs,
             self.sidebar_state.unread_only,
@@ -415,13 +717,14 @@ impl MultibotView {
     /// `All` always present. The Sidebar workspace switcher and Settings keep their own
     /// unfiltered workspace lists.
     pub(crate) fn inbox_visible_splits(&self, now_ms: i64) -> Vec<InboxSplit> {
-        let inputs = self.session_inputs();
-        self.sidebar_state.workspace_store.inbox_splits_with_sessions(
-            &inputs,
-            self.sidebar_state.unread_only,
-            &self.inbox_state.filter_query,
-            now_ms,
-        )
+        self.sidebar_state
+            .workspace_store
+            .visible_inbox_splits(now_ms)
+            .into_iter()
+            .filter(|split| {
+                *split == InboxSplit::All || !self.compute_inbox_rows_for(split, now_ms).is_empty()
+            })
+            .collect()
     }
 
     pub(crate) fn ensure_inbox_focus_handle(&mut self, cx: &mut Context<Self>) -> FocusHandle {
@@ -493,7 +796,12 @@ impl MultibotView {
         false
     }
 
-    pub(crate) fn handle_inbox_keydown(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+    pub(crate) fn handle_inbox_keydown(
+        &mut self,
+        ev: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.active_modal != ActiveModal::None
             || self.table_modal_state.is_open()
             || self.is_sidebar_rename_mounted()
@@ -531,22 +839,14 @@ impl MultibotView {
                 self.set_main_surface(MainSurface::Chat);
             }
             InboxKeyOutcome::MarkWaiting(key) => {
-                if let Some(sess) = self.find_session_by_key(&key) {
-                    self.sidebar_state
-                        .workspace_store
-                        .archive_to_waiting_session(&key, now, &sess);
-                    self.cleanup_unmounted_surface_state();
-                    self.persist_workspace_store_if_enabled();
-                    self.sync_workspace_to_shared(cx);
-                }
+                self.mark_done_or_inbox(&key, cx);
+            }
+            InboxKeyOutcome::Hibernate(key) => {
+                self.open_reminder_picker(crate::palette::ReminderTarget::Session(key), window, cx);
             }
             InboxKeyOutcome::UndoWaiting => {
-                if self
-                    .sidebar_state
-                    .workspace_store
-                    .undo_last_waiting()
-                    .is_some()
-                {
+                if let Some(key) = self.sidebar_state.workspace_store.undo_last_waiting() {
+                    self.reactivate_session_key(&key, cx);
                     self.persist_workspace_store_if_enabled();
                     self.sync_workspace_to_shared(cx);
                 }
@@ -590,7 +890,6 @@ impl MultibotView {
 
     pub(crate) fn render_inbox_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let now = now_unix_ms();
-        let inputs = self.session_inputs();
         let splits = self.inbox_visible_splits(now);
         // `inbox_state` may still point at a split that just dropped to `0` sessions (render is
         // `&self`, so it cannot normalize state). Show `All` instead of rows from a tab that is
@@ -608,18 +907,47 @@ impl MultibotView {
             .selected_row
             .min(filtered_rows.len().saturating_sub(1));
 
+        let mut lifecycle_tabs = h_flex().gap_2().items_center();
+        for lifecycle in SessionLifecycle::ALL {
+            let active = self.inbox_state.lifecycle == lifecycle;
+            lifecycle_tabs = lifecycle_tabs.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "inbox-view-{}",
+                        lifecycle.label().to_lowercase()
+                    )))
+                    .role(Role::Button)
+                    .test_support()
+                    .px_3p5()
+                    .py_2()
+                    .rounded(RADIUS_CHIP)
+                    .bg(if active {
+                        theme::bg_active_row()
+                    } else {
+                        theme::bg_surface()
+                    })
+                    .text_color(if active {
+                        theme::text_primary()
+                    } else {
+                        theme::text_muted()
+                    })
+                    .cursor_pointer()
+                    .child(lifecycle.label())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            this.open_lifecycle_view(lifecycle, window, cx);
+                        }),
+                    ),
+            );
+        }
+
         // 1. Canonical Workspace Splits Row (Frequent, All, Favorites, per-workspace)
         let mut split_row = h_flex().flex_wrap().gap_1p5().items_center();
         let mut ws_split_counter = 0usize;
         for split in splits {
             let active = active_split == split;
-            let split_rows = self.sidebar_state.workspace_store.query_inbox(
-                &split,
-                &inputs,
-                self.sidebar_state.unread_only,
-                &self.inbox_state.filter_query,
-                now,
-            );
+            let split_rows = self.compute_inbox_rows_for(&split, now);
             let count = split_rows.len();
 
             let (el_id, label): (SharedString, String) = match &split {
@@ -775,7 +1103,12 @@ impl MultibotView {
                     } else if unread_only {
                         "All caught up — no unread sessions in this split."
                     } else {
-                        "No sessions in this Inbox split yet. Connect a VPS host from the sidebar."
+                        match self.inbox_state.lifecycle {
+                            SessionLifecycle::Active => "No sessions in Inbox.",
+                            SessionLifecycle::Done => "No Done sessions. Mark a chat Done with Alt+E.",
+                            SessionLifecycle::Hibernated => "No Hibernated sessions. Hibernate a chat with Ctrl+H.",
+                            SessionLifecycle::Dissolved => "No Dissolved sessions. Dissolve stops the agent and keeps its history.",
+                        }
                     }),
             );
         } else {
@@ -785,7 +1118,28 @@ impl MultibotView {
                 let key_click = row.session_key.clone();
                 let key_dismiss = row.session_key.clone();
                 let keys_for_step = all_keys.clone();
-                let age = format_relative_age(row.sort_ms, now);
+                let age = if self.inbox_state.lifecycle == SessionLifecycle::Hibernated {
+                    let meta = &self.sidebar_state.workspace_store.session_meta[&row.session_key];
+                    let wake = meta
+                        .remind_at_ms
+                        .and_then(chrono::DateTime::from_timestamp_millis)
+                        .map(|at| {
+                            at.with_timezone(&chrono::Local)
+                                .format("%a %H:%M")
+                                .to_string()
+                        })
+                        .unwrap_or_default();
+                    format!(
+                        "{wake} · {}",
+                        if meta.hibernate_wake_on_reply {
+                            "Wake on reply"
+                        } else {
+                            "Stay hidden"
+                        }
+                    )
+                } else {
+                    format_relative_age(row.sort_ms, now)
+                };
                 let is_renaming = self
                     .inbox_state
                     .rename
@@ -1027,25 +1381,22 @@ impl MultibotView {
                     }
                 }
             }))
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
-                this.handle_inbox_keydown(ev, cx);
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                this.handle_inbox_keydown(ev, window, cx);
             }))
             .child(
-                div()
-                    .id("inbox-scroll")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .max_w(px(800.0))
-                            .mx_auto()
-                            .p_5()
-                            .gap_3()
-                            .child(split_row)
-                            .when_some(filter_bar, |el, bar| el.child(bar))
-                            .child(rows_el),
-                    ),
+                div().id("inbox-scroll").flex_1().overflow_y_scroll().child(
+                    v_flex()
+                        .w_full()
+                        .max_w(px(800.0))
+                        .mx_auto()
+                        .p_5()
+                        .gap_3()
+                        .child(lifecycle_tabs)
+                        .child(split_row)
+                        .when_some(filter_bar, |el, bar| el.child(bar))
+                        .child(rows_el),
+                ),
             )
     }
 }
@@ -1091,9 +1442,9 @@ mod tests {
 
         // h/l clamp splits
         st.active_split = InboxSplit::Frequent;
-        st.handle_key("h", None, none, 1000, &splits, &keys);
+        st.handle_key("left", None, none, 1000, &splits, &keys);
         assert_eq!(st.active_split, InboxSplit::Frequent);
-        st.handle_key("l", None, none, 1000, &splits, &keys);
+        st.handle_key("right", None, none, 1000, &splits, &keys);
         assert_eq!(st.active_split, InboxSplit::All);
         st.handle_key("right", None, none, 1000, &splits, &keys);
         st.handle_key("right", None, none, 1000, &splits, &keys);
@@ -1555,13 +1906,13 @@ mod tests {
         // 3. h / l recover to visible_splits[0] when active_split vanished
         st.active_split = InboxSplit::Workspace("snoozed-ws".into());
         st.selected_row = 2;
-        st.handle_key("h", Some("h"), none, 3_200, &splits, &keys);
+        st.handle_key("left", None, none, 3_200, &splits, &keys);
         assert_eq!(st.active_split, splits[0]);
         assert_eq!(st.selected_row, 0);
 
         st.active_split = InboxSplit::Workspace("deleted-ws".into());
         st.selected_row = 2;
-        st.handle_key("l", Some("l"), none, 3_300, &splits, &keys);
+        st.handle_key("right", None, none, 3_300, &splits, &keys);
         assert_eq!(st.active_split, splits[0]);
         assert_eq!(st.selected_row, 0);
     }
@@ -1714,7 +2065,7 @@ mod tests {
                     is_held: false,
                     prefer_character_input: false,
                 };
-                v.handle_inbox_keydown(&ev_q, cx);
+                v.handle_inbox_keydown(&ev_q, window, cx);
 
                 let mut e_ks = gpui_kit::Keystroke::parse("e").unwrap();
                 e_ks.key_char = Some("e".into());
@@ -1723,7 +2074,7 @@ mod tests {
                     is_held: false,
                     prefer_character_input: false,
                 };
-                v.handle_inbox_keydown(&ev_e, cx);
+                v.handle_inbox_keydown(&ev_e, window, cx);
 
                 assert_eq!(v.active_modal, ActiveModal::Shortcuts);
                 assert_eq!(v.main_surface, MainSurface::Inbox);

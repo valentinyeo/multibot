@@ -176,7 +176,7 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         display: "Ctrl+Shift+W",
         gpui_key: "ctrl-shift-w",
         category: ShortcutCategory::Navigation,
-        description: "Delete current session (stop agent, keep history)",
+        description: "Dissolve session (stop agent, keep history)",
         wired: true,
     },
     ShortcutSpec {
@@ -184,7 +184,7 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         display: "Ctrl+Shift+E",
         gpui_key: "ctrl-shift-e",
         category: ShortcutCategory::Navigation,
-        description: "Archive active session (press twice to confirm)",
+        description: "Mark session Done (keep agent running)",
         wired: true,
     },
     ShortcutSpec {
@@ -192,7 +192,7 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         display: "Ctrl+Shift+T",
         gpui_key: "ctrl-shift-t",
         category: ShortcutCategory::Navigation,
-        description: "Reopen last closed session",
+        description: "Reactivate last dissolved session",
         wired: true,
     },
     ShortcutSpec {
@@ -232,7 +232,7 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         display: "Ctrl+H",
         gpui_key: "ctrl-h",
         category: ShortcutCategory::Navigation,
-        description: "Remind Me: schedule or clear a chat reminder",
+        description: "Hibernate session (Wake on reply or Stay hidden)",
         wired: true,
     },
     ShortcutSpec {
@@ -240,7 +240,7 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         display: "Alt+H",
         gpui_key: "alt-h",
         category: ShortcutCategory::Navigation,
-        description: "Remind Me: schedule or clear a chat reminder",
+        description: "Hibernate session (Wake on reply or Stay hidden)",
         wired: true,
     },
     ShortcutSpec {
@@ -307,7 +307,7 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         display: "Alt+E",
         gpui_key: "alt-e",
         category: ShortcutCategory::Inbox,
-        description: "Move active session to Waiting until unread",
+        description: "Mark active session Done until a new reply",
         wired: true,
     },
     ShortcutSpec {
@@ -315,7 +315,39 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         display: "Alt+Z",
         gpui_key: "alt-z",
         category: ShortcutCategory::Inbox,
-        description: "Undo most recent move to Waiting",
+        description: "Undo most recent Done",
+        wired: true,
+    },
+    ShortcutSpec {
+        id: "inbox.done",
+        display: "Alt+Shift+E",
+        gpui_key: "alt-shift-e",
+        category: ShortcutCategory::Inbox,
+        description: "Open Done view",
+        wired: true,
+    },
+    ShortcutSpec {
+        id: "inbox.hibernated",
+        display: "Alt+Shift+H",
+        gpui_key: "alt-shift-h",
+        category: ShortcutCategory::Inbox,
+        description: "Open Hibernated view",
+        wired: true,
+    },
+    ShortcutSpec {
+        id: "inbox.dissolved",
+        display: "Alt+Shift+D",
+        gpui_key: "alt-shift-d",
+        category: ShortcutCategory::Inbox,
+        description: "Open Dissolved view",
+        wired: true,
+    },
+    ShortcutSpec {
+        id: "inbox.go",
+        display: "Alt+G",
+        gpui_key: "alt-g",
+        category: ShortcutCategory::Inbox,
+        description: "Go to view: I Inbox, E Done, H Hibernated, D Dissolved; Esc cancels",
         wired: true,
     },
     // =========================================================================
@@ -1066,7 +1098,7 @@ mod tests {
             }
         }
 
-        assert_eq!(SHORTCUTS.len(), 97);
+        assert_eq!(SHORTCUTS.len(), 101);
     }
 
     #[test]
@@ -1215,6 +1247,21 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn lifecycle_views_and_go_leader_have_distinct_wired_global_chords() {
+        for (id, key) in [
+            ("inbox.done", "alt-shift-e"),
+            ("inbox.hibernated", "alt-shift-h"),
+            ("inbox.dissolved", "alt-shift-d"),
+            ("inbox.go", "alt-g"),
+        ] {
+            let bindings: Vec<_> = SHORTCUTS.iter().filter(|s| s.gpui_key == key).collect();
+            assert_eq!(bindings.len(), 1);
+            assert_eq!(bindings[0].id, id);
+            assert!(bindings[0].wired);
         }
     }
 
@@ -1381,7 +1428,7 @@ mod tests {
             let spec = by_id(id).unwrap_or_else(|| panic!("missing shortcut {id}"));
             assert!(spec.wired, "expected {id} ({}) to be wired: true", spec.gpui_key);
         }
-        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 64);
+        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 68);
         assert!(!by_id("browser.close_tab").unwrap().wired);
         assert!(!by_id("chat.steer").unwrap().wired);
         assert!(by_gpui_key("ctrl-shift-j").is_none());

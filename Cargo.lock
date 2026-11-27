@@ -4591,6 +4591,7 @@ dependencies = [
  "portable-pty",
  "raw-window-handle",
  "roxmltree 0.20.0",
+ "serde_json",
  "sysinfo 0.35.2",
  "tokio",
  "windows-sys 0.61.2",

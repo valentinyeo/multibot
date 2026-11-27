@@ -118,8 +118,8 @@ Opening multiprompt is locked until device login is validated and the initial se
 | Alt+S | Favorite or unfavorite this session |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Ctrl+1 ... 9 | Open session 1-9 in this workspace, pinned first |
-| Ctrl+Shift+W | Delete the current session; stop its agent and keep its history |
-| Ctrl+K -&gt; Delete session | Delete the current session; stop its agent and keep its history |
+| Ctrl+Shift+W | Dissolve the session; stop its agent, keep its history and workspace |
+| Ctrl+K -&gt; Dissolve | Stop the agent; keep its history and workspace |
 | Ctrl+K -&gt; Quit multi bot | Quit the app; keep server agents and saved chats |
 | Ctrl+K -&gt; Copy chat ID | Copy the chosen chat identity |
 | Ctrl+Shift+U | Toggle unread-only filter (sidebar + inbox) |
@@ -155,9 +155,23 @@ Opening multiprompt is locked until device login is validated and the initial se
 
 ### Inbox (Alt+I)
 
+Inbox has four headline tabs above the same workspace splits. The sidebar lists active work only.
+
+| Shortcut | Action |
+| --- | --- |
+| Alt+I | Open Inbox |
+| Alt+Shift+E / H / D | Open Done / Hibernated / Dissolved |
+| Alt+G then I / E / H / D | Go to Inbox / Done / Hibernated / Dissolved from anywhere, including the composer; Esc cancels |
+| Bare G then I / E / H / D in Inbox | Switch headline view |
+| Alt+E / Ctrl+Shift+E | Mark Done; in Done, move back to Inbox |
+| Alt+Z | Undo last Done |
+| Ctrl+K | View: Inbox, View: Done, View: Hibernated, View: Dissolved, Done, Hibernate, Dissolve, Reactivate, Move to Inbox |
+
+Done keeps the agent alive and returns to Inbox on a new assistant reply. Hibernate keeps the agent alive until its wake time. Wake on reply returns early on a reply; Stay hidden does not. Sending a message or choosing Move to Inbox wakes either state. Opening any hidden chat only reads it and does not put it in the sidebar. Dissolve stops the agent and keeps the full history and workspace. Its Reactivate button, Ctrl+Shift+T, or a new prompt restores that same chat. No timer or reply wakes a dissolved chat.
+
 The Inbox is keyboard-first and minimal. While it is open, the sidebar and the floating header bar (title pill, Inbox and menu buttons) are hidden. Your sidebar preference is untouched and comes back when you leave the Inbox. The provider filter pills (Claude, Antigravity, Codex) and the Unread Only button are not shown; the unread-only filter still works through Ctrl+Shift+U.
 
-The split bar shows only splits that hold at least one session, so no wall of `Frequent 0`, `★ Favorites 0` or `0`-count workspace pills. ALL always stays visible, even with no sessions at all. Tab, Shift+Tab, h and l cycle only across the visible splits. A split that empties out drops from the bar and the Inbox falls back to ALL. Empty workspaces still appear in the sidebar workspace switcher and in Settings -> Workspaces.
+The split bar shows only splits that hold at least one session, so no wall of `Frequent 0`, `★ Favorites 0` or `0`-count workspace pills. ALL always stays visible, even with no sessions at all. Tab, Shift+Tab, Left and Right cycle only across the visible splits. A split that empties out drops from the bar and the Inbox falls back to ALL. Empty workspaces still appear in the sidebar workspace switcher and in Settings -> Workspaces.
 
 The search bar stays hidden so the Inbox opens clean. Ctrl+F or / opens and focuses it; Esc closes it, clears the query and restores the full list while the Inbox stays open, and a second Esc closes the Inbox. Closing the Inbox or opening a session resets the search bar for the next visit. Search splits the query into words, and a row matches only when every word appears somewhere in its title, path, last message, workspace, host, agent or session id.
 
@@ -165,9 +179,9 @@ The search bar stays hidden so the Inbox opens clean. Ctrl+F or / opens and focu
 | --- | --- |
 | Sidebar inbox button | Click to open; Ctrl+Shift+I toggles; Alt+I opens / selects All |
 | Ctrl+F or / | Open the Inbox search bar; every word must match (so `multi rust` finds `Multi Bot Rust`) |
-| j/k or Alt+J/K  gg/G or Alt+G Alt+G / Alt+Shift+G  1-9 | Move / top / bottom / jump row |
-| Tab / Shift+Tab / h / l | Switch workspace split (visible non-empty splits only) |
-| e or Alt+E / z or Alt+Z / u | Archive / undo archive / toggle read-unread |
+| j/k or Up/Down or Alt+J/K; gg; Shift+G; 1-9 | Move / top / bottom / jump row |
+| Tab / Shift+Tab / Left / Right | Switch workspace split (visible non-empty splits only) |
+| e or Alt+E / z or Alt+Z / u | Done (or Move to Inbox in Done) / undo Done / toggle read-unread |
 | Ctrl+K -&gt; Copy chat ID | Copy the chosen chat identity |
 | Ctrl+Shift+U | Toggle unread-only filter (global) |
 | Alt+I (inside) | Jump back to ALL split |
@@ -189,13 +203,13 @@ The search bar stays hidden so the Inbox opens clean. Ctrl+F or / opens and focu
 | Ctrl+Shift+R | Reattach active SSH/tmux tab |
 | Ctrl+K -&gt; Reopen server shell | List the detached sessions on this tab's server and attach the one you pick |
 | Ctrl+K -&gt; New session in this group | Start a Claude session in the tab's group straight away, in the terminal |
-| Ctrl+K -&gt; All Sessions | Open session overview (w = Waiting, a = Archived, u = unattached) |
+| Ctrl+K -&gt; View: Inbox / Done / Hibernated / Dissolved | Open that lifecycle view with workspace splits |
 | Ctrl+F in All Sessions | Reduce the list to matching sessions |
 | Space in All Sessions | Mark or unmark the selected unattached session |
 | x in All Sessions | Close the marked unattached sessions, or the selected one, after a confirmation |
-| Alt+E | Move active tab to Waiting until it gets a blue dot |
-| Alt+Z | Undo the most recent move to Waiting |
-| Ctrl+K -&gt; Restore Waiting | Restore waiting live sessions in this workspace |
+| Alt+E | Mark Done; keep the agent alive and return on a new reply |
+| Alt+Z | Undo the most recent Done |
+| Ctrl+K -&gt; Move to Inbox | Restore the selected hidden chat |
 | Ctrl+D in Chat View | Start/stop dictation, including while typing in the composer; Ctrl+Shift+D still copies the latest code block; AltGr is untouched |
 | Ctrl+Shift+Space / Enter | Start/stop dictation; Enter is stop-only while recording; Escape discards the recording |
 
@@ -205,7 +219,7 @@ The search bar stays hidden so the Inbox opens clean. Ctrl+F or / opens and focu
 | --- | --- |
 | Ctrl+Shift+1 ... 5 | New CMD / TMUX / VPS / PowerShell |
 | Ctrl+N | New Multi Bot window |
-| Ctrl+Shift+T | Reopen last closed tab |
+| Ctrl+Shift+T | Reactivate last dissolved session on its saved history |
 | Alt+Space | Window menu (move/size/min/max) |
 | Win+Arrows | Snap / maximize / minimize (edge-snapped Left/Right hops monitors) |
 | Win+Shift+Left/Right | Move window to the adjacent monitor |
@@ -240,8 +254,8 @@ The search bar stays hidden so the Inbox opens clean. Ctrl+F or / opens and focu
 | Ctrl+K -&gt; Set workspace folder | Declare this workspace folder from the repo list; saved for next time |
 | Ctrl+K -&gt; Move workspace to server | Point this workspace default folder at the same path on another account server |
 | Ctrl+K -&gt; New tab on server | Open one workspace tab on another account server without moving the workspace |
-| Ctrl+K Remind Me | Schedule or clear a reminder for the selected chat |
-| Ctrl+H | Remind Me: 15 minutes, 1 hour, 3 hours, Tomorrow 9am (local time), or Clear reminder. Type an optional short note, then choose with Up/Down and Enter |
+| Ctrl+K Hibernate | Hibernate the selected chat until a chosen time |
+| Ctrl+H / Alt+H / bare H in Inbox | Hibernate: 15 minutes, 1 hour, 3 hours or Tomorrow 9am. Tab toggles Wake on reply (default) / Stay hidden. Type an optional note, then Up/Down and Enter |
 | Alt+H | Same reminder picker as Ctrl+H; remote sessions keep running |
 | Inbox: Due reminder · Dismiss | Due reminders rise above other chats, including in Unread Only, until dismissed; snoozed workspaces remain quiet until wake |
 | Ctrl+V (in Ctrl+K) | Paste into the palette search |
@@ -280,7 +294,7 @@ The search bar stays hidden so the Inbox opens clean. Ctrl+F or / opens and focu
 | Ctrl+K "Chat View: Auto-switch AI when a plan runs out" | When this chat's AI runs out of plan, the host moves the chat to the next AI with plan left, on its own. The name, history and unanswered message follow it, and a row says which AI ran out. Off switches that off, and an AI that ran out is skipped for an hour |
 | Ctrl+K "Chat View: Restart this chat on the newest version" | Stop and start this chat's agent on the newest version in the background; it keeps its name and history, and a chat that is mid-reply restarts when the reply ends |
 | Ctrl+K "Chat View: Restart every idle live chat" | Restart every running live chat on this server on the newest version; chats that are replying restart when their reply ends. Every live chat also restarts nightly at 04:00 local server time |
-| Ctrl+K "Chat View: More Menu" | Chat View: open the round three-dot menu next to the title as one grouped panel: Approve, Stop, Terminal, Rename, History, Waiting, Remind me, Archive, the current Model, End session and Remove from list; Up/Down/Enter or the mouse choose, Esc or a click outside closes |
+| Ctrl+K "Chat View: More Menu" | Chat View: open the round three-dot menu next to the title as one grouped panel: Approve, Stop, Terminal, Rename, History, Done, Hibernate, Dissolve, the current Model, End session and Remove from list; Up/Down/Enter or the mouse choose, Esc or a click outside closes |
 | Inbox icon in the chat header | Click the envelope left of the three dots to open the Inbox, same as Alt+I; a blue dot shows while Inbox items wait |
 | Up / Down / Enter in Chat View | Up in an empty message box focuses the newest message; Up/Down move between messages including waiting ones, Enter opens the right-click options, Delete cancels a waiting message, Esc or typing returns to the box |
 | Enter / Ctrl+Enter in Chat View | Send your message; while dictating, stops the dictation and sends it with the spoken words; Shift+Enter adds a new line; Enter inserts an open command suggestion |

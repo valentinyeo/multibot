@@ -292,8 +292,14 @@ pub struct SessionGroup {
     pub position: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMeta {
+    #[serde(default = "default_true")]
+    pub hibernate_wake_on_reply: bool,
+    #[serde(default)]
+    pub hibernate_reply_boundary: Option<WaitingEntry>,
+    #[serde(default)]
+    pub dissolved_at_ms: Option<i64>,
     #[serde(default)]
     pub face: Option<u8>,
     #[serde(default)]
@@ -324,6 +330,63 @@ pub struct SessionMeta {
     pub last_input_ms: Option<i64>,
     #[serde(default)]
     pub frequent_visits_ms: Vec<i64>,
+}
+
+impl Default for SessionMeta {
+    fn default() -> Self {
+        Self {
+            hibernate_wake_on_reply: true,
+            hibernate_reply_boundary: None,
+            dissolved_at_ms: None,
+            face: None,
+            color: None,
+            remind_at_ms: None,
+            reminder_note: None,
+            workspace_id: None,
+            pinned: false,
+            starred_pinned: false,
+            group_id: None,
+            starred_group_id: None,
+            manual_order: None,
+            starred_manual_order: None,
+            muted: false,
+            last_used_ms: 0,
+            last_input_ms: None,
+            frequent_visits_ms: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionLifecycle {
+    #[default]
+    Active,
+    Done,
+    Hibernated,
+    Dissolved,
+}
+
+impl SessionLifecycle {
+    pub const ALL: [Self; 4] = [Self::Active, Self::Done, Self::Hibernated, Self::Dissolved];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Active => "Inbox",
+            Self::Done => "Done",
+            Self::Hibernated => "Hibernated",
+            Self::Dissolved => "Dissolved",
+        }
+    }
+
+    pub fn go_key(key: &str) -> Option<Self> {
+        match key {
+            "i" => Some(Self::Active),
+            "e" => Some(Self::Done),
+            "h" => Some(Self::Hibernated),
+            "d" => Some(Self::Dissolved),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -728,11 +791,87 @@ impl WorkspaceStore {
     pub fn set_reminder(&mut self, key: &str, remind_at_ms: Option<i64>, note: Option<&str>) {
         let meta = self.session_meta.entry(key.to_string()).or_default();
         meta.remind_at_ms = remind_at_ms;
+        if remind_at_ms.is_none() {
+            meta.hibernate_reply_boundary = None;
+        }
         meta.reminder_note = remind_at_ms.and_then(|_| {
             note.map(str::trim)
                 .filter(|n| !n.is_empty())
                 .map(|n| n.chars().take(200).collect())
         });
+    }
+
+    pub fn session_lifecycle(
+        &self,
+        key: &str,
+        summary: &SessionSummary,
+        now_ms: i64,
+    ) -> SessionLifecycle {
+        let meta = self.session_meta.get(key);
+        if (summary.archived && summary.archive_kill_process)
+            || meta.is_some_and(|m| m.dissolved_at_ms.is_some())
+        {
+            SessionLifecycle::Dissolved
+        } else if meta.is_some_and(|m| m.remind_at_ms.is_some_and(|at| at > now_ms)) {
+            SessionLifecycle::Hibernated
+        } else if !self.reminder_due(key, now_ms)
+            && (summary.archived || self.waiting_sessions.contains_key(key))
+        {
+            SessionLifecycle::Done
+        } else {
+            SessionLifecycle::Active
+        }
+    }
+
+    pub fn move_to_inbox(&mut self, key: &str) {
+        self.waiting_sessions.remove(key);
+        self.set_reminder(key, None, None);
+        if let Some(meta) = self.session_meta.get_mut(key) {
+            meta.dissolved_at_ms = None;
+        }
+    }
+
+    pub fn hibernate_session(
+        &mut self,
+        key: &str,
+        summary: &SessionSummary,
+        until: Option<i64>,
+        note: Option<&str>,
+        wake_on_reply: bool,
+    ) {
+        self.move_to_inbox(key);
+        self.set_reminder(key, until, note);
+        let meta = self.session_meta.get_mut(key).unwrap();
+        meta.hibernate_wake_on_reply = wake_on_reply;
+        meta.hibernate_reply_boundary = until.map(|_| WaitingEntry {
+            archived_at_ms: now_unix_ms(),
+            last_activity_ms: summary.last_assistant_ms.unwrap_or(summary.updated_at_ms),
+            last_assistant_id: summary.last_assistant_id.clone(),
+            was_unread: summary.needs_attention,
+        });
+    }
+
+    pub fn dissolve_session(&mut self, key: &str, now_ms: i64) {
+        self.move_to_inbox(key);
+        self.session_meta
+            .entry(key.to_string())
+            .or_default()
+            .dissolved_at_ms = Some(now_ms);
+    }
+
+    pub fn wake_due_sessions(&mut self, now_ms: i64) -> bool {
+        let keys: Vec<String> = self
+            .session_meta
+            .iter()
+            .filter(|(_, m)| {
+                m.dissolved_at_ms.is_none() && m.remind_at_ms.is_some_and(|at| at <= now_ms)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in &keys {
+            self.move_to_inbox(key);
+        }
+        !keys.is_empty()
     }
 
     pub fn reminder_due(&self, key: &str, now_ms: i64) -> bool {
@@ -1730,7 +1869,8 @@ impl WorkspaceStore {
         let mut ungrouped_recents: Vec<Candidate> = Vec::new();
 
         for (orig_pos, input) in sessions.iter().enumerate() {
-            if input.summary.archived || self.waiting_sessions.contains_key(&input.key) {
+            if self.session_lifecycle(&input.key, input.summary, now_ms) != SessionLifecycle::Active
+            {
                 continue;
             }
             let meta = self.session_meta.get(&input.key);
@@ -2178,6 +2318,7 @@ impl WorkspaceStore {
     }
 
     pub fn record_session_input(&mut self, session_key: &str, now_ms: i64) {
+        self.move_to_inbox(session_key);
         self.record_frequent_visit(session_key, now_ms);
         let meta = self
             .session_meta
@@ -2312,6 +2453,7 @@ impl WorkspaceStore {
         last_assistant_id: Option<String>,
         was_unread: bool,
     ) {
+        self.move_to_inbox(session_key);
         let entry = WaitingEntry {
             archived_at_ms: now_ms,
             last_activity_ms,
@@ -2344,20 +2486,52 @@ impl WorkspaceStore {
         session_key: &str,
         summary: &SessionSummary,
     ) -> bool {
-        let Some(entry) = self.waiting_sessions.get(session_key) else {
+        if (summary.archived && summary.archive_kill_process)
+            || self
+                .session_meta
+                .get(session_key)
+                .is_some_and(|m| m.dissolved_at_ms.is_some())
+        {
+            return false;
+        }
+        let hibernating = self
+            .session_meta
+            .get(session_key)
+            .is_some_and(|m| m.remind_at_ms.is_some());
+        let entry = if hibernating {
+            let meta = &self.session_meta[session_key];
+            if !meta.hibernate_wake_on_reply {
+                return false;
+            }
+            meta.hibernate_reply_boundary.as_ref()
+        } else {
+            self.waiting_sessions.get(session_key)
+        };
+        let Some(entry) = entry else {
+            if hibernating {
+                if let Some(meta) = self.session_meta.get_mut(session_key) {
+                    meta.hibernate_reply_boundary = Some(WaitingEntry {
+                        archived_at_ms: now_unix_ms(),
+                        last_activity_ms: summary
+                            .last_assistant_ms
+                            .unwrap_or(summary.updated_at_ms),
+                        last_assistant_id: summary.last_assistant_id.clone(),
+                        was_unread: summary.needs_attention,
+                    });
+                }
+            } else if summary.archived {
+                self.archive_to_waiting_session(session_key, now_unix_ms(), summary);
+            }
             return false;
         };
-        let effective_activity_ms = summary
-            .last_assistant_ms
-            .unwrap_or(summary.updated_at_ms)
-            .max(summary.updated_at_ms);
-        let newer_activity = effective_activity_ms > entry.last_activity_ms;
         let newer_assistant = summary.last_assistant_id.is_some()
             && summary.last_assistant_id != entry.last_assistant_id;
-        let is_unread = self.is_session_unread(session_key, summary);
-        let became_unread = !entry.was_unread && is_unread;
-        if newer_activity || newer_assistant || became_unread {
-            self.waiting_sessions.remove(session_key);
+        let newer_reply = summary
+            .last_assistant_ms
+            .is_some_and(|at| at > entry.last_activity_ms);
+        let became_unread = !entry.was_unread && self.is_session_unread(session_key, summary);
+        if newer_reply || newer_assistant || became_unread {
+            self.move_to_inbox(session_key);
             return true;
         }
         false
@@ -2399,6 +2573,11 @@ impl WorkspaceStore {
             .filter(|input| {
                 let meta = self.session_meta.get(&input.key);
                 let due = self.reminder_due(&input.key, now_ms);
+                if self.session_lifecycle(&input.key, input.summary, now_ms)
+                    != SessionLifecycle::Active
+                {
+                    return false;
+                }
                 if !due
                     && (input.summary.archived
                         || self.inbox_excluded.contains(&input.key)
@@ -2427,6 +2606,25 @@ impl WorkspaceStore {
         filter_query: &str,
         now_ms: i64,
     ) -> Vec<InboxRow> {
+        self.query_lifecycle(
+            SessionLifecycle::Active,
+            split,
+            sessions,
+            unread_only,
+            filter_query,
+            now_ms,
+        )
+    }
+
+    pub fn query_lifecycle(
+        &self,
+        lifecycle: SessionLifecycle,
+        split: &InboxSplit,
+        sessions: &[SessionInput<'_>],
+        unread_only: bool,
+        filter_query: &str,
+        now_ms: i64,
+    ) -> Vec<InboxRow> {
         let query_lower = filter_query.trim().to_lowercase();
         // Multi-word matching: every whitespace-separated token must appear somewhere in the
         // session's searchable text, so `multi rust` matches `Multi Bot Rust`.
@@ -2449,15 +2647,13 @@ impl WorkspaceStore {
         for input in sessions {
             let meta = self.session_meta.get(&input.key);
             let due_reminder = self.reminder_due(&input.key, now_ms);
-            if !due_reminder
-                && (input.summary.archived
-                    || self.inbox_excluded.contains(&input.key)
-                    || self.waiting_sessions.contains_key(&input.key)
-                    || meta.is_some_and(|m| m.remind_at_ms.is_some()))
-            {
+            if self.session_lifecycle(&input.key, input.summary, now_ms) != lifecycle {
                 continue;
             }
-            if !due_reminder && meta.is_some_and(|m| m.muted) {
+            if lifecycle == SessionLifecycle::Active
+                && !due_reminder
+                && (self.inbox_excluded.contains(&input.key) || meta.is_some_and(|m| m.muted))
+            {
                 continue;
             }
 
@@ -3268,6 +3464,139 @@ mod tests {
             host,
             summary,
         }
+    }
+
+    #[test]
+    fn lifecycle_views_share_workspace_splits_and_sidebar_only_shows_active() {
+        let mut store = WorkspaceStore::new();
+        let now = now_unix_ms();
+        let workspace = store.create_workspace("Project", None).unwrap();
+        let mut sessions: Vec<_> = (0..4)
+            .map(|i| {
+                make_session(
+                    &format!("life-{i}"),
+                    AgentKind::Claude,
+                    "Chat",
+                    100,
+                    false,
+                    false,
+                )
+            })
+            .collect();
+        let keys: Vec<_> = sessions
+            .iter()
+            .map(|s| canonical_session_key("h", s.agent, &s.id))
+            .collect();
+        for key in &keys {
+            store.assign_session_workspace(key, &workspace.id);
+        }
+        store.archive_to_waiting_session(&keys[1], now, &sessions[1]);
+        store.hibernate_session(&keys[2], &sessions[2], Some(now + 1000), None, true);
+        store.dissolve_session(&keys[3], now);
+        sessions[3].archived = true;
+        sessions[3].archive_kill_process = true;
+        let inputs: Vec<_> = sessions.iter().map(|s| make_input("h", s)).collect();
+        for (idx, lifecycle) in SessionLifecycle::ALL.into_iter().enumerate() {
+            for split in [InboxSplit::All, InboxSplit::Workspace(workspace.id.clone())] {
+                let rows = store.query_lifecycle(lifecycle, &split, &inputs, false, "", now);
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].session_key, keys[idx]);
+            }
+        }
+        let layout = store.compute_sidebar_layout(&workspace.id, &inputs, false, now);
+        assert_eq!(layout.recents.len(), 1);
+        assert_eq!(layout.recents[0].session_key, keys[0]);
+    }
+
+    #[test]
+    fn hibernate_modes_reply_timer_and_dissolved_precedence_survive_serde() {
+        let mut store = WorkspaceStore::new();
+        let mut session = make_session("life", AgentKind::Claude, "Chat", 100, false, false);
+        session.last_assistant_id = Some("a1".into());
+        let key = canonical_session_key("h", session.agent, &session.id);
+        let now = now_unix_ms();
+        assert!(SessionMeta::default().hibernate_wake_on_reply);
+        assert!(
+            serde_json::from_str::<SessionMeta>("{}")
+                .unwrap()
+                .hibernate_wake_on_reply
+        );
+        for wake_on_reply in [true, false] {
+            store.hibernate_session(
+                &key,
+                &session,
+                Some(now + 1000),
+                Some("note"),
+                wake_on_reply,
+            );
+            let saved = serde_json::to_string(&store).unwrap();
+            store = serde_json::from_str(&saved).unwrap();
+            let mut metadata_only = session.clone();
+            metadata_only.updated_at_ms = 500;
+            metadata_only.working = true;
+            assert!(!store.auto_unarchive_waiting_if_active(&key, &metadata_only));
+            let mut reply = session.clone();
+            reply.last_assistant_id = Some("a2".into());
+            reply.last_assistant_ms = Some(200);
+            assert_eq!(
+                store.auto_unarchive_waiting_if_active(&key, &reply),
+                wake_on_reply
+            );
+            assert_eq!(
+                store.session_lifecycle(&key, &reply, now),
+                if wake_on_reply {
+                    SessionLifecycle::Active
+                } else {
+                    SessionLifecycle::Hibernated
+                }
+            );
+            store.wake_due_sessions(now + 1000);
+            assert_eq!(
+                store.session_lifecycle(&key, &reply, now + 1000),
+                SessionLifecycle::Active
+            );
+        }
+        store.hibernate_session(&key, &session, Some(now + 1000), None, false);
+        store.record_session_input(&key, now);
+        assert_eq!(
+            store.session_lifecycle(&key, &session, now),
+            SessionLifecycle::Active
+        );
+        store.dissolve_session(&key, now);
+        store.set_reminder(&key, Some(now - 1), None);
+        session.last_assistant_id = Some("a3".into());
+        assert!(!store.auto_unarchive_waiting_if_active(&key, &session));
+        assert!(!store.wake_due_sessions(now));
+        assert_eq!(
+            store.session_lifecycle(&key, &session, now),
+            SessionLifecycle::Dissolved
+        );
+        store.move_to_inbox(&key);
+        assert_eq!(
+            store.session_lifecycle(&key, &session, now),
+            SessionLifecycle::Active
+        );
+    }
+
+    #[test]
+    fn legacy_server_archive_is_done_but_killed_archive_is_dissolved() {
+        let mut store = WorkspaceStore::new();
+        let mut session = make_session("legacy", AgentKind::Claude, "Legacy", 100, false, false);
+        let key = canonical_session_key("h", session.agent, &session.id);
+        session.archived = true;
+        assert_eq!(
+            store.session_lifecycle(&key, &session, 200),
+            SessionLifecycle::Done
+        );
+        assert!(!store.auto_unarchive_waiting_if_active(&key, &session));
+        session.last_assistant_id = Some("new-reply".into());
+        assert!(store.auto_unarchive_waiting_if_active(&key, &session));
+        session.archive_kill_process = true;
+        assert_eq!(
+            store.session_lifecycle(&key, &session, 200),
+            SessionLifecycle::Dissolved
+        );
+        assert!(!store.auto_unarchive_waiting_if_active(&key, &session));
     }
 
     #[test]

@@ -20,7 +20,7 @@ use gpui_kit::{
 use multibot_core::SidebarMode;
 use multibot_core::workspaces::{
     PaletteCategory, PaletteCommandSpec, PaletteMode, PaletteRow, PaletteStats,
-    STARRED_WORKSPACE_ID, canonical_session_key, now_unix_ms, rank_palette,
+    STARRED_WORKSPACE_ID, now_unix_ms, rank_palette,
 };
 use multibot_keys::{ALL_CATEGORIES, by_category};
 use multibot_proto::{AgentKind, ClientRequest};
@@ -40,6 +40,7 @@ pub(crate) enum ReminderTarget {
 pub(crate) struct PaletteState {
     pub stats: PaletteStats,
     pub reminder_target: Option<ReminderTarget>,
+    pub hibernate_wake_on_reply: bool,
     pub directory_picker: Option<SessionDirectoryPicker>,
     pub selected_index: usize,
     pub tab_context_session_key: Option<String>,
@@ -117,6 +118,7 @@ impl MultibotView {
             target => target,
         };
         self.open_palette(window, cx);
+        self.palette_state.hibernate_wake_on_reply = true;
         self.palette_state.reminder_target = Some(target);
         self.palette_state.directory_picker = None;
     }
@@ -160,11 +162,15 @@ impl MultibotView {
             // keeps it at the top of the 520px palette viewport (`app.rs` headless test contract).
             PaletteCommandSpec {
                 id: "pal-cmd-inbox".into(),
-                label: "Open Cross-workspace Inbox".into(),
+                label: "View: Inbox".into(),
                 chord: "Alt+I".into(),
                 category: PaletteCategory::Sessions,
                 destructive: false,
-                aliases: vec!["inbox".into(), "messages".into()],
+                aliases: vec![
+                    "inbox".into(),
+                    "messages".into(),
+                    "open cross-workspace inbox".into(),
+                ],
                 tab_context: false,
                 global: true,
             },
@@ -210,7 +216,7 @@ impl MultibotView {
             },
             PaletteCommandSpec {
                 id: "pal-cmd-remind".into(),
-                label: "Remind Me".into(),
+                label: "Hibernate".into(),
                 chord: "Ctrl+H".into(),
                 category: PaletteCategory::Sessions,
                 destructive: false,
@@ -220,7 +226,7 @@ impl MultibotView {
             },
             PaletteCommandSpec {
                 id: "pal-cmd-waiting".into(),
-                label: "Move session to Waiting".into(),
+                label: "Done".into(),
                 chord: "Alt+E".into(),
                 category: PaletteCategory::Sessions,
                 destructive: false,
@@ -230,7 +236,7 @@ impl MultibotView {
             },
             PaletteCommandSpec {
                 id: "pal-cmd-undo-waiting".into(),
-                label: "Undo last Waiting".into(),
+                label: "Undo last Done".into(),
                 chord: "Alt+Z".into(),
                 category: PaletteCategory::Sessions,
                 destructive: false,
@@ -290,7 +296,7 @@ impl MultibotView {
             },
             PaletteCommandSpec {
                 id: "pal-cmd-unarchive-session".into(),
-                label: "Session: Unarchive session".into(),
+                label: "Reactivate".into(),
                 chord: "Ctrl+Shift+T".into(),
                 category: PaletteCategory::Sessions,
                 destructive: false,
@@ -310,20 +316,24 @@ impl MultibotView {
             },
             PaletteCommandSpec {
                 id: "session.delete".into(),
-                label: "Delete session".into(),
+                label: "Dissolve".into(),
                 chord: "Ctrl+Shift+W".into(),
                 category: PaletteCategory::Sessions,
                 destructive: true,
-                aliases: vec!["close session".into(), "remove session".into()],
+                aliases: vec![
+                    "close session".into(),
+                    "remove session".into(),
+                    "delete session".into(),
+                ],
                 tab_context: true,
                 global: true,
             },
             PaletteCommandSpec {
                 id: "pal-cmd-archive-session".into(),
-                label: "Archive session".into(),
-                chord: "Ctrl+Shift+E".into(),
+                label: "Move to Inbox".into(),
+                chord: String::new(),
                 category: PaletteCategory::Sessions,
-                destructive: true,
+                destructive: false,
                 aliases: vec!["archive".into()],
                 tab_context: true,
                 global: true,
@@ -667,6 +677,23 @@ impl MultibotView {
                 global: true,
             },
         ];
+        for (id, label, chord) in [
+            ("pal-view-done", "View: Done", "Alt+Shift+E"),
+            ("pal-view-hibernated", "View: Hibernated", "Alt+Shift+H"),
+            ("pal-view-dissolved", "View: Dissolved", "Alt+Shift+D"),
+        ] {
+            cmds.push(PaletteCommandSpec {
+                id: id.into(),
+                label: label.into(),
+                chord: chord.into(),
+                category: PaletteCategory::Sessions,
+                destructive: false,
+                aliases: vec![],
+                tab_context: false,
+                global: true,
+            });
+        }
+
 
         // Dynamic "Wake <ws>" commands for snoozed workspaces
         for ws in self.sidebar_state.workspace_store.snoozed_workspaces(now_ms) {
@@ -766,7 +793,7 @@ impl MultibotView {
         }
         if let Some(target) = &self.palette_state.reminder_target {
             let clear = match target {
-                ReminderTarget::Session(_) => "Clear reminder",
+                ReminderTarget::Session(_) => "Move to Inbox",
                 ReminderTarget::Workspace(_) => "Unsnooze",
             };
             return [
@@ -918,9 +945,18 @@ impl MultibotView {
             match target {
                 ReminderTarget::Session(key) => {
                     let note = self.palette_input.read(cx).value().to_string();
-                    self.sidebar_state
-                        .workspace_store
-                        .set_reminder(&key, at, Some(&note));
+                    if let Some(session) = self.find_session_by_key(&key) {
+                        if session.archived {
+                            self.reactivate_session_key(&key, cx);
+                        }
+                        self.sidebar_state.workspace_store.hibernate_session(
+                            &key,
+                            &session,
+                            at,
+                            Some(&note),
+                            self.palette_state.hibernate_wake_on_reply,
+                        );
+                    }
                 }
                 ReminderTarget::Workspace(id) => {
                     self.active_modal = ActiveModal::None;
@@ -936,11 +972,9 @@ impl MultibotView {
         }
 
         let explicit_tab_target = self.palette_state.tab_context_session_key.clone();
-        let target_key = explicit_tab_target.clone().or_else(|| {
-            self.selected_session
-                .as_ref()
-                .map(|s| self.session_key_for(s))
-        });
+        let target_key = explicit_tab_target
+            .clone()
+            .or_else(|| self.target_triage_session_key());
 
         self.active_modal = ActiveModal::None;
         self.palette_state.tab_context_session_key = None;
@@ -1025,6 +1059,8 @@ impl MultibotView {
                         self.sidebar_state.new_workspace_draft = None;
                         // Opening the Inbox always lands on `All`, never on a hidden empty split
                         self.inbox_state.select_all_split();
+                        self.inbox_state.lifecycle =
+                            multibot_core::workspaces::SessionLifecycle::Active;
                         self.set_main_surface(MainSurface::Inbox);
                         if let Some(win) = window {
                             self.focus_inbox(win, cx);
@@ -1326,23 +1362,13 @@ impl MultibotView {
                         }
                     }
                     "pal-cmd-waiting" => {
-                        if let Some(ref key) = target_key
-                            && let Some(sess) = self.find_session_by_key(key)
-                        {
-                            self.sidebar_state
-                                .workspace_store
-                                .archive_to_waiting_session(key, now_ms, &sess);
-                            self.cleanup_unmounted_surface_state();
-                            self.persist_workspace_store_if_enabled();
+                        if let Some(ref key) = target_key {
+                            self.mark_done_or_inbox(key, cx);
                         }
                     }
                     "pal-cmd-undo-waiting" => {
-                        if self
-                            .sidebar_state
-                            .workspace_store
-                            .undo_last_waiting()
-                            .is_some()
-                        {
+                        if let Some(key) = self.sidebar_state.workspace_store.undo_last_waiting() {
+                            self.reactivate_session_key(&key, cx);
                             self.persist_workspace_store_if_enabled();
                         }
                     }
@@ -1355,36 +1381,26 @@ impl MultibotView {
                             self.persist_workspace_store_if_enabled();
                         }
                     }
-                    "session.delete" | "pal-cmd-archive-session" => {
-                        if let Some(ref key) = target_key
-                            && let Some((host, sess)) = self.host_for_session_key(key)
-                        {
-                            self.closed_sessions.push((host.clone(), sess.clone()));
-                            if let Some(tx) = self.tx_for_host(&host) {
-                                let _ = tx.send(ClientRequest::ArchiveSession {
-                                    session_id: sess.id.clone(),
-                                    agent: sess.agent,
-                                    source_path: sess.source_path.clone(),
-                                    kill_process: id == "session.delete",
-                                });
+                    "session.delete" => {
+                        if let Some(ref key) = target_key {
+                            self.dissolve_session_key(key, cx);
+                        }
+                    }
+                    "pal-cmd-archive-session" => {
+                        if let Some(ref key) = target_key {
+                            self.reactivate_session_key(key, cx);
+                        }
+                    }
+                    "pal-view-done" | "pal-view-hibernated" | "pal-view-dissolved" => {
+                        let lifecycle = match id.as_str() {
+                            "pal-view-done" => multibot_core::workspaces::SessionLifecycle::Done,
+                            "pal-view-hibernated" => {
+                                multibot_core::workspaces::SessionLifecycle::Hibernated
                             }
-                            if self
-                                .sidebar_state
-                                .rename
-                                .as_ref()
-                                .is_some_and(|r| r.session_key == *key)
-                            {
-                                self.sidebar_state.rename = None;
-                            }
-                            if self
-                                .inbox_state
-                                .rename
-                                .as_ref()
-                                .is_some_and(|r| r.session_key == *key)
-                            {
-                                self.inbox_state.rename = None;
-                            }
-                            self.notice = Some(format!("Archived session {}", sess.title));
+                            _ => multibot_core::workspaces::SessionLifecycle::Dissolved,
+                        };
+                        if let Some(window) = window {
+                            self.open_lifecycle_view(lifecycle, window, cx);
                         }
                     }
                     "pal-cmd-copy-id" => {
@@ -1447,19 +1463,17 @@ impl MultibotView {
                     }
                     "pal-cmd-unarchive-session" => {
                         if let Some(ref key) = target_key
-                            && let Some((host, sess)) = self.host_for_session_key(key)
+                            && self.find_session_by_key(key).is_some_and(|session| {
+                                self.sidebar_state.workspace_store.session_lifecycle(
+                                    key,
+                                    &session,
+                                    now_unix_ms(),
+                                ) == multibot_core::workspaces::SessionLifecycle::Dissolved
+                            })
                         {
-                            self.unarchive_session_on_host(&host, sess.id, cx);
-                        } else if let Some((host, sess)) = self.closed_sessions.pop() {
-                            self.unarchive_session_on_host(&host, sess.id.clone(), cx);
-                            if self.host_for_session_key(&canonical_session_key(&host, sess.agent, &sess.id)).is_none() {
-                                if !self.host_statuses.is_empty() {
-                                    self.host_sessions.insert(0, (host.clone(), sess.clone()));
-                                }
-                                self.sessions.insert(0, sess.clone());
-                                self.sync_sessions_to_shared(cx);
-                            }
-                            self.open_session_on_host(host, sess, false, cx);
+                            self.reactivate_session_key(key, cx);
+                        } else {
+                            self.reactivate_last_dissolved(cx);
                         }
                         return;
                     }
@@ -1533,6 +1547,19 @@ impl MultibotView {
             return;
         }
 
+        if key == "tab"
+            && matches!(
+                self.palette_state.reminder_target,
+                Some(ReminderTarget::Session(_))
+            )
+        {
+            self.palette_state.hibernate_wake_on_reply =
+                !self.palette_state.hibernate_wake_on_reply;
+            cx.stop_propagation();
+            window.prevent_default();
+            cx.notify();
+            return;
+        }
         match key.as_str() {
             "up" => {
                 self.palette_move_selection(-1, cx);
@@ -1862,9 +1889,14 @@ impl MultibotView {
                 format!("Session actions: {title}  (Backspace to exit)")
             });
         let context_banner = match &self.palette_state.reminder_target {
-            Some(ReminderTarget::Session(_)) => {
-                Some("Remind Me · optional note below · Up/Down then Enter".into())
-            }
+            Some(ReminderTarget::Session(_)) => Some(format!(
+                "Hibernate · {} · Tab toggles · optional note · Up/Down Enter",
+                if self.palette_state.hibernate_wake_on_reply {
+                    "Wake on reply"
+                } else {
+                    "Stay hidden"
+                }
+            )),
             Some(ReminderTarget::Workspace(_)) => Some("Snooze workspace · Up/Down then Enter".into()),
             None => context_banner,
         };
@@ -1937,6 +1969,26 @@ impl MultibotView {
                         this.palette_move_selection(1, cx);
                         cx.stop_propagation();
                     }))
+                    .when(
+                        matches!(
+                            self.palette_state.reminder_target,
+                            Some(ReminderTarget::Session(_))
+                        ),
+                        |el| el.key_context("HibernatePicker"),
+                    )
+                    .capture_action(cx.listener(
+                        |this, _: &crate::app::ToggleHibernateMode, _, cx| {
+                            if matches!(
+                                this.palette_state.reminder_target,
+                                Some(ReminderTarget::Session(_))
+                            ) {
+                                this.palette_state.hibernate_wake_on_reply =
+                                    !this.palette_state.hibernate_wake_on_reply;
+                                cx.stop_propagation();
+                                cx.notify();
+                            }
+                        },
+                    ))
                     .capture_action(cx.listener(|this, _: &input::Enter, window, cx| {
                         if this.table_modal_state.is_open() {
                             cx.stop_propagation();

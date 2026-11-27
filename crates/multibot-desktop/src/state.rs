@@ -248,7 +248,8 @@ impl SharedAppStore {
                 store.reminder_timer = None;
                 store.reminder_deadline_ms = None;
                 let woken = store.workspace_store.wake_due_workspaces(now_unix_ms());
-                if !woken.is_empty() && store.persist_to_disk {
+                let sessions_woke = store.workspace_store.wake_due_sessions(now_unix_ms());
+                if (!woken.is_empty() || sessions_woke) && store.persist_to_disk {
                     let _ = store.workspace_store.save();
                 }
                 store.reminder_wake_seq = store.reminder_wake_seq.wrapping_add(1);

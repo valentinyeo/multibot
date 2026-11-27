@@ -187,6 +187,8 @@ impl MetadataStore {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ArchivedEntry {
+    #[serde(default)]
+    pub kill_process: bool,
     pub archived_at_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentKind>,
@@ -442,6 +444,11 @@ pub fn discover_all_sessions_with_ctx(
             updated_at_ms: meta.updated_at_ms,
             working: ctx.active_session_ids.contains(sid),
             archived: ctx.is_archived(sid, path),
+            archive_kill_process: ctx
+                .archive
+                .archived
+                .get(sid)
+                .is_some_and(|entry| entry.kill_process),
             ..Default::default()
         };
         if !ctx.include_archived && !ctx.is_shown(&summary) {
@@ -451,9 +458,51 @@ pub fn discover_all_sessions_with_ctx(
         seen_ids.insert((agent, sid.clone()));
     }
 
+    if ctx.include_archived {
+        append_archived_sessions(ctx, &mut all);
+    }
+
     all.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
     all.truncate(limit);
     all
+}
+
+fn append_archived_sessions(ctx: &DiscoveryContext<'_>, all: &mut Vec<SessionSummary>) {
+    let mut seen_ids: HashSet<_> = all.iter().map(|s| (s.agent, s.id.clone())).collect();
+    for (sid, entry) in &ctx.archive.archived {
+        let (Some(agent), Some(source)) = (entry.agent, entry.source_path.as_deref()) else {
+            continue;
+        };
+        if seen_ids.contains(&(agent, sid.clone())) {
+            continue;
+        }
+        let path = Path::new(source);
+        if !path.is_file() {
+            continue;
+        }
+        let provider = provider_for(agent);
+        let mut summary = summarize_session(provider.as_ref(), path, entry.archived_at_ms, ctx);
+        summary.id = sid.clone();
+        summary.archived = true;
+        summary.archive_kill_process = entry.kill_process;
+        all.push(summary);
+        seen_ids.insert((agent, sid.clone()));
+    }
+}
+
+pub fn discover_lifecycle_sessions_with_ctx(
+    home: &Path,
+    limit: usize,
+    ctx: &DiscoveryContext<'_>,
+) -> Vec<SessionSummary> {
+    let live_ctx = DiscoveryContext {
+        include_archived: false,
+        ..*ctx
+    };
+    let mut sessions = discover_live_sessions_with_ctx(home, limit, &live_ctx);
+    append_archived_sessions(ctx, &mut sessions);
+    sessions.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+    sessions
 }
 
 pub fn discover_live_sessions_with_ctx(
@@ -667,6 +716,11 @@ pub fn summarize_session(
         todos_total,
         needs_attention: tail.has_pending_question,
         archived: ctx.is_archived(&id, path),
+        archive_kill_process: ctx
+            .archive
+            .archived
+            .get(&id)
+            .is_some_and(|entry| entry.kill_process),
         model: tail.model.or(header.model),
         workspace: ctx
             .server_workspaces
@@ -3369,6 +3423,70 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_discovery_keeps_saved_archives_past_limit_without_importing_dead_history() {
+        let home = unique_temp_dir("lifecycle-discovery");
+        let mut metadata = MetadataStore::default();
+        let mut archive = ArchiveStore::default();
+        for (sid, keep, killed) in [
+            ("active", false, false),
+            ("done", true, false),
+            ("dissolved", true, true),
+            ("unrelated-history", false, false),
+        ] {
+            let path = antigravity::hosted_history_path(&home, sid);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, format!("{{\"type\":\"multibot_meta\",\"session_id\":\"{sid}\",\"agent\":\"antigravity\",\"title\":\"{sid}\"}}\n")).unwrap();
+            if sid == "active" {
+                metadata.sessions.insert(
+                    sid.into(),
+                    SessionMetaEntry {
+                        agent: Some(AgentKind::Antigravity),
+                        source_path: Some(path.to_string_lossy().into()),
+                        ..Default::default()
+                    },
+                );
+            }
+            if keep {
+                archive.archived.insert(
+                    sid.into(),
+                    ArchivedEntry {
+                        archived_at_ms: 1,
+                        kill_process: killed,
+                        agent: Some(AgentKind::Antigravity),
+                        source_path: Some(path.to_string_lossy().into()),
+                    },
+                );
+            }
+        }
+        archive.save(&home).unwrap();
+        let archive = ArchiveStore::load(&home);
+        let active = HashSet::new();
+        let live = LiveActivity::default();
+        let workspaces = crate::server_workspaces::ServerWorkspaceIndex::default();
+        let ctx = DiscoveryContext {
+            active_session_ids: &active,
+            connected_session_ids: &active,
+            metadata: &metadata,
+            archive: &archive,
+            live: &live,
+            include_archived: true,
+            server_workspaces: &workspaces,
+        };
+        let sessions: Vec<_> = discover_lifecycle_sessions_with_ctx(&home, 1, &ctx)
+            .into_iter()
+            .filter(|session| session.agent != AgentKind::Shell)
+            .collect();
+        assert_eq!(sessions.len(), 3);
+        assert!(!sessions.iter().any(|s| s.id == "unrelated-history"));
+        let dissolved = sessions.iter().find(|s| s.id == "dissolved").unwrap();
+        assert!(dissolved.archived && dissolved.archive_kill_process);
+        let done = sessions.iter().find(|s| s.id == "done").unwrap();
+        assert!(done.archived && !done.archive_kill_process);
+        assert!(!sessions.iter().find(|s| s.id == "active").unwrap().archived);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn antigravity_conversation_folder_matches_a_live_chat() {
         let dir = unique_temp_dir("agy-live-match");
         let live = "4d5d5535-249c-4f10-90d9-7ec49c2eeb53";
@@ -3441,6 +3559,7 @@ mod tests {
         archive.archived.insert(
             sid.to_string(),
             ArchivedEntry {
+                kill_process: true,
                 archived_at_ms: 2,
                 agent: Some(AgentKind::Antigravity),
                 source_path: Some(
@@ -3624,6 +3743,7 @@ mod tests {
         archive.archived.insert(
             sid.to_string(),
             ArchivedEntry {
+                kill_process: true,
                 archived_at_ms: now_ms(),
                 agent: Some(AgentKind::Claude),
                 source_path: None,
@@ -3771,6 +3891,7 @@ mod tests {
         arch.archived.insert(
             "s1".into(),
             ArchivedEntry {
+                kill_process: true,
                 archived_at_ms: 5678,
                 agent: Some(AgentKind::Claude),
                 source_path: Some("/tmp/s1.jsonl".into()),

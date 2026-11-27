@@ -445,9 +445,6 @@ impl MultibotView {
         self.sidebar_state
             .workspace_store
             .mark_session_read(&next_key, &session);
-        self.sidebar_state
-            .workspace_store
-            .auto_unarchive_waiting_if_active(&next_key, &session);
 
         if !from_inbox {
             self.inbox_state.step_index = None;
