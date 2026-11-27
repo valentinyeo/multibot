@@ -228,8 +228,7 @@ impl ProcessManager {
                 {
                     cmd.current_dir(dir);
                 }
-                let child = cmd
-                    .spawn()
+                let child = spawn_with_retry(&mut cmd)
                     .with_context(|| format!("spawning {}", bin_path.display()))?;
                 let pid = child.id().unwrap_or(0);
                 let source_path = self.resolve_session_source_path(session_id, agent, cwd);
@@ -253,8 +252,7 @@ impl ProcessManager {
                 {
                     cmd.current_dir(dir);
                 }
-                let child = cmd
-                    .spawn()
+                let child = spawn_with_retry(&mut cmd)
                     .with_context(|| format!("spawning {}", bin_path.display()))?;
                 let pid = child.id().unwrap_or(0);
                 let source_path = self.resolve_session_source_path(session_id, agent, cwd);
@@ -311,8 +309,7 @@ impl ProcessManager {
                         "id":session_id, "cwd":cwd, "timestamp":chrono::Utc::now().to_rfc3339()}),
                     )?;
                 }
-                let mut child = cmd
-                    .spawn()
+                let mut child = spawn_with_retry(&mut cmd)
                     .with_context(|| format!("spawning {}", bin_path.display()))?;
                 let pid = child.id().unwrap_or(0);
                 if agent == AgentKind::Cursor {
@@ -395,8 +392,7 @@ impl ProcessManager {
                     cmd.current_dir(dir);
                 }
 
-                let mut child = cmd
-                    .spawn()
+                let mut child = spawn_with_retry(&mut cmd)
                     .with_context(|| format!("spawning {}", bin_path.display()))?;
                 let pid = child.id().unwrap_or(0);
 
@@ -1802,6 +1798,19 @@ pub fn apply_agy_stream_output(
     }
 }
 
+fn spawn_with_retry(cmd: &mut Command) -> std::io::Result<Child> {
+    // A concurrent fork can briefly retain a writable descriptor to an executable script.
+    for _ in 0..10 {
+        match cmd.spawn() {
+            Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+    cmd.spawn()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1819,6 +1828,55 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn spawn_retries_executable_busy_until_writer_closes() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = temp_home("spawn-busy");
+        let bin = home.join("fake-agent");
+        let mut writer = fs::File::create(&bin).unwrap();
+        writer.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut cmd = Command::new(&bin);
+        assert_eq!(cmd.spawn().unwrap_err().raw_os_error(), Some(26));
+
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            drop(writer);
+        });
+        let mut child = spawn_with_retry(&mut cmd).unwrap();
+        closer.join().unwrap();
+        assert!(child.wait().await.unwrap().success());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn spawn_returns_executable_busy_after_retry_limit() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = temp_home("spawn-still-busy");
+        let bin = home.join("fake-agent");
+        let mut writer = fs::File::create(&bin).unwrap();
+        writer.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let err = spawn_with_retry(&mut Command::new(&bin)).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(26));
+        drop(writer);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn spawn_preserves_other_errors() {
+        let home = temp_home("spawn-missing");
+        let err = spawn_with_retry(&mut Command::new(home.join("missing"))).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

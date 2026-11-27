@@ -296,7 +296,7 @@ impl MultibotView {
                         .text_color(theme::text_secondary()).child(account.status.clone()));
                 if let Some(email) = &account.email {
                     card = card
-                        .child(div().id("account-email").text_sm().child(format!("Signed in as {email}")))
+                        .child(div().id("account-email").test_support().text_sm().child(format!("Signed in as {email}")))
                         .child(Button::new("account-sync").label("Sync Deepgram Key Now").disabled(account.busy)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.start_account_job(crate::account::AccountJob::Sync, cx);

@@ -6770,6 +6770,7 @@ mod tests {
                 store.account.status = "Deepgram key synced from account".into();
                 store.bump_revision();
             }
+            view.update(cx, |_, cx| cx.notify());
             window.render_frame(cx);
             assert!(window.try_find("account-email").is_some());
             assert!(window.try_find("account-sync").is_some());
