@@ -614,7 +614,11 @@ impl MultibotView {
     }
 
     pub(crate) fn set_workspace_view(&mut self, view: WorkspaceView, cx: &mut Context<Self>) {
+        if view == WorkspaceView::Frequent {
+            self.sidebar_state.active_workspace_id = ALL_WORKSPACES_ID.to_string();
+        }
         self.sidebar_state.active_workspace_view = view;
+        self.sidebar_state.workspace_menu_open = false;
         self.sidebar_state.rename = None;
         self.cleanup_unmounted_surface_state();
         cx.notify();
@@ -1276,6 +1280,10 @@ impl MultibotView {
                         .text_color(theme::text_muted())
                         .child(if self.sidebar_state.unread_only {
                             "No unread sessions in this workspace."
+                        } else if self.sidebar_state.active_workspace_view
+                            == WorkspaceView::Frequent
+                        {
+                            "Open or message a session to see it here."
                         } else if in_starred {
                             "Star a session with Alt+S to pin it into Starred."
                         } else {
@@ -1660,8 +1668,9 @@ impl MultibotView {
                 rail_rows.extend(gv.items);
             }
         }
-        if !self.sidebar_state.recents_collapsed
-            && !self.sidebar_state.workspace_store.recents_section_collapsed
+        if self.sidebar_state.active_workspace_view == WorkspaceView::Frequent
+            || (!self.sidebar_state.recents_collapsed
+                && !self.sidebar_state.workspace_store.recents_section_collapsed)
         {
             rail_rows.extend(layout.recents);
         }
@@ -2227,6 +2236,7 @@ mod tests {
                                 assert_eq!(layout.flat_display_order, keys);
                                 assert_eq!(layout.ctrl_digit_order, keys);
                                 assert_eq!(store.recent_views[0].session_key, active);
+                                assert!(!store.session_meta[&active].frequent_visits_ms.is_empty());
                                 assert!(!store.is_session_unread(&active, session));
                             });
                         }
@@ -2293,7 +2303,19 @@ mod tests {
                                             now_unix_ms(),
                                         );
                                     assert_eq!(layout.ctrl_digit_order, keys);
-                                    assert_eq!(v.sidebar_state.workspace_store, before);
+                                    let mut without_visits =
+                                        v.sidebar_state.workspace_store.clone();
+                                    assert!(
+                                        !without_visits.session_meta[&active]
+                                            .frequent_visits_ms
+                                            .is_empty()
+                                    );
+                                    for (key, meta) in &mut without_visits.session_meta {
+                                        let old = &before.session_meta[key];
+                                        meta.frequent_visits_ms = old.frequent_visits_ms.clone();
+                                        meta.last_used_ms = old.last_used_ms;
+                                    }
+                                    assert_eq!(without_visits, before);
                                 });
                             }
                         }

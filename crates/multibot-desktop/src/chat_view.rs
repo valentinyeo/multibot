@@ -27,6 +27,7 @@ use multibot_core::daemon_client::DaemonTarget;
 use multibot_core::settings::{
     DEFAULT_CHAT_FONT_SIZE_PT, MAX_CHAT_FONT_SIZE_PT, MIN_CHAT_FONT_SIZE_PT, MultibotSettings,
 };
+use multibot_core::workspaces::{canonical_session_key, now_unix_ms};
 use multibot_proto::{
     AgentKind, ChatMessage, ClientRequest, DiffBlock, EffortLevel, MessageBlock, MessageRole,
     PermissionLevel, PromptQuestion, SessionOptions, SessionSummary, TodoItem, TodoStatus,
@@ -2125,6 +2126,12 @@ impl MultibotView {
             });
             self.chat_state.advance_busy_tick();
         }
+        let key = canonical_session_key(host, session.agent, &session.id);
+        self.sidebar_state
+            .workspace_store
+            .record_session_input(&key, now_unix_ms());
+        self.persist_workspace_store_if_enabled();
+        self.sync_workspace_to_shared(cx);
         self.send_or_queue_prompt_on_host(host, &session, msg_id, text);
         cx.notify();
     }
@@ -5859,6 +5866,52 @@ mod tests {
                 ..Default::default()
             })
             .collect()
+    }
+
+    #[gpui_kit::test]
+    fn sending_prompt_adds_target_session_to_frequent(cx: &mut TestAppContext) {
+        use multibot_core::workspaces::{ALL_WORKSPACES_ID, SessionInput, WorkspaceView};
+        let (handle, view) = open_test_chat_window(cx);
+        cx.update_window(handle, |_, _, cx| {
+            view.update(cx, |v, cx| {
+                let session = SessionSummary {
+                    id: "frequent-prompt".into(),
+                    agent: AgentKind::Claude,
+                    ..Default::default()
+                };
+                let key = canonical_session_key("target-host", session.agent, &session.id);
+                v.dispatch_text_prompt_for_session(
+                    "target-host",
+                    session.clone(),
+                    "Hello".into(),
+                    None,
+                    cx,
+                );
+                let inputs = [SessionInput {
+                    key: key.clone(),
+                    host: "target-host",
+                    summary: &session,
+                }];
+                let layout = v
+                    .sidebar_state
+                    .workspace_store
+                    .compute_sidebar_layout_with_options(
+                        ALL_WORKSPACES_ID,
+                        WorkspaceView::Frequent,
+                        &inputs,
+                        false,
+                        None,
+                        now_unix_ms(),
+                    );
+                assert_eq!(layout.flat_display_order, vec![key.clone()]);
+                assert!(
+                    v.sidebar_state.workspace_store.session_meta[&key]
+                        .last_input_ms
+                        .is_some()
+                );
+            });
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]

@@ -4704,6 +4704,11 @@ impl MultibotView {
         if let Some((host, session)) = self.host_for_session_key(&order[next]) {
             if active_key.as_deref() != Some(order[next].as_str()) {
                 self.sidebar_state.previous_session_key = active_key;
+                self.sidebar_state
+                    .workspace_store
+                    .record_frequent_visit(&order[next], now_unix_ms());
+                self.persist_workspace_store_if_enabled();
+                self.sync_workspace_to_shared(cx);
             }
             self.inbox_state.step_index = None;
             self.inbox_state.step_order.clear();
@@ -6953,9 +6958,7 @@ mod tests {
                     .workspace_store
                     .assign_session_workspace(&key, &workspace.id);
                 v.sidebar_state.workspace_store.toggle_favorite(&key);
-                v.sidebar_state
-                    .workspace_store
-                    .record_session_input(&key, now_unix_ms());
+                v.open_session_with_tracking(v.sessions[0].clone(), false, cx);
                 cx.notify();
             });
             window.render_frame(cx);
@@ -7017,6 +7020,18 @@ mod tests {
             assert_eq!(
                 view.read(cx).sidebar_state.active_workspace_view,
                 WorkspaceView::All
+            );
+            assert!(window.try_find("session-0").is_some());
+            assert!(window.try_find("session-1").is_none());
+            window.press("alt-shift-2", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).sidebar_state.active_workspace_id,
+                multibot_core::workspaces::ALL_WORKSPACES_ID
+            );
+            assert_eq!(
+                view.read(cx).sidebar_state.active_workspace_view,
+                WorkspaceView::Frequent
             );
             assert!(window.try_find("session-0").is_some());
             assert!(window.try_find("session-1").is_none());

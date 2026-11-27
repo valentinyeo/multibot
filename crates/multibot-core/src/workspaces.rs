@@ -25,7 +25,8 @@ pub const FREQUENT_INPUT_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 pub const FREQUENT_VISIT_WINDOW_MS: i64 = 6 * 60 * 60 * 1000;
 pub const FREQUENT_MIN_VISITS: usize = 3;
 pub const FREQUENT_DWELL_MS: i64 = 10 * 1000;
-pub const FREQUENT_MAX_VISITS: usize = 8;
+pub const FREQUENT_MAX_VISITS: usize = 128;
+pub const SIDEBAR_FREQUENT_WINDOW_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -1720,6 +1721,7 @@ impl WorkspaceStore {
         struct Candidate {
             orig_pos: usize,
             manual_order: Option<usize>,
+            frequent_count: usize,
             row: SidebarRow,
         }
 
@@ -1748,14 +1750,29 @@ impl WorkspaceStore {
                 continue;
             }
 
+            let mut frequent_count = 0;
+            let mut last_frequent_visit_ms = 0;
             match workspace_view {
                 WorkspaceView::All => {}
                 WorkspaceView::Frequent => {
+                    let cutoff = now_ms.saturating_sub(SIDEBAR_FREQUENT_WINDOW_MS);
                     let visits = meta
                         .map(|m| m.frequent_visits_ms.as_slice())
                         .unwrap_or(&[]);
-                    let last_input = meta.and_then(|m| m.last_input_ms);
-                    if !qualifies_for_frequent(visits, last_input, now_ms) {
+                    for &visit in visits {
+                        if (cutoff..=now_ms).contains(&visit) {
+                            frequent_count += 1;
+                            last_frequent_visit_ms = last_frequent_visit_ms.max(visit);
+                        }
+                    }
+                    // Older stores tracked input without recording a visit.
+                    if meta
+                        .and_then(|m| m.last_input_ms)
+                        .is_some_and(|t| (cutoff..=now_ms).contains(&t))
+                    {
+                        frequent_count = frequent_count.max(1);
+                    }
+                    if frequent_count == 0 {
                         continue;
                     }
                 }
@@ -1796,7 +1813,8 @@ impl WorkspaceStore {
             let used_ms = meta
                 .and_then(|m| m.last_input_ms)
                 .unwrap_or(0)
-                .max(input.summary.updated_at_ms);
+                .max(input.summary.updated_at_ms)
+                .max(last_frequent_visit_ms);
 
             let ws_name = ws_name_map
                 .get(eff_ws.as_str())
@@ -1827,10 +1845,11 @@ impl WorkspaceStore {
             let cand = Candidate {
                 orig_pos,
                 manual_order: eff_manual_order,
+                frequent_count,
                 row,
             };
 
-            if in_all {
+            if in_all || workspace_view == WorkspaceView::Frequent {
                 ungrouped_recents.push(cand);
             } else if let Some(gid) = eff_group {
                 grouped_buckets.entry(gid).or_default().push(cand);
@@ -1875,8 +1894,15 @@ impl WorkspaceStore {
         ungrouped_pinned.sort_by_key(|c| (c.manual_order.unwrap_or(usize::MAX), c.orig_pos));
         let pinned_tiles: Vec<SidebarRow> = ungrouped_pinned.into_iter().map(|c| c.row).collect();
 
-        // Ungrouped recents: auto-sort (!muted -> used_ms desc -> pos asc) or manual order
-        if in_all {
+        // Frequent is ranked independently of workspace pins, groups and manual order.
+        if workspace_view == WorkspaceView::Frequent {
+            ungrouped_recents.sort_by(|a, b| {
+                b.frequent_count
+                    .cmp(&a.frequent_count)
+                    .then_with(|| b.row.used_ms.cmp(&a.row.used_ms))
+                    .then_with(|| a.orig_pos.cmp(&b.orig_pos))
+            });
+        } else if in_all {
             ungrouped_recents.sort_by(|a, b| {
                 b.row
                     .used_ms
@@ -1925,7 +1951,7 @@ impl WorkspaceStore {
                 }
             }
         }
-        if in_all || !self.recents_section_collapsed {
+        if in_all || workspace_view == WorkspaceView::Frequent || !self.recents_section_collapsed {
             for item in &recents {
                 ctrl_digit_order.push(item.session_key.clone());
             }
@@ -2134,6 +2160,8 @@ impl WorkspaceStore {
             .session_meta
             .entry(session_key.to_string())
             .or_default();
+        let cutoff = visit_ms.saturating_sub(SIDEBAR_FREQUENT_WINDOW_MS);
+        meta.frequent_visits_ms.retain(|&t| t >= cutoff);
         if meta.frequent_visits_ms.contains(&visit_ms) {
             return;
         }
@@ -2150,6 +2178,7 @@ impl WorkspaceStore {
     }
 
     pub fn record_session_input(&mut self, session_key: &str, now_ms: i64) {
+        self.record_frequent_visit(session_key, now_ms);
         let meta = self
             .session_meta
             .entry(session_key.to_string())
@@ -2170,11 +2199,7 @@ impl WorkspaceStore {
         if self.recent_views.len() > MAX_RECENT_VIEWS {
             self.recent_views.truncate(MAX_RECENT_VIEWS);
         }
-        let meta = self
-            .session_meta
-            .entry(session_key.to_string())
-            .or_default();
-        meta.last_used_ms = meta.last_used_ms.max(now_ms);
+        self.record_frequent_visit(session_key, now_ms);
     }
 
     pub fn is_session_unread(&self, session_key: &str, summary: &SessionSummary) -> bool {
@@ -4440,6 +4465,24 @@ mod tests {
                     assert_eq!(store.recent_views[0].session_key, *key);
                     assert!(!store.is_session_unread(key, &sessions[i]));
                 }
+                let frequent = store.compute_sidebar_layout_with_options(
+                    workspace_id,
+                    WorkspaceView::Frequent,
+                    &inputs,
+                    false,
+                    None,
+                    3000,
+                );
+                assert_eq!(
+                    frequent.flat_display_order,
+                    keys.iter().rev().cloned().collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    store
+                        .compute_sidebar_layout(workspace_id, &inputs, false, 3000)
+                        .flat_display_order,
+                    keys
+                );
                 store.record_session_input(&keys[11], 4000);
                 let layout = store.compute_sidebar_layout(workspace_id, &inputs, false, 4000);
                 if workspace_id == ALL_WORKSPACES_ID || auto_sort {
@@ -4449,6 +4492,197 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn sidebar_frequent_ranks_by_rolling_count_then_latest_activity() {
+        let now = 20 * 24 * 60 * 60 * 1000;
+        let sessions = [
+            make_session("new", AgentKind::Claude, "New", now, false, false),
+            make_session("most", AgentKind::Claude, "Most", now - 100, false, false),
+            make_session(
+                "tie-old",
+                AgentKind::Claude,
+                "Tie old",
+                now - 200,
+                false,
+                false,
+            ),
+            make_session(
+                "tie-new",
+                AgentKind::Claude,
+                "Tie new",
+                now - 150,
+                false,
+                false,
+            ),
+            make_session(
+                "unvisited",
+                AgentKind::Claude,
+                "Unvisited",
+                now,
+                false,
+                false,
+            ),
+        ];
+        let inputs: Vec<_> = sessions.iter().map(|s| make_input("h", s)).collect();
+        let k = |i: usize| inputs[i].key.clone();
+        for auto_sort in [true, false] {
+            let mut store = WorkspaceStore::new();
+            store.auto_sort = auto_sort;
+            store.record_session_view(&k(0), now);
+            for offset in [500, 400, 300] {
+                store.record_session_view(&k(1), now - offset);
+            }
+            for i in [2, 3] {
+                store.record_session_view(&k(i), now - 500);
+                store.record_session_input(&k(i), now - 400);
+            }
+            store.toggle_pin(&k(0), false);
+            store.toggle_group_for_session(&k(2), DEFAULT_WORKSPACE_ID, None, "Group");
+            store.session_meta.get_mut(&k(0)).unwrap().manual_order = Some(0);
+            store.recents_section_collapsed = true;
+            for workspace_id in [ALL_WORKSPACES_ID, DEFAULT_WORKSPACE_ID] {
+                let layout = store.compute_sidebar_layout_with_options(
+                    workspace_id,
+                    WorkspaceView::Frequent,
+                    &inputs,
+                    false,
+                    None,
+                    now,
+                );
+                assert_eq!(layout.flat_display_order, vec![k(1), k(3), k(2), k(0)]);
+                assert_eq!(layout.ctrl_digit_order, layout.flat_display_order);
+                assert!(layout.groups.is_empty());
+                assert!(layout.pinned_tiles.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn sidebar_frequent_uses_inclusive_fourteen_day_window() {
+        let now = 20 * 24 * 60 * 60 * 1000;
+        let cutoff = now - 14 * 24 * 60 * 60 * 1000;
+        let sessions: Vec<_> = (0..6)
+            .map(|i| {
+                make_session(
+                    &format!("s{i}"),
+                    AgentKind::Claude,
+                    "Chat",
+                    now,
+                    false,
+                    false,
+                )
+            })
+            .collect();
+        let inputs: Vec<_> = sessions.iter().map(|s| make_input("h", s)).collect();
+        let k = |i: usize| inputs[i].key.clone();
+        let mut store = WorkspaceStore::new();
+        store.record_frequent_visit(&k(0), cutoff);
+        store.record_frequent_visit(&k(1), cutoff - 1);
+        store.record_frequent_visit(&k(2), now + 1);
+        // Existing input-only metadata remains useful after upgrading.
+        store.session_meta.entry(k(3)).or_default().last_input_ms = Some(cutoff);
+        store.session_meta.entry(k(4)).or_default().last_input_ms = Some(cutoff - 1);
+        for offset in [3, 2, 1] {
+            store.record_frequent_visit(&k(5), cutoff - offset);
+        }
+        store.record_frequent_visit(&k(5), now - 1);
+        let layout = store.compute_sidebar_layout_with_options(
+            ALL_WORKSPACES_ID,
+            WorkspaceView::Frequent,
+            &inputs,
+            false,
+            None,
+            now,
+        );
+        assert_eq!(layout.flat_display_order, vec![k(0), k(3), k(5)]);
+        let expired = store.compute_sidebar_layout_with_options(
+            ALL_WORKSPACES_ID,
+            WorkspaceView::Frequent,
+            &inputs,
+            false,
+            None,
+            now + 2,
+        );
+        assert_eq!(expired.flat_display_order, vec![k(2), k(5)]);
+    }
+
+    #[test]
+    fn sidebar_frequent_history_survives_reload_and_prunes_expired_visits() {
+        let now = 20 * 24 * 60 * 60 * 1000;
+        let session = make_session("s1", AgentKind::Claude, "Chat", 100, false, false);
+        let input = make_input("h", &session);
+        let key = &input.key;
+        let mut store = WorkspaceStore::new();
+        store.record_session_view(key, now - 14 * 24 * 60 * 60 * 1000 - 1);
+        store.record_session_view(key, now - 1);
+        store.record_session_view(key, now - 1);
+        store.record_session_input(key, now);
+        assert_eq!(
+            store.session_meta[key].frequent_visits_ms,
+            vec![now - 1, now]
+        );
+        let loaded: WorkspaceStore =
+            serde_json::from_slice(&serde_json::to_vec(&store).unwrap()).unwrap();
+        let layout = loaded.compute_sidebar_layout_with_options(
+            ALL_WORKSPACES_ID,
+            WorkspaceView::Frequent,
+            std::slice::from_ref(&input),
+            false,
+            None,
+            now,
+        );
+        assert_eq!(layout.flat_display_order, vec![key.clone()]);
+        assert_eq!(loaded, store);
+    }
+
+    #[test]
+    fn sidebar_frequent_excludes_inactive_and_respects_scope_and_unread() {
+        let now = 2_000;
+        let mut sessions: Vec<_> = (0..6)
+            .map(|i| {
+                make_session(
+                    &format!("s{i}"),
+                    AgentKind::Claude,
+                    "Chat",
+                    100,
+                    i == 0,
+                    false,
+                )
+            })
+            .collect();
+        sessions[1].archived = true;
+        let inputs: Vec<_> = sessions.iter().map(|s| make_input("h", s)).collect();
+        let k = |i: usize| inputs[i].key.clone();
+        let mut store = WorkspaceStore::new();
+        let other = store.create_workspace("Other work", None).unwrap().id;
+        let snoozed = store.create_workspace("Snoozed", None).unwrap().id;
+        store.session_meta.entry(k(3)).or_default().workspace_id = Some(other);
+        store.session_meta.entry(k(4)).or_default().workspace_id = Some(snoozed.clone());
+        store.snooze_workspace(&snoozed, now + 1_000, now).unwrap();
+        store.archive_to_waiting_session(&k(2), now, &sessions[2]);
+        for input in &inputs {
+            store.record_session_view(&input.key, now);
+        }
+        let layout = store.compute_sidebar_layout_with_options(
+            ALL_WORKSPACES_ID,
+            WorkspaceView::Frequent,
+            &inputs,
+            false,
+            None,
+            now,
+        );
+        assert_eq!(layout.flat_display_order, vec![k(0), k(3), k(5)]);
+        let scoped = store.compute_sidebar_layout_with_options(
+            DEFAULT_WORKSPACE_ID,
+            WorkspaceView::Frequent,
+            &inputs,
+            true,
+            Some(&k(5)),
+            now,
+        );
+        assert_eq!(scoped.flat_display_order, vec![k(0), k(5)]);
     }
 
     #[test]
@@ -4514,15 +4748,16 @@ mod tests {
         assert!(qualifies_for_frequent(&ok_visits, None, now));
         assert!(!qualifies_for_frequent(&old_visits, None, now));
 
-        // Max 8 visits stored (evicts oldest)
+        // History stays bounded, evicting oldest visits first.
         let mut store = WorkspaceStore::new();
-        for i in 1..=10 {
+        let total = FREQUENT_MAX_VISITS as i64 + 2;
+        for i in 1..=total {
             store.record_frequent_visit("h:claude:s1", i * 100);
         }
         let visits = &store.session_meta["h:claude:s1"].frequent_visits_ms;
         assert_eq!(visits.len(), FREQUENT_MAX_VISITS);
         assert_eq!(visits[0], 300);
-        assert_eq!(*visits.last().unwrap(), 1000);
+        assert_eq!(*visits.last().unwrap(), total * 100);
 
         // frequent_order_key prefers recent input even if a visit is newer
         let recent_input = now - 5_000;
