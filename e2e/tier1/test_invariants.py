@@ -135,6 +135,7 @@ def test_multibot_isolation_and_readonly_zigshel() -> None:
             "claude/basic_slice1.jsonl",
             ".claude/projects/-tmp-proj-basic/claude-basic-001.jsonl",
         )
+        sb.stage_live_legacy_chat(tmux="live-basic-001", sid="claude-basic-001")
         with DaemonDriver(sb) as dmn:
             ack = dmn.request({"op": "hello", "client_version": "0.1.0"}, "hello_ack")
             assert ack["protocol_version"] == 1

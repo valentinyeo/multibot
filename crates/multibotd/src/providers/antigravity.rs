@@ -59,6 +59,7 @@ pub fn antigravity_discovery_roots(home: &Path) -> Vec<PathBuf> {
     let candidates = [
         home.join(".multibot").join("history"),
         home.join(".gemini").join("antigravity").join("brain"),
+        home.join(".gemini").join("antigravity-cli").join("brain"),
         home.join(".gemini").join("jetski").join("brain"),
         home.join(".antigravity").join("sessions"),
     ];
@@ -74,6 +75,28 @@ pub fn antigravity_discovery_roots(home: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// The conversation uuid an Antigravity `brain/<uuid>/.../transcript.jsonl` lives under.
+///
+/// A transcript that sits directly in `brain/` (an older layout) has no conversation folder
+/// and keeps whichever id the provider derives from its own file name.
+pub fn brain_conversation_id(path: &Path) -> Option<String> {
+    let mut parts = path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    parts.reverse();
+    for (index, part) in parts.iter().enumerate() {
+        if *part == "brain"
+            && index >= 2
+            && let Some(id) = parts.get(index - 1)
+            && !id.is_empty()
+        {
+            return Some((*id).to_string());
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone)]
@@ -482,7 +505,12 @@ impl AgentProvider for AntigravityProvider {
         AgentKind::Antigravity
     }
 
-    fn discover_paths(&self, home: &Path, limit: usize) -> Vec<(PathBuf, i64)> {
+    fn discover_paths(
+        &self,
+        home: &Path,
+        limit: usize,
+        keep: &dyn Fn(&Path, i64) -> bool,
+    ) -> Vec<(PathBuf, i64)> {
         let mut files = Vec::new();
         for (priority, root) in antigravity_discovery_roots(home).into_iter().enumerate() {
             for entry in WalkDir::new(&root).max_depth(5).into_iter().flatten() {
@@ -490,13 +518,15 @@ impl AgentProvider for AntigravityProvider {
                 if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                     continue;
                 }
-                if !is_safe_transcript_path(path, &root) {
-                    continue;
-                }
                 if let Ok(meta) = fs::metadata(path)
                     && let Ok(modified) = meta.modified()
                 {
-                    files.push((priority, path.to_path_buf(), system_time_ms(modified)));
+                    let ts = system_time_ms(modified);
+                    // Cheapest check first: a symlink escaping the root is rare, a stale
+                    // transcript is the common case on a long-lived home directory.
+                    if keep(path, ts) && is_safe_transcript_path(path, &root) {
+                        files.push((priority, path.to_path_buf(), ts));
+                    }
                 }
             }
         }
@@ -631,6 +661,12 @@ impl AgentProvider for AntigravityProvider {
                     }
                 }
             }
+        }
+        // A `brain/<conversation-uuid>/.../transcript.jsonl` body never names its own
+        // conversation, so take the id from the folder. Without this every Antigravity
+        // transcript collapses onto the stem `transcript` and they dedupe into one chat.
+        if meta.session_id_hint.is_none() {
+            meta.session_id_hint = brain_conversation_id(path);
         }
         meta
     }

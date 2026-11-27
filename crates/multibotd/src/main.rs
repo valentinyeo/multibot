@@ -9,8 +9,8 @@ use anyhow::Result;
 use multibot_proto::{ClientRequest, PROTOCOL_VERSION, ServerEvent, build_version, decode_line};
 use process::ProcessManager;
 use providers::{
-    ArchiveStore, DiscoveryContext, MetadataStore, discover_all_sessions_with_ctx, now_ms,
-    read_history_page,
+    ArchiveStore, DiscoveryContext, LiveActivity, MetadataStore, discover_all_sessions_with_ctx,
+    now_ms, read_history_page,
 };
 use search::{SearchError, search_history};
 use sha2::{Digest, Sha256};
@@ -134,20 +134,29 @@ async fn async_main(
                     server_time_ms: now_ms(),
                 });
             }
-            ClientRequest::ListSessions { limit } => {
+            ClientRequest::ListSessions {
+                limit,
+                include_archived,
+            } => {
                 let home_c = home.clone();
                 let active_ids = process_mgr.active_session_ids();
+                let connected_ids = process_mgr.connected_session_ids();
                 let tx = out_tx.clone();
                 let lim = limit.unwrap_or(50);
+                let include_archived = include_archived.unwrap_or(false);
                 let _ = disk_tx.send(Box::new(move || {
                     let metadata = MetadataStore::load(&home_c);
                     let archive = ArchiveStore::load(&home_c);
+                    let live = LiveActivity::load(&home_c);
                     let server_workspaces =
                         crate::server_workspaces::ServerWorkspaceIndex::load_default_cached();
                     let ctx = DiscoveryContext {
                         active_session_ids: &active_ids,
+                        connected_session_ids: &connected_ids,
                         metadata: &metadata,
                         archive: &archive,
+                        live: &live,
+                        include_archived,
                         server_workspaces: &server_workspaces,
                     };
                     let sessions = discover_all_sessions_with_ctx(&home_c, lim, &ctx);

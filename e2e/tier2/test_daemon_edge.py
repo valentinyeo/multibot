@@ -101,6 +101,7 @@ def test_slice1_list_sessions_limit_bounds() -> None:
                 f".claude/projects/-tmp-lim/sess-{i}.jsonl",
                 mtime_offset_sec=-(50 - i * 10),
             )
+            sb.stage_live_legacy_chat(tmux=f"live-sess-{i}", sid=f"sess-{i}")
         with DaemonDriver(sb) as dmn:
             s2 = dmn.request({"op": "list_sessions", "limit": 2}, "sessions")["sessions"]
             assert len(s2) == 2
@@ -330,6 +331,8 @@ def test_slice2_semantic_working_state_vs_mtime() -> None:
             ".claude/projects/-tmp-sem/busy-open.jsonl",
             mtime_offset_sec=-15.0,
         )
+        sb.stage_live_legacy_chat(tmux="live-done-fresh", sid="done-fresh")
+        sb.stage_live_legacy_chat(tmux="live-busy-open", sid="busy-open")
         with DaemonDriver(sb) as dmn:
             sess = dmn.request({"op": "list_sessions", "limit": 20}, "sessions")["sessions"]
             by_id = {s["id"]: s for s in sess}
@@ -525,3 +528,74 @@ def test_slice2_search_history_validation_and_500_cap() -> None:
                 fail_on_bad_request=False,
             )
             assert err_long["code"] in ("invalid_query", "bad_request")
+
+
+# ---------------------------------------------------------------------------
+# MBRU-19: the default listing carries live and connected chats only
+# ---------------------------------------------------------------------------
+
+
+@e2e_test(
+    id="T2-DMN-11",
+    tier=2,
+    area="daemon",
+    features=("F1",),
+    title="MBRU-19 list_sessions returns live chats only by default and everything with include_archived",
+    baseline=False,
+)
+def test_mbru19_list_sessions_active_only_by_default() -> None:
+    with IsolatedHome(prefix="mb_t2_dmn11_") as sb:
+        # 200 ended transcripts, months old, named by nothing.
+        for i in range(200):
+            sb.stage_fixture(
+                "claude/basic_slice1.jsonl",
+                f".claude/projects/-tmp-dead/dead-{i}.jsonl",
+                mtime_offset_sec=-(90 * 86_400),
+            )
+        # One live chat, with a months-old transcript: recency must not be what keeps it.
+        live_sid = "aaaaaaaa-1111-2222-3333-444444444444"
+        sb.stage_fixture(
+            "claude/basic_slice1.jsonl",
+            f".claude/projects/-tmp-live/{live_sid}.jsonl",
+            mtime_offset_sec=-(90 * 86_400),
+        )
+        sb.stage_live_legacy_chat(tmux="live-mbru19", sid=live_sid)
+        # One transcript that was written a minute ago and that nothing holds open. It is
+        # history, not a session, and must stay out.
+        ended_sid = "dddddddd-1111-2222-3333-444444444444"
+        sb.stage_fixture(
+            "claude/basic_slice1.jsonl",
+            f".claude/projects/-tmp-ended/{ended_sid}.jsonl",
+            mtime_offset_sec=-30,
+        )
+        # One archived chat.
+        arch_sid = "cccccccc-1111-2222-3333-444444444444"
+        sb.stage_fixture(
+            "claude/basic_slice1.jsonl",
+            f".claude/projects/-tmp-arch/{arch_sid}.jsonl",
+            mtime_offset_sec=-30,
+        )
+        sb.stage_live_legacy_chat(tmux="live-mbru19-arch", sid=arch_sid)
+        sb.stage_text(
+            ".multibot/archive.json",
+            json.dumps({"archived": {arch_sid: {"archived_at_ms": 1, "agent": "claude"}}}),
+        )
+
+        with DaemonDriver(sb) as dmn:
+            default = dmn.request({"op": "list_sessions", "limit": 50}, "sessions")["sessions"]
+            ids = {s["id"] for s in default}
+            assert len(default) == 1, f"expected the one live chat only, got {sorted(ids)}"
+            assert live_sid in ids, f"live chat missing from default listing: {sorted(ids)}"
+            assert ended_sid not in ids, (
+                f"a recently written but ended transcript leaked in: {sorted(ids)}"
+            )
+            assert arch_sid not in ids, "archived chat must stay out of the default listing"
+            assert not any(i.startswith("dead-") for i in ids), "dead transcripts leaked"
+
+            full = dmn.request(
+                {"op": "list_sessions", "limit": 1000, "include_archived": True}, "sessions"
+            )["sessions"]
+            full_ids = {s["id"] for s in full}
+            assert len(full) == 203, f"include_archived should list everything, got {len(full)}"
+            assert arch_sid in full_ids
+            assert sum(1 for i in full_ids if i.startswith("dead-")) == 200

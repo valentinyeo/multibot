@@ -102,6 +102,7 @@ def test_pairwise_inotify_working_transition_feeds_inbox() -> None:
             ".claude/projects/-tmp-t3/busy-inbox.jsonl",
             mtime_offset_sec=-90.0,
         )
+        sb.stage_live_legacy_chat(tmux="live-busy-inbox", sid="busy-inbox")
         with DaemonDriver(sb) as dmn:
             dmn.request(
                 {
@@ -182,6 +183,7 @@ def test_pairwise_rename_daemon_and_palette_sync() -> None:
             "claude/basic_slice1.jsonl",
             ".claude/projects/-tmp-t3/claude-ren.jsonl",
         )
+        sb.stage_live_legacy_chat(tmux="live-claude-ren", sid="claude-ren")
         with DaemonDriver(sb) as dmn:
             upd = dmn.request(
                 {

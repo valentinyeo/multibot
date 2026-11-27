@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod antigravity;
 pub mod claude;
 pub mod codex;
@@ -21,6 +22,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub use activity::LiveActivity;
 pub use antigravity::AntigravityProvider;
 pub use claude::ClaudeProvider;
 pub use codex::CodexProvider;
@@ -37,6 +39,9 @@ const OMITTED_MARKER: &[u8] = b"[image omitted]"; // JSON-safe ASCII replacement
 const MAX_SCRUB_RAW_LINE_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB per-line raw scrub ceiling
 const MAX_RAW_SCAN_BYTES_PER_PAGE: u64 = 16 * 1024 * 1024; // 16 MiB latency ceiling per page
 pub const WORKING_STALENESS_MS: i64 = 30_000;
+/// Hard ceiling on how many live-candidate files discovery walks per provider when the
+/// caller only asked for active sessions. Everything else is pruned by path before parsing.
+pub const ACTIVE_SCAN_FILE_CAP: usize = 4_000;
 pub const PROBE_WINDOW_BYTES: u64 = 64;
 pub const MAX_TOOL_DETAIL_CHARS: usize = 4_000;
 pub const MAX_TOOL_INPUT_PRE_PAIR_CHARS: usize = 1_800;
@@ -218,15 +223,33 @@ impl ArchiveStore {
 /// chat, so a live session can be surfaced with the workspace it belongs to instead of
 /// landing in the desktop's catch-all bucket.
 pub struct DiscoveryContext<'a> {
+    /// Sessions with a prompt in flight (`busy == true`).
     pub active_session_ids: &'a HashSet<String>,
+    /// Sessions this daemon holds open, busy or idle-connected. A chat that is open here is
+    /// live even when nothing has written to its transcript for weeks.
+    pub connected_session_ids: &'a HashSet<String>,
     pub metadata: &'a MetadataStore,
     pub archive: &'a ArchiveStore,
+    /// Live chats and the legacy archive, read-only.
+    pub live: &'a LiveActivity,
+    /// When `false` (the default for `ListSessions`), archived and dead transcripts are
+    /// never returned, so the desktop never streams 1,200 dead sessions.
+    pub include_archived: bool,
     pub server_workspaces: &'a ServerWorkspaceIndex,
 }
 
 pub trait AgentProvider: Send + Sync {
     fn kind(&self) -> AgentKind;
-    fn discover_paths(&self, home: &Path, limit: usize) -> Vec<(PathBuf, i64)>;
+    /// Newest-first transcript files under `home`, at most `limit`.
+    ///
+    /// `keep` runs before any file is parsed, so a provider can prune thousands of dead
+    /// transcripts from directory metadata alone.
+    fn discover_paths(
+        &self,
+        home: &Path,
+        limit: usize,
+        keep: &dyn Fn(&Path, i64) -> bool,
+    ) -> Vec<(PathBuf, i64)>;
     fn parse_lines(&self, lines: &[LineSlice<'_>]) -> ParsedSlice;
     fn parse_slice(&self, bytes: &[u8], base_offset: u64) -> ParsedSlice {
         let lines = iter_complete_lines(bytes, base_offset);
@@ -252,20 +275,43 @@ pub fn provider_for(kind: AgentKind) -> Box<dyn AgentProvider> {
 }
 
 #[cfg(test)]
+/// Parsing-level discovery for provider tests: returns every transcript on disk, because
+/// these tests check what a provider parses, not which chats the desktop lists.
 pub fn discover_all_sessions(home: &Path, limit: usize) -> Vec<SessionSummary> {
+    discover_all_sessions_owned(home, limit, true)
+}
+
+/// Test-only entry point: loads daemon state from `home` and discovers sessions.
+#[cfg(test)]
+pub fn discover_all_sessions_owned(
+    home: &Path,
+    limit: usize,
+    include_archived: bool,
+) -> Vec<SessionSummary> {
     let metadata = MetadataStore::load(home);
     let archive = ArchiveStore::load(home);
-    let active = HashSet::new();
-    let server_workspaces = ServerWorkspaceIndex::default();
+    let live = LiveActivity::load(home);
+    let none = HashSet::new();
+    let server_workspaces = ServerWorkspaceIndex::load_default_cached();
     let ctx = DiscoveryContext {
-        active_session_ids: &active,
+        active_session_ids: &none,
+        connected_session_ids: &none,
         metadata: &metadata,
         archive: &archive,
+        live: &live,
+        include_archived,
         server_workspaces: &server_workspaces,
     };
     discover_all_sessions_with_ctx(home, limit, &ctx)
 }
 
+/// Returns the sessions the desktop should show, newest first.
+///
+/// By default a session is shown only when it is not archived and something still holds it
+/// open: this daemon (`active_session_ids` / `connected_session_ids`), a record this daemon
+/// wrote in `metadata.json`, or a live legacy Multiprompt chat (host process or terminal
+/// session). A transcript nothing points at is history, not a session anyone is working in.
+/// `ctx.include_archived` widens this to everything.
 pub fn discover_all_sessions_with_ctx(
     home: &Path,
     limit: usize,
@@ -273,12 +319,43 @@ pub fn discover_all_sessions_with_ctx(
 ) -> Vec<SessionSummary> {
     let mut all = Vec::new();
     let mut seen_ids = HashSet::new();
-    let per_provider_limit = limit.max(50);
+    // Filtering happens during the directory walk, so the walk itself has to look past the
+    // requested count and is capped to keep a huge history cheap.
+    let per_provider_limit = if ctx.include_archived {
+        limit.max(50)
+    } else {
+        limit.max(50).saturating_mul(4).min(ACTIVE_SCAN_FILE_CAP)
+    };
+
+    // A daemon-owned `~/.multibot/history/` file is named after a hash of its session id, so
+    // its own name can never be matched. Deriving the exact paths up front keeps the walk from
+    // parsing history files nothing holds open any more.
+    let history_candidates: HashSet<PathBuf> = if ctx.include_archived {
+        HashSet::new()
+    } else {
+        ctx.held_open_ids()
+            // Archiving a Multibot-hosted chat keeps its `metadata.json` record, so the id
+            // stays held open. Archived chats are history: they must not become a candidate.
+            .filter(|id| !ctx.is_archived_id(id.as_str()))
+            .map(|id| antigravity::hosted_history_path(home, id))
+            .collect()
+    };
 
     for provider in all_providers() {
-        let paths = provider.discover_paths(home, per_provider_limit);
+        let keep = |path: &Path, _mtime_ms: i64| {
+            ctx.include_archived || ctx.is_held_open_path(path, &history_candidates)
+        };
+        let paths = provider.discover_paths(home, per_provider_limit, &keep);
         for (path, mtime_ms) in paths {
             let summary = summarize_session(provider.as_ref(), &path, mtime_ms, ctx);
+            // A daemon-owned history file is named after a hash, so the id it parses to is not
+            // the session this daemon knows it by. Its exact path is the proof it is ours.
+            // An archived chat is never shown by default, candidates or not.
+            let shown = !summary.archived
+                && (ctx.is_shown(&summary) || history_candidates.contains(&path));
+            if !ctx.include_archived && !shown {
+                continue;
+            }
             if seen_ids.insert((summary.agent, summary.id.clone())) {
                 all.push(summary);
             }
@@ -307,37 +384,128 @@ pub fn discover_all_sessions_with_ctx(
                 .unwrap_or(meta.updated_at_ms);
             let provider = provider_for(agent);
             let summary = summarize_session(provider.as_ref(), path, mtime_ms, ctx);
+            let shown = !summary.archived
+                && (ctx.is_shown(&summary) || history_candidates.contains(path));
+            if !ctx.include_archived && !shown {
+                continue;
+            }
             if seen_ids.insert((summary.agent, summary.id.clone())) {
                 all.push(summary);
             }
-        } else {
-            let title = meta
-                .title
-                .clone()
-                .filter(|t| !t.trim().is_empty())
-                .unwrap_or_else(|| sid.clone());
-            all.push(SessionSummary {
-                id: sid.clone(),
-                agent,
-                title,
-                cwd: meta.cwd.clone(),
-                source_path: source_path.clone(),
-                updated_at_ms: meta.updated_at_ms,
-                working: ctx.active_session_ids.contains(sid),
-                archived: ctx.archive.is_archived(sid),
-                workspace: ctx
-                    .server_workspaces
-                    .workspace_for(sid)
-                    .map(str::to_string),
-                ..Default::default()
-            });
-            seen_ids.insert((agent, sid.clone()));
         }
+        let title = meta
+            .title
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| sid.clone());
+        let summary = SessionSummary {
+            id: sid.clone(),
+            agent,
+            title,
+            cwd: meta.cwd.clone(),
+            source_path: source_path.clone(),
+            updated_at_ms: meta.updated_at_ms,
+            working: ctx.active_session_ids.contains(sid),
+            archived: ctx.is_archived(sid, path),
+            ..Default::default()
+        };
+        if !ctx.include_archived && !ctx.is_shown(&summary) {
+            continue;
+        }
+        all.push(summary);
+        seen_ids.insert((agent, sid.clone()));
     }
 
     all.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
     all.truncate(limit);
     all
+}
+
+impl DiscoveryContext<'_> {
+    /// Multibot's own archive plus the legacy desktop's, which stays read-only (Invariant #2).
+    pub fn is_archived(&self, session_id: &str, source_path: &Path) -> bool {
+        self.is_archived_id(session_id) || self.live.is_legacy_archived(session_id, source_path)
+    }
+
+    /// Archived by id alone, for ids whose transcript path is not known yet.
+    fn is_archived_id(&self, session_id: &str) -> bool {
+        self.archive.is_archived(session_id)
+            || self.live.legacy_archived_ids.contains(session_id)
+    }
+
+    /// Whether an already-summarized session belongs in the default list.
+    ///
+    /// Nothing else counts: a transcript that is not archived but that no daemon, metadata
+    /// record or live legacy chat holds open is history and must not cost RAM or latency.
+    fn is_shown(&self, summary: &SessionSummary) -> bool {
+        !summary.archived && self.holds_open(&summary.id)
+    }
+
+    /// Whether this daemon, its metadata, or a live legacy chat holds the session open.
+    fn holds_open(&self, session_id: &str) -> bool {
+        self.active_session_ids.contains(session_id)
+            || self.connected_session_ids.contains(session_id)
+            || self.metadata.get(session_id).is_some()
+            || self.live.is_live(session_id)
+    }
+
+    /// Every id anything still holds open, daemon state, metadata and live legacy chats.
+    fn held_open_ids(&self) -> impl Iterator<Item = &String> {
+        self.active_session_ids
+            .iter()
+            .chain(self.connected_session_ids.iter())
+            .chain(self.metadata.sessions.keys())
+            .chain(self.live.ids.iter())
+    }
+
+    /// Matches a transcript file against the sessions anything holds open, before it is
+    /// parsed, so walking tens of thousands of dead transcripts stays cheap.
+    ///
+    /// Antigravity names its transcript `transcript.jsonl` under a conversation-uuid folder,
+    /// so every path component is checked, not just the file stem. Codex names a rollout
+    /// `rollout-<date>-<uuid>.jsonl`, so a held-open id that is a suffix of the stem matches.
+    fn is_held_open_path(&self, path: &Path, history_candidates: &HashSet<PathBuf>) -> bool {
+        let file_name = path.file_name().and_then(|n| n.to_str());
+        if let Some(stem) = file_name.map(|n| {
+            n.strip_suffix(".jsonl")
+                .or_else(|| n.strip_suffix(".history"))
+                .unwrap_or(n)
+        }) && self.holds_open(stem)
+        {
+            return true;
+        }
+        // A daemon-owned Antigravity history file is named after a hash of its session id, so
+        // its name cannot be matched against the id directly. `history_candidates` carries the
+        // exact paths derived from the ids anything holds open.
+        if history_candidates.contains(path) {
+            return true;
+        }
+        if let Some(name) = file_name
+            && name.starts_with("rollout-")
+            && (self.live.ids.iter().any(|id| is_uuid_suffix(id, name))
+                || self
+                    .connected_session_ids
+                    .iter()
+                    .any(|id| is_uuid_suffix(id, name)))
+        {
+            return true;
+        }
+        path.components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .any(|part| {
+                self.live.ids.contains(part)
+                    || self.live.tmux_names.contains(part)
+                    || self.holds_open(part)
+            })
+    }
+}
+
+/// True when a live id such as a Codex session uuid ends the file name's last path segment.
+fn is_uuid_suffix(id: &str, file_name: &str) -> bool {
+    file_name
+        .strip_suffix(".jsonl")
+        .unwrap_or(file_name)
+        .ends_with(id)
 }
 
 pub fn summarize_session_by_agent(
@@ -424,7 +592,7 @@ pub fn summarize_session(
         todos_done,
         todos_total,
         needs_attention: tail.has_pending_question,
-        archived: ctx.archive.is_archived(&id),
+        archived: ctx.is_archived(&id, path),
         model: tail.model.or(header.model),
         workspace: ctx
             .server_workspaces
@@ -2832,6 +3000,436 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Writes `count` Claude transcripts, oldest first, one per minute going back in time.
+    fn seed_claude_transcripts(dir: &Path, prefix: &str, count: usize, first_age_minutes: i64) {
+        let root = dir.join(".claude").join("projects").join("-repo");
+        fs::create_dir_all(&root).unwrap();
+        for i in 0..count {
+            let age_minutes = first_age_minutes + i as i64;
+            let path = root.join(format!("{prefix}-{i}.jsonl"));
+            let body = format!(
+                "{{\"type\":\"user\",\"uuid\":\"u-{prefix}-{i}\",\"cwd\":\"/repo\",\"message\":{{\"content\":\"prompt {i}\"}}}}\n"
+            );
+            fs::write(&path, body).unwrap();
+            set_age(&path, age_minutes * 60);
+        }
+    }
+
+    /// Writes one Claude transcript with a caller-chosen session id.
+    fn seed_claude_transcript_named(dir: &Path, sid: &str, tag: &str, seconds_ago: i64) {
+        let root = dir.join(".claude").join("projects").join("-repo");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join(format!("{sid}.jsonl"));
+        fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"user\",\"uuid\":\"u-{tag}\",\"cwd\":\"/repo\",\"message\":{{\"content\":\"{tag}\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        set_age(&path, seconds_ago);
+    }
+
+    /// Backdates `path` so tests can place a transcript anywhere on the timeline.
+    fn set_age(path: &Path, seconds_ago: i64) {
+        let when = SystemTime::now() - std::time::Duration::from_secs(seconds_ago.max(0) as u64);
+        let file = OpenOptions::new().write(true).open(path).unwrap();
+        let _ = file.set_times(std::fs::FileTimes::new().set_modified(when));
+    }
+
+    /// A legacy host record the read-only activity index can see. The pid is this test
+    /// process, which is alive for as long as the check runs.
+    fn write_live_chat(dir: &Path, sid: &str, tmux: &str, seconds_ago: i64) {
+        let host = dir
+            .join(".local")
+            .join("state")
+            .join("multiprompt")
+            .join("agent-host");
+        fs::create_dir_all(&host).unwrap();
+        let stem = &sha256_hex(format!("claude:{sid}").as_bytes())[..32];
+        let config = host.join(format!("{stem}.config.json"));
+        fs::write(
+            &config,
+            format!(r#"{{"enabled":true,"provider":"claude","sid":"{sid}","tmux":"{tmux}"}}"#),
+        )
+        .unwrap();
+        let state = host.join(format!("{stem}.state.json"));
+        let pid = std::process::id();
+        fs::write(
+            &state,
+            format!(r#"{{"pid":{pid},"sid":"{sid}","provider":"claude","tmux":"{tmux}"}}"#),
+        )
+        .unwrap();
+        set_age(&config, seconds_ago);
+        set_age(&state, seconds_ago);
+    }
+
+    #[test]
+    fn default_discovery_hides_dead_history_even_with_1200_stale_transcripts() {
+        let dir = unique_temp_dir("active-only");
+        // 1,200 dead transcripts: months old and named by nothing.
+        seed_claude_transcripts(&dir, "dead", 1200, 90 * 24 * 60);
+        // 50 chats a person is working in, all with months-old transcripts, so recency can
+        // not be what keeps them.
+        let mut expected_live = Vec::new();
+        let live_percent = |tag: &str, i: usize| format!("{tag}{i:07}-1111-2222-3333-444444444444");
+        for i in 0..30 {
+            let sid = live_percent("a", i);
+            seed_claude_transcript_named(&dir, &sid, &format!("live-{i}"), 4 * 86_400);
+            write_live_chat(&dir, &sid, &format!("live-claude-{i}"), 4 * 86_400);
+            expected_live.push(sid);
+        }
+        for i in 0..20 {
+            let sid = live_percent("b", i);
+            seed_claude_transcript_named(&dir, &sid, &format!("live-old-{i}"), 2 * 86_400);
+            write_live_chat(&dir, &sid, &format!("live-old-{i}"), 2 * 86_400);
+            expected_live.push(sid);
+        }
+
+        let started = now_ms();
+        let sessions = discover_all_sessions_owned(&dir, 100, false);
+        let elapsed = now_ms() - started;
+
+        assert_eq!(
+            sessions.len(),
+            50,
+            "expected the 50 active sessions, got {}: {:?}",
+            sessions.len(),
+            sessions.iter().map(|s| &s.id).collect::<Vec<_>>()
+        );
+        let ids: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        for sid in &expected_live {
+            assert!(
+                ids.contains(sid.as_str()),
+                "active session {sid} missing from default list"
+            );
+        }
+        assert!(
+            !sessions.iter().any(|s| s.title.starts_with("prompt")),
+            "a stale transcript leaked into the default list"
+        );
+        assert!(
+            elapsed < 2_000,
+            "default discovery over 1,250 transcripts took {elapsed} ms"
+        );
+
+        // An explicit full listing still returns the history when asked for it.
+        let everything = discover_all_sessions_owned(&dir, 2_000, true);
+        assert_eq!(
+            everything.len(),
+            1_250,
+            "include_archived should see every transcript, got {}",
+            everything.len()
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Writes one Antigravity transcript the way the CLI lays it out: the conversation uuid
+    /// is a folder and the file is always named `transcript.jsonl`.
+    fn seed_antigravity_transcript(dir: &Path, conversation: &str, tag: &str, seconds_ago: i64) {
+        let path = dir
+            .join(".gemini")
+            .join("antigravity")
+            .join("brain")
+            .join(conversation)
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"USER_INPUT\",\"conversation_id\":\"{conversation}\",\"content\":\"{tag}\"}}\n"
+            ),
+        )
+        .unwrap();
+        set_age(&path, seconds_ago);
+    }
+
+    /// A legacy host record for an Antigravity conversation, which publishes its id under
+    /// `conversation` in `chat-names.json`.
+    fn write_live_antigravity_chat(dir: &Path, conversation: &str) {
+        let state_root = dir.join(".local").join("state").join("multiprompt");
+        let host = state_root.join("agent-host");
+        fs::create_dir_all(&host).unwrap();
+        let stem = &sha256_hex(format!("antigravity:{conversation}").as_bytes())[..32];
+        let pid = std::process::id();
+        fs::write(
+            host.join(format!("{stem}.config.json")),
+            format!(r#"{{"enabled":true,"provider":"antigravity","sid":"{conversation}"}}"#),
+        )
+        .unwrap();
+        fs::write(
+            host.join(format!("{stem}.state.json")),
+            format!(r#"{{"pid":{pid},"provider":"antigravity","conversation":"{conversation}"}}"#),
+        )
+        .unwrap();
+        fs::write(
+            state_root.join("chat-names.json"),
+            format!(
+                r#"{{"live-agy":{{"name":"Multi Bot Rust","conversation":"{conversation}"}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn antigravity_conversation_folder_matches_a_live_chat() {
+        let dir = unique_temp_dir("agy-live-match");
+        let live = "4d5d5535-249c-4f10-90d9-7ec49c2eeb53";
+        let dead = "0badc0de-249c-4f10-90d9-7ec49c2eeb53";
+        seed_antigravity_transcript(&dir, live, "live agy", 30 * 86_400);
+        seed_antigravity_transcript(&dir, dead, "dead agy", 30 * 86_400);
+        write_live_antigravity_chat(&dir, live);
+
+        let sessions = discover_all_sessions_owned(&dir, 50, false);
+        let ids: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert!(
+            ids.contains(live),
+            "live Antigravity conversation missing: {ids:?}"
+        );
+        assert!(
+            !ids.contains(dead),
+            "an ended Antigravity conversation leaked: {ids:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archived_multibot_hosted_antigravity_chat_leaves_the_default_list() {
+        let dir = unique_temp_dir("agy-archived");
+        let sid = "7a1c9e2d-1111-4222-8333-944455556666";
+        let live = "4d5d5535-249c-4f10-90d9-7ec49c2eeb53";
+
+        // Two Multibot-hosted chats: one stays open, one gets archived.
+        for (id, title) in [(sid, "Archived agy"), (live, "Open agy")] {
+            let path = antigravity::hosted_history_path(&dir, id);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(
+                &path,
+                format!(
+                    "{{\"type\":\"multibot_meta\",\"session_id\":\"{id}\",\"agent\":\"antigravity\",\"cwd\":\"/repo\",\"title\":\"{title}\"}}\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        let mut meta = MetadataStore::default();
+        for id in [sid, live] {
+            meta.sessions.insert(
+                id.to_string(),
+                SessionMetaEntry {
+                    title: None,
+                    cwd: Some("/repo".into()),
+                    agent: Some(AgentKind::Antigravity),
+                    source_path: Some(
+                        antigravity::hosted_history_path(&dir, id)
+                            .to_string_lossy()
+                            .to_string(),
+                    ),
+                    native_session_id: None,
+                    updated_at_ms: 1,
+                },
+            );
+        }
+        meta.save(&dir).unwrap();
+
+        // Before archiving, both chats are listed.
+        let before = discover_all_sessions_owned(&dir, 50, false);
+        let ids: HashSet<&str> = before.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(sid) && ids.contains(live), "both chats should list: {ids:?}");
+
+        // Archiving keeps `metadata.json`, so the id stays held open. It must still leave
+        // the default list, and stay reachable only with `include_archived`.
+        let mut archive = ArchiveStore::default();
+        archive.archived.insert(
+            sid.to_string(),
+            ArchivedEntry {
+                archived_at_ms: 2,
+                agent: Some(AgentKind::Antigravity),
+                source_path: Some(
+                    antigravity::hosted_history_path(&dir, sid)
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+            },
+        );
+        archive.save(&dir).unwrap();
+
+        let after = discover_all_sessions_owned(&dir, 50, false);
+        let ids: HashSet<&str> = after.iter().map(|s| s.id.as_str()).collect();
+        assert!(
+            !ids.contains(sid),
+            "an archived Multibot-hosted Antigravity chat leaked into the default list: {ids:?}"
+        );
+        assert!(ids.contains(live), "the open chat must stay listed: {ids:?}");
+
+        let all = discover_all_sessions_owned(&dir, 50, true);
+        let ids: HashSet<&str> = all.iter().map(|s| s.id.as_str()).collect();
+        assert!(
+            ids.contains(sid),
+            "an archived chat must stay reachable with include_archived: {ids:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn codex_rollout_name_matches_a_live_tupleid() {
+        let dir = unique_temp_dir("codex-live-match");
+        let live = "11111111-2222-3333-4444-555555555555";
+        let dead = "99999999-2222-3333-4444-555555555555";
+        for (sid, seconds_ago) in [(live, 40 * 86_400), (dead, 40 * 86_400)] {
+            let path = dir
+                .join(".codex")
+                .join("sessions")
+                .join("2026")
+                .join("11")
+                .join("26")
+                .join(format!("rollout-2026-11-26-{sid}.jsonl"));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(
+                &path,
+                format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{sid}\"}}}}\n"),
+            )
+            .unwrap();
+            set_age(&path, seconds_ago);
+        }
+        write_live_chat(&dir, live, "live-codex", 40 * 86_400);
+
+        let sessions = discover_all_sessions_owned(&dir, 50, false);
+        let ids: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(live), "live Codex session missing: {ids:?}");
+        assert!(!ids.contains(dead), "an ended Codex session leaked: {ids:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archiving_and_new_sessions_update_the_default_list_immediately() {
+        let dir = unique_temp_dir("archive-flip");
+        let sid = "ddddddd1-1111-2222-3333-444444444444";
+        seed_claude_transcript_named(&dir, sid, "archive me", 120);
+        write_live_chat(&dir, sid, "live-archive-me", 120);
+
+        let sessions = discover_all_sessions_owned(&dir, 50, false);
+        assert_eq!(sessions.len(), 1, "live session must be listed: {sessions:?}");
+
+        // Archiving through the daemon's own store drops it from the default list.
+        let mut archive = ArchiveStore::default();
+        archive.archived.insert(
+            sid.to_string(),
+            ArchivedEntry {
+                archived_at_ms: now_ms(),
+                agent: Some(AgentKind::Claude),
+                source_path: None,
+            },
+        );
+        archive.save(&dir).unwrap();
+        assert!(
+            discover_all_sessions_owned(&dir, 50, false).is_empty(),
+            "archived session must leave the default list"
+        );
+        assert_eq!(
+            discover_all_sessions_owned(&dir, 50, true).len(),
+            1,
+            "archived session must stay reachable when explicitly requested"
+        );
+
+        // Unarchiving restores it.
+        ArchiveStore::default().save(&dir).unwrap();
+        assert_eq!(discover_all_sessions_owned(&dir, 50, false).len(), 1);
+
+        // A chat spawned through Multibot is live through its metadata record, even before the
+        // agent CLI wrote a first transcript byte.
+        let fresh = "eeeeeee2-1111-2222-3333-444444444444";
+        let mut meta = MetadataStore::load(&dir);
+        meta.sessions.insert(
+            fresh.to_string(),
+            SessionMetaEntry {
+                title: Some("New chat".into()),
+                cwd: Some("/repo".into()),
+                agent: Some(AgentKind::Claude),
+                source_path: Some(
+                    dir.join(".claude/projects/-repo")
+                        .join(format!("{fresh}.jsonl"))
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+                native_session_id: None,
+                updated_at_ms: now_ms(),
+            },
+        );
+        meta.save(&dir).unwrap();
+        let sessions = discover_all_sessions_owned(&dir, 50, false);
+        assert!(
+            sessions.iter().any(|s| s.id == fresh),
+            "a chat this daemon spawned must appear at once: {sessions:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn connected_sessions_stay_visible_with_no_live_legacy_record() {
+        let dir = unique_temp_dir("connected-idle");
+        let sid = "abababa4-1111-2222-3333-444444444444";
+        seed_claude_transcript_named(&dir, sid, "idle connected", 45 * 86_400);
+
+        // Nothing points at it: history, so it stays out.
+        assert!(discover_all_sessions_owned(&dir, 50, false).is_empty());
+
+        // The daemon holds it open and idle: it must be listed, but not as `working`.
+        let metadata = MetadataStore::load(&dir);
+        let archive = ArchiveStore::load(&dir);
+        let live = LiveActivity::load(&dir);
+        let busy = HashSet::new();
+        let connected: HashSet<String> = [sid.to_string()].into_iter().collect();
+        let server_workspaces = ServerWorkspaceIndex::default();
+        let ctx = DiscoveryContext {
+            active_session_ids: &busy,
+            connected_session_ids: &connected,
+            metadata: &metadata,
+            archive: &archive,
+            live: &live,
+            include_archived: false,
+            server_workspaces: &server_workspaces,
+        };
+        let sessions = discover_all_sessions_with_ctx(&dir, 50, &ctx);
+        assert_eq!(sessions.len(), 1, "idle connected chat must be listed");
+        assert!(!sessions[0].working, "idle chat must not report working");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_zigshell_archive_hides_chats_without_touching_its_file() {
+        let dir = unique_temp_dir("legacy-archive");
+        let sid = "fffffff3-1111-2222-3333-444444444444";
+        seed_claude_transcript_named(&dir, sid, "legacy archived", 60);
+        let legacy = dir.join(".config").join("ZigShell").join("archive.json");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let body = format!(
+            r#"[{{"name":"Old","tmux_session":"live-legacy","csid":"{sid}","host":0,"ai_agent":1}}]"#
+        );
+        fs::write(&legacy, &body).unwrap();
+
+        let sessions = discover_all_sessions_owned(&dir, 50, false);
+        assert!(
+            sessions.is_empty(),
+            "legacy-archived chat must stay out of the default list: {sessions:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&legacy).unwrap(),
+            body,
+            "the legacy archive must be read-only"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn semantic_working_rules() {
         let now = 100_000;
@@ -3900,11 +4498,15 @@ mod tests {
         let meta = MetadataStore::default();
         let archive = ArchiveStore::default();
         let active = HashSet::new();
+        let live = LiveActivity::default();
         let server_workspaces = ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &active,
+            connected_session_ids: &active,
             metadata: &meta,
             archive: &archive,
+            live: &live,
+            include_archived: true,
             server_workspaces: &server_workspaces,
         };
         let now = now_ms();
@@ -4299,11 +4901,15 @@ mod tests {
         let meta = MetadataStore::default();
         let archive = ArchiveStore::default();
         let active = HashSet::new();
+        let live = LiveActivity::default();
         let server_workspaces = ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &active,
+            connected_session_ids: &active,
             metadata: &meta,
             archive: &archive,
+            live: &live,
+            include_archived: true,
             server_workspaces: &server_workspaces,
         };
         let now = now_ms();
@@ -4485,11 +5091,15 @@ mod tests {
         let meta = MetadataStore::default();
         let archive = ArchiveStore::default();
         let active = HashSet::new();
+        let live = LiveActivity::default();
         let server_workspaces = ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &active,
+            connected_session_ids: &active,
             metadata: &meta,
             archive: &archive,
+            live: &live,
+            include_archived: true,
             server_workspaces: &server_workspaces,
         };
         let s_ct = summarize_session(&ClaudeProvider, &p_ct, now_ms(), &ctx);
