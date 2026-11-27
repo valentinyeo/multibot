@@ -20,7 +20,7 @@ use gpui_kit::{
 use multibot_core::SidebarMode;
 use multibot_core::workspaces::{
     PaletteCategory, PaletteCommandSpec, PaletteMode, PaletteRow, PaletteStats,
-    STARRED_WORKSPACE_ID, now_unix_ms, rank_palette,
+    STARRED_WORKSPACE_ID, canonical_session_key, now_unix_ms, rank_palette,
 };
 use multibot_keys::{ALL_CATEGORIES, by_category};
 use multibot_proto::ClientRequest;
@@ -675,8 +675,8 @@ impl MultibotView {
         match row {
             PaletteRow::Header(_) => {}
             PaletteRow::Session { session_key, .. } => {
-                if let Some(sess) = self.find_session_by_key(&session_key) {
-                    self.open_session_with_tracking(sess, false, cx);
+                if let Some((host, sess)) = self.host_for_session_key(&session_key) {
+                    self.open_session_on_host(host, sess, false, cx);
                 }
             }
             PaletteRow::Workspace {
@@ -922,7 +922,7 @@ impl MultibotView {
                                     // right-clicked a Collapsed rail avatar while on Inbox or
                                     // another Chat session): switch to Chat for that session so
                                     // `#header-rename-input` is visibly mounted and focused.
-                                    self.open_session_with_tracking(sess, false, cx);
+                                    self.open_session_key_with_tracking(&key, false, cx);
                                     self.dismiss_conflicting_chat_overlays_for_rename();
                                     if let Some(win) = window {
                                         self.start_sidebar_rename_with_window(key, win, cx);
@@ -1043,9 +1043,10 @@ impl MultibotView {
                     }
                     "session.delete" | "pal-cmd-archive-session" => {
                         if let Some(ref key) = target_key
-                            && let Some(sess) = self.find_session_by_key(key)
+                            && let Some((host, sess)) = self.host_for_session_key(key)
                         {
-                            if let Some(ref tx) = self.daemon_tx {
+                            self.closed_sessions.push((host.clone(), sess.clone()));
+                            if let Some(tx) = self.tx_for_host(&host) {
                                 let _ = tx.send(ClientRequest::ArchiveSession {
                                     session_id: sess.id.clone(),
                                     agent: sess.agent,
@@ -1079,9 +1080,7 @@ impl MultibotView {
                         }
                     }
                     "pal-cmd-refresh" => {
-                        if let Some(ref tx) = self.daemon_tx {
-                            let _ = tx.send(ClientRequest::ListSessions { limit: Some(250) });
-                        }
+                        self.refresh_all_hosts();
                     }
                     "pal-cmd-usage" => {
                         self.notice = Some(format!(
@@ -1154,20 +1153,19 @@ impl MultibotView {
                     }
                     "pal-cmd-unarchive-session" => {
                         if let Some(ref key) = target_key
-                            && let Some(sess) = self.find_session_by_key(key)
+                            && let Some((host, sess)) = self.host_for_session_key(key)
                         {
-                            self.unarchive_session(sess.id, cx);
-                        } else if let Some(sess) = self.closed_sessions.pop() {
-                            self.unarchive_session(sess.id.clone(), cx);
-                            if !self
-                                .sessions
-                                .iter()
-                                .any(|s| s.id == sess.id && s.agent == sess.agent)
-                            {
+                            self.unarchive_session_on_host(&host, sess.id, cx);
+                        } else if let Some((host, sess)) = self.closed_sessions.pop() {
+                            self.unarchive_session_on_host(&host, sess.id.clone(), cx);
+                            if self.host_for_session_key(&canonical_session_key(&host, sess.agent, &sess.id)).is_none() {
+                                if !self.host_statuses.is_empty() {
+                                    self.host_sessions.insert(0, (host.clone(), sess.clone()));
+                                }
                                 self.sessions.insert(0, sess.clone());
                                 self.sync_sessions_to_shared(cx);
                             }
-                            self.open_session_with_tracking(sess, false, cx);
+                            self.open_session_on_host(host, sess, false, cx);
                         }
                         return;
                     }

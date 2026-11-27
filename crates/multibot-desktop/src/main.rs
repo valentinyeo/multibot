@@ -202,6 +202,7 @@ fn main() {
             v.sync_workspace_to_shared(cx);
             v.enable_disk_persistence();
             v.start_update_runtime(cx);
+            v.auto_connect_configured_hosts(cx);
         });
 
         // Signal update readiness ONLY AFTER GPUI/DXGI window creation succeeded!

@@ -32,11 +32,38 @@ pub(crate) enum UiBridgeEvent {
     Disconnected(String),
 }
 
+#[derive(Debug)]
+pub(crate) struct HostConnectionState {
+    pub host_label: String,
+    pub target: DaemonTarget,
+    pub status: String,
+    pub connected: bool,
+    pub manually_disconnected: bool,
+    pub reconnect_attempt: u32,
+    pub daemon_tx: Option<mpsc::UnboundedSender<ClientRequest>>,
+    pub shutdown_tx: Option<oneshot::Sender<()>>,
+    pub connection_gen: u64,
+    pub daemon_version: Option<String>,
+    pub daemon_binary_hash: Option<String>,
+    pub daemon_upgrade_attempted: bool,
+    pub sessions: Vec<SessionSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostStatusSnapshot {
+    pub host_label: String,
+    pub status: String,
+    pub connected: bool,
+    pub session_count: usize,
+    pub daemon_version: Option<String>,
+}
+
 /// Event fanned out over `SharedAppStore.daemon_event_tx` to all open `Ctrl+N` windows.
 #[derive(Debug, Clone)]
 pub(crate) struct DaemonBroadcastEvent {
     /// `0` for App-scoped daemon consumer; non-zero (`view_id`) for direct single-view test calls.
     pub origin_view_id: u64,
+    pub host_label: String,
     /// True when an App-scoped `pending_older_page_before` entry matched and was consumed
     /// for this `ServerEvent::History`.
     pub is_older_page_hint: bool,
@@ -134,6 +161,8 @@ pub(crate) fn settings_visible_eq(a: &MultibotSettings, b: &MultibotSettings) ->
 /// Shared multi-window GPUI `Global` store synchronized across all OS windows (`Ctrl+N`).
 #[derive(Debug)]
 pub(crate) struct SharedAppStore {
+    pub(crate) host_connections: HashMap<String, HostConnectionState>,
+    pub(crate) host_sessions: Vec<(String, SessionSummary)>,
     pub settings: MultibotSettings,
     pub sessions: Vec<SessionSummary>,
     pub workspace_store: WorkspaceStore,
@@ -193,6 +222,8 @@ impl SharedAppStore {
     pub(crate) fn new(settings: MultibotSettings) -> Self {
         let (daemon_event_tx, _) = broadcast::channel(256);
         Self {
+            host_connections: HashMap::new(),
+            host_sessions: Vec::new(),
             settings,
             sessions: Vec::new(),
             workspace_store: WorkspaceStore::new(),
@@ -233,6 +264,8 @@ impl SharedAppStore {
     ) -> Self {
         let (daemon_event_tx, _) = broadcast::channel(256);
         Self {
+            host_connections: HashMap::new(),
+            host_sessions: Vec::new(),
             settings,
             sessions: Vec::new(),
             workspace_store: WorkspaceStore::load(),
@@ -281,6 +314,77 @@ impl SharedAppStore {
         if !cx.has_global::<Self>() {
             cx.set_global(Self::new_persisted_with_args(settings, preserved_cli_args));
         }
+    }
+
+    pub(crate) fn rebuild_merged_sessions(&mut self) {
+        self.host_sessions = self
+            .host_connections
+            .values()
+            .filter(|host| host.connected)
+            .flat_map(|host| {
+                host.sessions
+                    .iter()
+                    .cloned()
+                    .map(move |s| (host.host_label.clone(), s))
+            })
+            .collect();
+        self.host_sessions.sort_by(|(ha, a), (hb, b)| {
+            b.updated_at_ms
+                .cmp(&a.updated_at_ms)
+                .then_with(|| ha.cmp(hb))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        self.sessions = self.host_sessions.iter().map(|(_, s)| s.clone()).collect();
+    }
+
+    pub(crate) fn refresh_connection_summary(&mut self) {
+        if self.host_connections.is_empty() {
+            return;
+        }
+        let mut hosts: Vec<_> = self.host_connections.values().collect();
+        hosts.sort_by(|a, b| a.host_label.cmp(&b.host_label));
+        let connected = hosts.iter().filter(|h| h.connected).count();
+        self.connection_status = if hosts.len() == 1 {
+            let h = hosts[0];
+            if h.connected {
+                let version = h.daemon_version.as_deref().unwrap_or("?");
+                format!(
+                    "{} · v{version} · {} sessions",
+                    h.host_label,
+                    h.sessions.len()
+                )
+            } else {
+                h.status.clone()
+            }
+        } else {
+            format!(
+                "{connected}/{} hosts · {} sessions",
+                hosts.len(),
+                self.host_sessions.len()
+            )
+        };
+        let first = hosts.iter().find(|h| h.connected).or_else(|| hosts.first());
+        self.connected_host = first.map(|h| h.host_label.clone());
+        self.daemon_tx = first.and_then(|h| h.daemon_tx.clone());
+        self.connected_target = first.map(|h| h.target.clone());
+        self.daemon_version = first.and_then(|h| h.daemon_version.clone());
+        self.daemon_binary_hash = first.and_then(|h| h.daemon_binary_hash.clone());
+    }
+
+    pub(crate) fn host_status_snapshots(&self) -> Vec<HostStatusSnapshot> {
+        let mut snapshots: Vec<_> = self
+            .host_connections
+            .values()
+            .map(|h| HostStatusSnapshot {
+                host_label: h.host_label.clone(),
+                status: h.status.clone(),
+                connected: h.connected,
+                session_count: h.sessions.len(),
+                daemon_version: h.daemon_version.clone(),
+            })
+            .collect();
+        snapshots.sort_by(|a, b| a.host_label.cmp(&b.host_label));
+        snapshots
     }
 
     pub(crate) fn bump_revision(&mut self) -> u64 {

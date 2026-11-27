@@ -146,6 +146,7 @@ impl MultibotView {
         self.sync_settings_to_shared(cx);
         if self.is_disk_persistence_enabled(cx) {
             let _ = self.settings.save();
+            self.auto_connect_configured_hosts(cx);
         }
         self.host_input.update(cx, |state, cx| {
             state.set_value("", window, cx);
@@ -171,19 +172,16 @@ impl MultibotView {
 
         let hosts_added = self.settings.merge_hosts(bundle.hosts.clone());
         let merge_stats = merge_zigshel_bundle(&mut self.sidebar_state.workspace_store, &bundle);
-        let live_keys: Vec<_> = self
-            .sessions
-            .iter()
-            .map(|s| self.session_key_for(s))
-            .collect();
+        let live_keys: Vec<_> = self.session_inputs().into_iter().map(|s| s.key).collect();
         self.sidebar_state
             .workspace_store
             .reconcile_live_session_keys(&live_keys);
 
         self.sync_settings_to_shared(cx);
         self.sync_workspace_to_shared(cx);
-        if self.sidebar_state.persist_to_disk {
+        if self.is_disk_persistence_enabled(cx) {
             let _ = self.settings.save();
+            self.auto_connect_configured_hosts(cx);
         }
         self.persist_workspace_store_if_enabled();
 
@@ -200,6 +198,12 @@ impl MultibotView {
     }
 
     pub(crate) fn disconnect_host(&mut self, cx: &mut Context<Self>) {
+        if !self.host_statuses.is_empty() {
+            let host = self.active_session_host().to_string();
+            Self::disconnect_host_on_app(&host, cx);
+            self.sync_from_shared_store(cx);
+            return;
+        }
         if cx.has_global::<crate::state::SharedAppStore>() {
             let store = cx.global_mut::<crate::state::SharedAppStore>();
             store.connection_gen = store.connection_gen.wrapping_add(1);
@@ -298,10 +302,49 @@ impl MultibotView {
                                     this.connect_to_target("localhost".into(), multibot_core::DaemonTarget::LocalBinary(bin), cx);
                                 } else { this.notice = Some("No local multibotd found. Add a remote SSH host below.".into()); cx.notify(); }
                             }))));
+                if self.settings.ssh_hosts.len() > 1 || self.host_statuses.len() > 1 {
+                    hosts = hosts.child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("reconnect-all-hosts")
+                                    .small()
+                                    .label("Reconnect all")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.reconnect_all_hosts(cx)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("disconnect-all-hosts")
+                                    .small()
+                                    .label("Disconnect all")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        Self::disconnect_all_hosts(cx);
+                                        this.sync_from_shared_store(cx);
+                                    })),
+                            ),
+                    );
+                }
                 for (idx, host) in self.settings.ssh_hosts.iter().enumerate() {
                     let host = host.clone();
-                    let active = self.connected_host.as_deref() == Some(host.name.as_str())
-                        && self.daemon_tx.is_some();
+                    let snapshot = self
+                        .host_statuses
+                        .iter()
+                        .find(|s| s.host_label == host.name);
+                    let active = snapshot.is_some_and(|s| s.connected || s.status.starts_with("Connecting to "));
+                    let status = snapshot
+                        .map(|s| {
+                            if s.connected {
+                                format!(
+                                    "Connected · v{} · {} sessions",
+                                    s.daemon_version.as_deref().unwrap_or("?"),
+                                    s.session_count
+                                )
+                            } else {
+                                s.status.clone()
+                            }
+                        })
+                        .unwrap_or_else(|| "Offline".into());
                     hosts = hosts.child(
                         h_flex()
                             .justify_between()
@@ -312,7 +355,7 @@ impl MultibotView {
                                     div()
                                         .text_xs()
                                         .text_color(theme::text_muted())
-                                        .child(host.ssh_target()),
+                                        .child(format!("{} · {status}", host.ssh_target())),
                                 ),
                             )
                             .child(
@@ -321,7 +364,8 @@ impl MultibotView {
                                     .label(if active { "Disconnect" } else { "Connect" })
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         if active {
-                                            this.disconnect_host(cx);
+                                            Self::disconnect_host_on_app(&host.name, cx);
+                                            this.sync_from_shared_store(cx);
                                         } else {
                                             this.connect_to_target(
                                                 host.name.clone(),
