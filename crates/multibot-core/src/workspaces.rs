@@ -690,6 +690,105 @@ impl WorkspaceStore {
         self.save_to(&MultibotSettings::workspaces_path())
     }
 
+    /// Restores imported state when host aliases or legacy agent guesses differ from live keys.
+    pub fn reconcile_live_session_keys(&mut self, live_keys: &[String]) -> usize {
+        let mut by_sid: HashMap<String, Vec<String>> = HashMap::new();
+        for key in self
+            .session_meta
+            .keys()
+            .chain(self.session_titles.keys())
+            .chain(self.inbox_excluded.iter())
+        {
+            let Some((_, _, sid)) = parse_session_key(key) else {
+                continue;
+            };
+            // View history alone must not compete with an imported workspace assignment.
+            let has_metadata = self.session_meta.get(key).is_some_and(|m| {
+                m.workspace_id.is_some() || m.pinned || m.starred_pinned || m.muted
+            }) || self.session_titles.contains_key(key)
+                || self.inbox_excluded.contains(key);
+            if sid.len() >= 8 && has_metadata {
+                let keys = by_sid.entry(sid.to_string()).or_default();
+                if !keys.contains(key) {
+                    keys.push(key.clone());
+                }
+            }
+        }
+        let favorite_sids: HashSet<String> = self
+            .favorites
+            .iter()
+            .filter_map(|key| parse_session_key(key))
+            .filter(|(_, _, sid)| sid.len() >= 8)
+            .map(|(_, _, sid)| sid.to_string())
+            .collect();
+
+        let mut updated = 0;
+        for live_key in live_keys {
+            let Some((_, live_agent, sid)) = parse_session_key(live_key) else {
+                continue;
+            };
+            if sid.len() < 8 {
+                continue;
+            }
+            let mut changed = false;
+            if !self
+                .session_meta
+                .get(live_key)
+                .is_some_and(|m| m.workspace_id.is_some())
+            {
+                let candidates: Vec<_> = by_sid
+                    .get(sid)
+                    .into_iter()
+                    .flatten()
+                    .filter(|key| *key != live_key)
+                    .collect();
+                let same_agent: Vec<_> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|key| {
+                        parse_session_key(key).is_some_and(|(_, agent, _)| agent == live_agent)
+                    })
+                    .collect();
+                let preferred = if same_agent.is_empty() {
+                    &candidates
+                } else {
+                    &same_agent
+                };
+                if let [source] = preferred.as_slice() {
+                    let mut meta = self.session_meta.get(live_key).cloned().unwrap_or_default();
+                    let before = meta.clone();
+                    if let Some(imported) = self.session_meta.get(*source) {
+                        meta.workspace_id = imported
+                            .workspace_id
+                            .clone()
+                            .filter(|id| self.workspace_by_id(id).is_some());
+                        meta.pinned |= imported.pinned;
+                        meta.starred_pinned |= imported.starred_pinned;
+                        meta.muted |= imported.muted;
+                    }
+                    if meta != before {
+                        self.session_meta.insert(live_key.clone(), meta);
+                        changed = true;
+                    }
+                    if self.inbox_excluded.contains(*source) {
+                        changed |= self.inbox_excluded.insert(live_key.clone());
+                    }
+                    if !self.session_titles.contains_key(live_key)
+                        && let Some(title) = self.session_titles.get(*source).cloned()
+                    {
+                        self.session_titles.insert(live_key.clone(), title);
+                        changed = true;
+                    }
+                }
+            }
+            if favorite_sids.contains(sid) {
+                changed |= self.favorites.insert(live_key.clone());
+            }
+            updated += usize::from(changed);
+        }
+        updated
+    }
+
     pub fn ensure_default_workspace(&mut self) -> bool {
         if self.workspaces.iter().any(|w| !w.archived && !w.snoozed) {
             return false;
@@ -3051,6 +3150,126 @@ mod tests {
         );
         assert_eq!(parse_session_key("bad"), None);
         assert_eq!(parse_session_key(":claude:s1"), None);
+    }
+
+    #[test]
+    fn reconcile_live_keys_restores_imported_metadata_and_is_idempotent() {
+        let sid = "c0a80101-1234-4567-89ab-0123456789ab";
+        for host in ["vps0", "remote-1"] {
+            let mut store = WorkspaceStore::new();
+            let ws = store.create_workspace("Work", None).unwrap();
+            let imported = format!("{host}:claude:{sid}");
+            let live = format!("vps hetzner:codex:{sid}");
+            store.session_meta.insert(
+                imported.clone(),
+                SessionMeta {
+                    workspace_id: Some(ws.id.clone()),
+                    pinned: true,
+                    starred_pinned: true,
+                    muted: true,
+                    ..Default::default()
+                },
+            );
+            store.favorites.insert(imported.clone());
+            store.inbox_excluded.insert(imported.clone());
+            store
+                .apply_session_rename(&imported, "Imported title")
+                .unwrap();
+            store.record_session_view(&live, 123);
+
+            assert_eq!(store.reconcile_live_session_keys(&[live.clone()]), 1);
+            let meta = &store.session_meta[&live];
+            assert_eq!(meta.workspace_id.as_deref(), Some(ws.id.as_str()));
+            assert!(meta.pinned && meta.starred_pinned && meta.muted);
+            assert_eq!(meta.last_used_ms, 123);
+            assert!(store.is_favorite(&live));
+            assert!(store.inbox_excluded.contains(&live));
+            assert_eq!(store.effective_title(&live, "fallback"), "Imported title");
+            let before = store.clone();
+            assert_eq!(store.reconcile_live_session_keys(&[live.clone(), live]), 0);
+            assert_eq!(store, before);
+        }
+    }
+
+    #[test]
+    fn reconcile_live_keys_preserves_explicit_workspace_and_title() {
+        let sid = "c0a80101-1234-4567-89ab-0123456789ab";
+        let mut store = WorkspaceStore::new();
+        let ws = store.create_workspace("Work", None).unwrap();
+        let imported = format!("vps0:claude:{sid}");
+        let live = format!("vps hetzner:codex:{sid}");
+        store.assign_session_workspace(&imported, &ws.id);
+        store.session_meta.get_mut(&imported).unwrap().pinned = true;
+        store.assign_session_workspace(&live, DEFAULT_WORKSPACE_ID);
+        store.apply_session_rename(&imported, "Imported").unwrap();
+        store.apply_session_rename(&live, "Keep mine").unwrap();
+        store.favorites.insert(imported);
+        assert_eq!(store.reconcile_live_session_keys(&[live.clone()]), 1);
+        assert_eq!(
+            store.session_meta[&live].workspace_id.as_deref(),
+            Some(DEFAULT_WORKSPACE_ID)
+        );
+        assert!(!store.session_meta[&live].pinned);
+        assert_eq!(store.effective_title(&live, "fallback"), "Keep mine");
+        assert!(store.is_favorite(&live));
+        assert_eq!(store.reconcile_live_session_keys(&[live]), 0);
+    }
+
+    #[test]
+    fn reconcile_live_keys_ignores_short_ids_and_missing_workspaces() {
+        let mut store = WorkspaceStore::new();
+        store.assign_session_workspace("old:claude:short", DEFAULT_WORKSPACE_ID);
+        store.favorites.insert("old:claude:short".into());
+        store.session_meta.insert(
+            "old:claude:long-enough-id".into(),
+            SessionMeta {
+                workspace_id: Some("deleted".into()),
+                ..Default::default()
+            },
+        );
+        let before = store.clone();
+        assert_eq!(
+            store.reconcile_live_session_keys(&[
+                "live:codex:short".into(),
+                "live:codex:long-enough-id".into(),
+                "bad".into(),
+            ]),
+            0
+        );
+        assert_eq!(store, before);
+    }
+
+    #[test]
+    fn reconcile_live_keys_prefers_agent_and_rejects_ambiguous_sources() {
+        let mut store = WorkspaceStore::new();
+        let ws = store.create_workspace("Work", None).unwrap();
+        store.assign_session_workspace("old:claude:long-enough-id", DEFAULT_WORKSPACE_ID);
+        store.assign_session_workspace("old:codex:long-enough-id", &ws.id);
+        let live = "live:codex:long-enough-id".to_string();
+        assert_eq!(store.reconcile_live_session_keys(&[live.clone()]), 1);
+        assert_eq!(
+            store.session_meta[&live].workspace_id.as_deref(),
+            Some(ws.id.as_str())
+        );
+        let before = store.clone();
+        assert_eq!(
+            store.reconcile_live_session_keys(&["live:pi:long-enough-id".into()]),
+            0
+        );
+        assert_eq!(store, before);
+    }
+
+    #[test]
+    fn reconcile_live_keys_supports_favorites_without_metadata() {
+        let mut store = WorkspaceStore::new();
+        store.favorites.insert("old:claude:long-enough-id".into());
+        let live = "live:codex:long-enough-id".to_string();
+        assert_eq!(
+            store.reconcile_live_session_keys(&[live.clone(), live.clone()]),
+            1
+        );
+        assert!(store.is_favorite(&live));
+        assert_eq!(store.reconcile_live_session_keys(&[live]), 0);
     }
 
     #[test]

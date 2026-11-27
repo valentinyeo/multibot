@@ -171,6 +171,14 @@ impl MultibotView {
 
         let hosts_added = self.settings.merge_hosts(bundle.hosts.clone());
         let merge_stats = merge_zigshel_bundle(&mut self.sidebar_state.workspace_store, &bundle);
+        let live_keys: Vec<_> = self
+            .sessions
+            .iter()
+            .map(|s| self.session_key_for(s))
+            .collect();
+        self.sidebar_state
+            .workspace_store
+            .reconcile_live_session_keys(&live_keys);
 
         self.sync_settings_to_shared(cx);
         self.sync_workspace_to_shared(cx);
