@@ -1,5 +1,5 @@
 use crate::settings::MultibotSettings;
-use multibot_proto::AgentKind;
+use multibot_proto::{AgentKind, SessionOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -52,6 +52,8 @@ pub struct OutboxEntry {
     pub session_key: String,
     pub text: String,
     pub created_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<SessionOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +100,16 @@ impl ChatOutbox {
         text: impl Into<String>,
         created_at_ms: i64,
     ) -> Result<OutboxEntry, OutboxError> {
+        self.enqueue_with_options(session_key, text, created_at_ms, None)
+    }
+
+    pub fn enqueue_with_options(
+        &mut self,
+        session_key: impl Into<String>,
+        text: impl Into<String>,
+        created_at_ms: i64,
+        options: Option<SessionOptions>,
+    ) -> Result<OutboxEntry, OutboxError> {
         let session_key = session_key.into();
         let text = text.into();
         if session_key.trim().is_empty() {
@@ -124,6 +136,7 @@ impl ChatOutbox {
             session_key,
             text,
             created_at_ms,
+            options,
         };
         self.entries.push(entry.clone());
         Ok(entry)
@@ -378,6 +391,23 @@ mod tests {
     }
 
     #[test]
+    fn composer_options_survive_outbox_serialization_and_legacy_entries() {
+        let mut outbox = ChatOutbox::default();
+        let options = SessionOptions {
+            model: Some("sonnet".into()),
+            ..Default::default()
+        };
+        outbox
+            .enqueue_with_options("session", "draft", 1, Some(options.clone()))
+            .unwrap();
+        let wire = serde_json::to_string(&outbox).unwrap();
+        let restored: ChatOutbox = serde_json::from_str(&wire).unwrap();
+        assert_eq!(restored.entries[0].options, Some(options));
+        let legacy: ChatOutbox = serde_json::from_str(r#"{"entries":[{"id":"old","session_key":"session","text":"draft","created_at_ms":1}]}"#).unwrap();
+        assert_eq!(legacy.entries[0].options, None);
+    }
+
+    #[test]
     fn fifo_per_session_ordering_and_isolation() {
         let mut outbox = ChatOutbox::default();
         let s1 = ChatOutbox::session_key("vps", AgentKind::Claude, "s1");
@@ -558,6 +588,7 @@ mod tests {
             session_key: "s1".into(),
             text: "hello".into(),
             created_at_ms: 1,
+            options: None,
         };
         assert_eq!(
             outbox.enqueue_entry(empty_id),
@@ -570,12 +601,14 @@ mod tests {
             session_key: "s1".into(),
             text: "first".into(),
             created_at_ms: 1,
+            options: None,
         };
         let dup = OutboxEntry {
             id: "dup-1".into(),
             session_key: "s1".into(),
             text: "second".into(),
             created_at_ms: 2,
+            options: None,
         };
         assert!(outbox.enqueue_entry(first).is_ok());
         assert_eq!(
@@ -597,6 +630,7 @@ mod tests {
                 session_key: "s1".into(),
                 text: "pre-existing".into(),
                 created_at_ms: 7777,
+                options: None,
             })
             .unwrap();
         let generated = outbox.enqueue("s1", "new msg", 7777).unwrap();
@@ -613,30 +647,35 @@ mod tests {
                     session_key: "s1".into(),
                     text: "blank id".into(),
                     created_at_ms: 1,
+                    options: None,
                 },
                 OutboxEntry {
                     id: "  \t ".into(),
                     session_key: "s1".into(),
                     text: "ws id".into(),
                     created_at_ms: 2,
+                    options: None,
                 },
                 OutboxEntry {
                     id: "id-a".into(),
                     session_key: "s1".into(),
                     text: "first-a".into(),
                     created_at_ms: 3,
+                    options: None,
                 },
                 OutboxEntry {
                     id: "id-a".into(),
                     session_key: "s1".into(),
                     text: "duplicate-a".into(),
                     created_at_ms: 4,
+                    options: None,
                 },
                 OutboxEntry {
                     id: "id-b".into(),
                     session_key: "s1".into(),
                     text: "first-b".into(),
                     created_at_ms: 5,
+                    options: None,
                 },
             ],
         })

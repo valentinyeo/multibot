@@ -7,7 +7,10 @@ use crate::providers::{
     sha256_hex, strip_base64_cow, summarize_session_by_agent, system_time_ms,
 };
 use anyhow::{Context, Result, anyhow};
-use multibot_proto::{AgentKind, ServerEvent, SessionSummary, ToolStatus};
+use multibot_proto::{
+    AgentKind, EffortLevel, PermissionLevel, ServerEvent, SessionOptions, SessionSummary,
+    ToolStatus,
+};
 use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
@@ -37,6 +40,7 @@ struct QueuedPrompt {
     agent: AgentKind,
     cwd: Option<String>,
     text: String,
+    options: Option<SessionOptions>,
 }
 
 #[derive(Default)]
@@ -111,11 +115,12 @@ impl ProcessManager {
         agent: AgentKind,
         cwd: Option<&str>,
         text: &str,
+        options: Option<SessionOptions>,
     ) -> Result<String> {
         if text.trim().is_empty() {
             return Err(anyhow!("prompt text is empty"));
         }
-        self.dispatch_prompt_internal(session_id, agent, cwd, text, false)
+        self.dispatch_prompt_internal(session_id, agent, cwd, text, false, options.as_ref())
     }
 
     fn dispatch_prompt_internal(
@@ -125,7 +130,9 @@ impl ProcessManager {
         cwd: Option<&str>,
         text: &str,
         is_new_session: bool,
+        options: Option<&SessionOptions>,
     ) -> Result<String> {
+        validate_options(agent, options)?;
         // Fast path: persistent hosted `agy` process already running with open stdin.
         if agent == AgentKind::Antigravity {
             let existing_tx = {
@@ -174,7 +181,7 @@ impl ProcessManager {
 
         match agent {
             AgentKind::Claude => {
-                let args = build_claude_args(session_id, text, is_new_session)?;
+                let args = build_claude_args(session_id, text, is_new_session, options)?;
                 let mut cmd = Command::new(&bin_path);
                 cmd.args(&args)
                     .stdin(Stdio::null())
@@ -199,7 +206,7 @@ impl ProcessManager {
                 Ok(format!("dispatched claude (pid {pid})"))
             }
             AgentKind::Codex => {
-                let args = build_codex_args(session_id, text, is_new_session)?;
+                let args = build_codex_args(session_id, text, is_new_session, options)?;
                 let mut cmd = Command::new(&bin_path);
                 cmd.args(&args)
                     .stdin(Stdio::null())
@@ -461,6 +468,7 @@ impl ProcessManager {
                 qp.cwd.as_deref(),
                 &qp.text,
                 false,
+                qp.options.as_ref(),
             ) {
                 Ok(detail) => {
                     let _ = self.out_tx.send(ServerEvent::PromptStatus {
@@ -550,6 +558,7 @@ impl ProcessManager {
         agent: AgentKind,
         cwd: Option<String>,
         text: String,
+        options: Option<SessionOptions>,
     ) {
         if text.trim().is_empty() {
             let _ = self.out_tx.send(ServerEvent::PromptStatus {
@@ -576,6 +585,7 @@ impl ProcessManager {
                         agent,
                         cwd: cwd.clone(),
                         text: text.clone(),
+                        options: options.clone(),
                     });
                     Some(Ok(()))
                 }
@@ -602,9 +612,14 @@ impl ProcessManager {
                 });
             }
             None => {
-                match self
-                    .dispatch_prompt_internal(&session_id, agent, cwd.as_deref(), &text, false)
-                {
+                match self.dispatch_prompt_internal(
+                    &session_id,
+                    agent,
+                    cwd.as_deref(),
+                    &text,
+                    false,
+                    options.as_ref(),
+                ) {
                     Ok(detail) => {
                         let _ = self.out_tx.send(ServerEvent::PromptStatus {
                             session_id,
@@ -667,7 +682,15 @@ impl ProcessManager {
         cwd: String,
         title: Option<String>,
         initial_prompt: Option<String>,
+        options: Option<SessionOptions>,
     ) {
+        if let Err(err) = validate_options(agent, options.as_ref()) {
+            let _ = self.out_tx.send(ServerEvent::Error {
+                code: "invalid_options".into(),
+                message: err.to_string(),
+            });
+            return;
+        }
         if let Err(msg) = validate_cwd(&cwd) {
             let _ = self.out_tx.send(ServerEvent::Error {
                 code: "invalid_cwd".to_string(),
@@ -745,9 +768,14 @@ impl ProcessManager {
         if let Some(prompt) = initial_prompt
             && !prompt.trim().is_empty()
         {
-            match self
-                .dispatch_prompt_internal(&session_id, agent, Some(&cwd), &prompt, true)
-            {
+            match self.dispatch_prompt_internal(
+                &session_id,
+                agent,
+                Some(&cwd),
+                &prompt,
+                true,
+                options.as_ref(),
+            ) {
                 Ok(_) => {
                     working = true;
                 }
@@ -974,7 +1002,12 @@ impl ProcessManager {
     }
 }
 
-fn build_claude_args(session_id: &str, text: &str, is_new_session: bool) -> Result<Vec<String>> {
+fn build_claude_args(
+    session_id: &str,
+    text: &str,
+    is_new_session: bool,
+    options: Option<&SessionOptions>,
+) -> Result<Vec<String>> {
     if session_id.trim().is_empty() || session_id.starts_with('-') {
         return Err(anyhow!("invalid session_id for claude CLI: {session_id:?}"));
     }
@@ -983,33 +1016,107 @@ fn build_claude_args(session_id: &str, text: &str, is_new_session: bool) -> Resu
     } else {
         "--resume"
     };
-    Ok(vec![
+    let mut args = vec![
         flag.into(),
         session_id.into(),
         "--print".into(),
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
-        "--".into(),
-        text.into(),
-    ])
+    ];
+    if let Some(options) = options {
+        if let Some(model) = &options.model {
+            args.extend(["--model".into(), model.clone()]);
+        }
+        if let Some(effort) = options.effort {
+            args.extend(["--effort".into(), effort_value(effort, false).into()]);
+        }
+        if let Some(permission) = options.permission {
+            let mode = match permission {
+                PermissionLevel::Ask => "default",
+                PermissionLevel::Auto => "acceptEdits",
+                PermissionLevel::FullAccess => "bypassPermissions",
+            };
+            args.extend(["--permission-mode".into(), mode.into()]);
+        }
+    }
+    args.extend(["--".into(), text.into()]);
+    Ok(args)
 }
 
-fn build_codex_args(session_id: &str, text: &str, is_new_session: bool) -> Result<Vec<String>> {
-    if is_new_session {
-        Ok(vec!["exec".into(), "--".into(), text.into()])
-    } else {
+fn build_codex_args(
+    session_id: &str,
+    text: &str,
+    is_new_session: bool,
+    options: Option<&SessionOptions>,
+) -> Result<Vec<String>> {
+    let mut args = vec!["exec".into()];
+    if !is_new_session {
         if session_id.trim().is_empty() || session_id.starts_with('-') {
             return Err(anyhow!("invalid session_id for codex CLI: {session_id:?}"));
         }
-        Ok(vec![
-            "exec".into(),
-            "resume".into(),
-            session_id.into(),
-            "--".into(),
-            text.into(),
-        ])
+        args.extend(["resume".into(), session_id.into()]);
     }
+    if let Some(options) = options {
+        if let Some(model) = &options.model {
+            args.extend(["--model".into(), model.clone()]);
+        }
+        if let Some(effort) = options.effort {
+            args.extend([
+                "-c".into(),
+                format!("model_reasoning_effort=\"{}\"", effort_value(effort, true)),
+            ]);
+        }
+        if let Some(permission) = options.permission {
+            // Config works for both exec and exec resume; resume has no --sandbox flag.
+            let (sandbox, approval) = match permission {
+                PermissionLevel::Ask => ("read-only", "on-request"),
+                PermissionLevel::Auto => ("workspace-write", "on-request"),
+                PermissionLevel::FullAccess => ("danger-full-access", "never"),
+            };
+            args.extend([
+                "-c".into(),
+                format!("sandbox_mode=\"{sandbox}\""),
+                "-c".into(),
+                format!("approval_policy=\"{approval}\""),
+            ]);
+        }
+    }
+    args.extend(["--".into(), text.into()]);
+    Ok(args)
+}
+
+fn effort_value(effort: EffortLevel, codex: bool) -> &'static str {
+    match effort {
+        EffortLevel::Low => "low",
+        EffortLevel::Medium => "medium",
+        EffortLevel::High => "high",
+        EffortLevel::Max if codex => "xhigh",
+        EffortLevel::Max => "max",
+    }
+}
+
+fn validate_options(agent: AgentKind, options: Option<&SessionOptions>) -> Result<()> {
+    let Some(options) = options.filter(|o| !o.is_default()) else {
+        return Ok(());
+    };
+    if agent == AgentKind::Antigravity {
+        return Err(anyhow!(
+            "Antigravity does not support composer overrides; use agent defaults"
+        ));
+    }
+    if options.model.as_ref().is_some_and(|m| {
+        m.trim().is_empty()
+            || m.starts_with('-')
+            || m.len() > 128
+            || m.chars().any(char::is_control)
+    }) {
+        return Err(anyhow!("invalid model name"));
+    }
+    if agent == AgentKind::Claude && options.effort == Some(EffortLevel::Max) {
+        return Err(anyhow!("Max effort is only available for Codex"));
+    }
+    Ok(())
 }
 
 pub fn validate_cwd(cwd: &str) -> Result<(), String> {
@@ -1268,6 +1375,102 @@ mod tests {
         dir
     }
 
+    #[test]
+    fn composer_options_map_to_provider_flags_before_prompt_separator() {
+        let options = SessionOptions {
+            model: Some("opus".into()),
+            effort: Some(EffortLevel::High),
+            permission: Some(PermissionLevel::Auto),
+        };
+        for is_new in [true, false] {
+            let args =
+                build_claude_args("session", "--unsafe-looking prompt", is_new, Some(&options))
+                    .unwrap();
+            assert!(args.windows(2).any(|a| a == ["--model", "opus"]));
+            assert!(args.windows(2).any(|a| a == ["--effort", "high"]));
+            assert!(
+                args.windows(2)
+                    .any(|a| a == ["--permission-mode", "acceptEdits"])
+            );
+            assert_eq!(&args[args.len() - 2..], ["--", "--unsafe-looking prompt"]);
+            for (permission, sandbox, approval) in [
+                (PermissionLevel::Ask, "read-only", "on-request"),
+                (PermissionLevel::Auto, "workspace-write", "on-request"),
+                (PermissionLevel::FullAccess, "danger-full-access", "never"),
+            ] {
+                let options = SessionOptions {
+                    model: Some("gpt-5.3-codex".into()),
+                    effort: Some(EffortLevel::Max),
+                    permission: Some(permission),
+                };
+                let args = build_codex_args("session", "hello", is_new, Some(&options)).unwrap();
+                assert!(args.windows(2).any(|a| a == ["--model", "gpt-5.3-codex"]));
+                assert!(args.contains(&"model_reasoning_effort=\"xhigh\"".to_string()));
+                assert!(args.contains(&format!("sandbox_mode=\"{sandbox}\"")));
+                assert!(args.contains(&format!("approval_policy=\"{approval}\"")));
+                assert_eq!(&args[args.len() - 2..], ["--", "hello"]);
+            }
+        }
+        for (permission, mode) in [
+            (PermissionLevel::Ask, "default"),
+            (PermissionLevel::FullAccess, "bypassPermissions"),
+        ] {
+            let options = SessionOptions {
+                permission: Some(permission),
+                ..Default::default()
+            };
+            let args = build_claude_args("session", "hello", false, Some(&options)).unwrap();
+            assert!(args.windows(2).any(|a| a == ["--permission-mode", mode]));
+        }
+    }
+
+    #[tokio::test]
+    async fn composer_unsupported_options_fail_without_spawning_or_writing_metadata() {
+        let home = temp_home("unsupported-options");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mgr = ProcessManager::new(home.clone(), tx);
+        let options = SessionOptions {
+            model: Some("opus".into()),
+            ..Default::default()
+        };
+        assert!(
+            mgr.send_prompt(
+                "s1",
+                AgentKind::Antigravity,
+                None,
+                "hello",
+                Some(options.clone())
+            )
+            .await
+            .is_err()
+        );
+        mgr.spawn_session(
+            AgentKind::Antigravity,
+            home.to_string_lossy().into(),
+            None,
+            Some("hello".into()),
+            Some(options),
+        )
+        .await;
+        assert!(
+            matches!(rx.recv().await, Some(ServerEvent::Error { code, .. }) if code == "invalid_options")
+        );
+        assert!(MetadataStore::load(&home).sessions.is_empty());
+        assert!(mgr.active_session_ids().is_empty());
+        for model in ["", "--help", "bad\nmodel"] {
+            let options = SessionOptions {
+                model: Some(model.into()),
+                ..Default::default()
+            };
+            assert!(
+                mgr.send_prompt("s1", AgentKind::Claude, None, "hello", Some(options))
+                    .await
+                    .is_err()
+            );
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
     #[tokio::test]
     async fn rename_archive_unarchive_preserves_jsonl_and_validates_title() {
         let home = temp_home("lifecycle");
@@ -1357,8 +1560,14 @@ mod tests {
         let mgr = ProcessManager::new(home.clone(), tx);
 
         // Reject '..' and nonexistent dir
-        mgr.spawn_session(AgentKind::Antigravity, "/tmp/../etc".into(), None, None)
-            .await;
+        mgr.spawn_session(
+            AgentKind::Antigravity,
+            "/tmp/../etc".into(),
+            None,
+            None,
+            None,
+        )
+        .await;
         match rx.recv().await.unwrap() {
             ServerEvent::Error { code, .. } => assert_eq!(code, "invalid_cwd"),
             other => panic!("expected invalid_cwd, got {other:?}"),
@@ -1367,6 +1576,7 @@ mod tests {
         mgr.spawn_session(
             AgentKind::Antigravity,
             home.join("does-not-exist").to_string_lossy().into(),
+            None,
             None,
             None,
         )
@@ -1381,6 +1591,7 @@ mod tests {
             AgentKind::Antigravity,
             workdir.to_string_lossy().into(),
             Some("My Agy Chat".into()),
+            None,
             None,
         )
         .await;
@@ -1445,6 +1656,7 @@ mod tests {
             AgentKind::Claude,
             None,
             "first queued".into(),
+            None,
         )
         .await;
         let q1_id = match rx.recv().await.unwrap() {
@@ -1541,25 +1753,25 @@ mod tests {
 
     #[test]
     fn cli_arg_builders_insert_double_dash_and_reject_leading_dash_session_id() {
-        let c_new = build_claude_args("sess-1", "--help", true).unwrap();
+        let c_new = build_claude_args("sess-1", "--help", true, None).unwrap();
         assert_eq!(c_new[c_new.len() - 2], "--");
         assert_eq!(c_new[c_new.len() - 1], "--help");
 
-        let c_res = build_claude_args("sess-1", "- bullet item", false).unwrap();
+        let c_res = build_claude_args("sess-1", "- bullet item", false, None).unwrap();
         assert_eq!(c_res[0], "--resume");
         assert_eq!(c_res[c_res.len() - 2], "--");
         assert_eq!(c_res[c_res.len() - 1], "- bullet item");
 
-        assert!(build_claude_args("-bad", "hello", false).is_err());
-        assert!(build_claude_args("", "hello", true).is_err());
+        assert!(build_claude_args("-bad", "hello", false, None).is_err());
+        assert!(build_claude_args("", "hello", true, None).is_err());
 
-        let x_new = build_codex_args("ignored", "- fix tests", true).unwrap();
+        let x_new = build_codex_args("ignored", "- fix tests", true, None).unwrap();
         assert_eq!(x_new, vec!["exec", "--", "- fix tests"]);
 
-        let x_res = build_codex_args("codex-1", "--version", false).unwrap();
+        let x_res = build_codex_args("codex-1", "--version", false, None).unwrap();
         assert_eq!(x_res, vec!["exec", "resume", "codex-1", "--", "--version"]);
 
-        assert!(build_codex_args("--evil", "hello", false).is_err());
+        assert!(build_codex_args("--evil", "hello", false, None).is_err());
     }
 
     #[tokio::test]
@@ -1577,6 +1789,7 @@ mod tests {
             workdir.to_string_lossy().into(),
             Some("ShouldRollback".into()),
             Some("hello".into()),
+            None,
         )
         .await;
 
@@ -1624,12 +1837,14 @@ mod tests {
                 agent: AgentKind::Claude,
                 cwd: Some(home.join("does-not-exist").to_string_lossy().into()),
                 text: "will fail".into(),
+                options: None,
             });
             q.push_back(QueuedPrompt {
                 message_id: "q-good".into(),
                 agent: AgentKind::Claude,
                 cwd: Some(valid_cwd.to_string_lossy().into()),
                 text: "will succeed".into(),
+                options: None,
             });
         }
 
@@ -1688,7 +1903,7 @@ mod tests {
             );
         }
 
-        mgr.send_prompt(sid, AgentKind::Antigravity, None, "single message")
+        mgr.send_prompt(sid, AgentKind::Antigravity, None, "single message", None)
             .await
             .unwrap();
 

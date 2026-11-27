@@ -2552,6 +2552,11 @@ impl MultibotView {
                     self.sync_sessions_to_shared(cx);
                     let title = session.title.clone();
                     let agent_label = session.agent.label();
+                    if let Some(options) = self.chat_state.pending_spawn_options.take() {
+                        let key = self.session_key_for(&session);
+                        self.chat_state.composer_options.insert(key, options);
+                    }
+                    self.pending_spawn_open = false;
                     self.open_session_with_tracking(session, false, cx);
                     self.notice = Some(format!("Started {agent_label} session: {title}"));
                 }
@@ -3115,6 +3120,10 @@ impl MultibotView {
             ServerEvent::SessionSpawned { session } => {
                 if self.pending_spawn_open || self.selected_session.is_none() {
                     self.pending_spawn_open = false;
+                    if let Some(options) = self.chat_state.pending_spawn_options.take() {
+                        let key = self.session_key_for(&session);
+                        self.chat_state.composer_options.insert(key, options);
+                    }
                     self.open_session_with_tracking(session, false, cx);
                 }
             }
@@ -3363,6 +3372,7 @@ impl MultibotView {
         msg_id: String,
         text: String,
     ) {
+        let options = self.composer_options_for(session);
         if let Some(ref tx) = self.daemon_tx {
             let req = if session.working && self.settings.queue_while_working {
                 ClientRequest::SteerSession {
@@ -3370,6 +3380,7 @@ impl MultibotView {
                     agent: session.agent,
                     cwd: session.cwd.clone(),
                     text: text.clone(),
+                    options: options.clone(),
                 }
             } else {
                 ClientRequest::SendPrompt {
@@ -3377,6 +3388,7 @@ impl MultibotView {
                     agent: session.agent,
                     cwd: session.cwd.clone(),
                     text: text.clone(),
+                    options: options.clone(),
                 }
             };
             if tx.send(req).is_ok() {
@@ -3392,7 +3404,12 @@ impl MultibotView {
             &session.id,
         );
         let enqueue_res = if let Ok(mut shared) = self.shared_chat_outbox.lock() {
-            let res = shared.outbox.enqueue(&outbox_key, &text, now_unix_ms());
+            let res = shared.outbox.enqueue_with_options(
+                &outbox_key,
+                &text,
+                now_unix_ms(),
+                options.clone(),
+            );
             if res.is_ok() {
                 if shared.persist_to_disk || self.persist_outbox_to_disk {
                     let _ = shared.outbox.save();
@@ -3401,7 +3418,12 @@ impl MultibotView {
             }
             res
         } else {
-            let res = self.chat_outbox.enqueue(&outbox_key, &text, now_unix_ms());
+            let res = self.chat_outbox.enqueue_with_options(
+                &outbox_key,
+                &text,
+                now_unix_ms(),
+                options.clone(),
+            );
             if res.is_ok() && self.persist_outbox_to_disk {
                 let _ = self.chat_outbox.save();
             }
@@ -3478,6 +3500,7 @@ impl MultibotView {
                     agent,
                     cwd,
                     text: entry.text.clone(),
+                    options: entry.options.clone(),
                 }
             } else {
                 ClientRequest::SendPrompt {
@@ -3485,6 +3508,7 @@ impl MultibotView {
                     agent,
                     cwd,
                     text: entry.text.clone(),
+                    options: entry.options.clone(),
                 }
             };
             if tx.send(req).is_ok() {
@@ -3549,6 +3573,7 @@ impl MultibotView {
                 agent: sess.agent,
                 cwd: sess.cwd.clone(),
                 text,
+                options: self.composer_options_for(sess),
             })
             .is_ok();
         cx.notify();
@@ -3568,16 +3593,19 @@ impl MultibotView {
             cx.notify();
             return false;
         };
+        let options = self.spawn_composer_options(agent);
         let ok = tx
             .send(ClientRequest::SpawnSession {
                 agent,
                 cwd,
                 title,
                 initial_prompt,
+                options: options.clone(),
             })
             .is_ok();
         if ok {
             self.pending_spawn_open = true;
+            self.chat_state.pending_spawn_options = options;
             self.notice = Some(format!("Starting new {} session...", agent.label()));
         }
         cx.notify();
@@ -5444,11 +5472,12 @@ mod tests {
             window.render_frame(cx);
             window.click("attach-file-btn", cx);
             window.render_frame(cx);
-            for id in ["composer-options", "composer-model", "composer-effort", "composer-permissions"] {
-                assert!(window.try_find(id).is_some());
+            for id in ["composer-options", "composer-model-1", "composer-effort-3", "composer-permission-2"] {
+                assert!(window.try_find(id).is_some(), "Missing {id}");
             }
-            window.click("composer-effort", cx);
+            window.click("composer-effort-3", cx);
             window.render_frame(cx);
+            assert_eq!(window.find("composer-effort-3").checked(), Some(true));
             assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "Unsent draft");
             window.click("send-prompt", cx);
             window.render_frame(cx);
@@ -5457,9 +5486,18 @@ mod tests {
             view.update(cx, |v, cx| v.prompt_input.update(cx, |input, cx| input.set_value("", window, cx)));
             window.click("attach-file-btn", cx);
             window.render_frame(cx);
-            window.click("composer-model", cx);
+            assert!(window.try_find("composer-options").is_none());
+            window.click("attach-file-btn", cx);
             window.render_frame(cx);
-            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "/model ");
+            window.click("composer-model-1", cx);
+            window.render_frame(cx);
+            assert_eq!(window.find("composer-model-1").checked(), Some(true));
+            assert_eq!(window.find("composer-effort-3").checked(), Some(true));
+            assert!(view.read(cx).prompt_input.read(cx).value().is_empty());
+            let v = view.read(cx);
+            let options = v.composer_options_for(v.selected_session.as_ref().unwrap()).unwrap();
+            assert_eq!(options.model.as_deref(), Some("opus"));
+            assert_eq!(options.effort, Some(multibot_proto::EffortLevel::High));
         }).unwrap();
     }
 

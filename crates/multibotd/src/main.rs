@@ -219,8 +219,9 @@ async fn async_main(
                 agent,
                 cwd,
                 text,
+                options,
             } => match process_mgr
-                .send_prompt(&session_id, agent, cwd.as_deref(), &text)
+                .send_prompt(&session_id, agent, cwd.as_deref(), &text, options)
                 .await
             {
                 Ok(detail) => {
@@ -241,9 +242,10 @@ async fn async_main(
                 agent,
                 cwd,
                 text,
+                options,
             } => {
                 process_mgr
-                    .steer_session(session_id, agent, cwd, text)
+                    .steer_session(session_id, agent, cwd, text, options)
                     .await;
             }
             ClientRequest::CancelQueuedPrompt {
@@ -257,9 +259,10 @@ async fn async_main(
                 cwd,
                 title,
                 initial_prompt,
+                options,
             } => {
                 process_mgr
-                    .spawn_session(agent, cwd, title, initial_prompt)
+                    .spawn_session(agent, cwd, title, initial_prompt, options)
                     .await;
             }
             ClientRequest::RenameSession {
