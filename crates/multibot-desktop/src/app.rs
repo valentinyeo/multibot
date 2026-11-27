@@ -6552,6 +6552,21 @@ mod tests {
             assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { ref session_id, ref text, .. }) if session_id == "saved" && text == "Continue saved chat"));
             assert!(!view.read(cx).selected_session.as_ref().unwrap().archived);
 
+            view.update(cx, |v, cx| {
+                let session = v.selected_session.clone().unwrap();
+                let key = v.session_key_for(&session);
+                v.dissolve_session_key(&key, cx);
+                let (host, session) = v.host_for_session_key(&key).unwrap();
+                v.open_session_on_host(host, session, true, cx);
+                while rx.try_recv().is_ok() {}
+                v.chat_state.failed_sends.insert("retry-saved".into(), FailedSend {
+                    message_id: "retry-saved".into(), text: "Retry saved chat".into(), reason: "offline".into(),
+                });
+                assert!(v.retry_failed_send("retry-saved", cx));
+                assert!(!v.selected_session.as_ref().unwrap().archived);
+                assert!(matches!(rx.try_recv(), Ok(ClientRequest::UnarchiveSession { ref session_id }) if session_id == "saved"));
+                assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { ref session_id, ref text, .. }) if session_id == "saved" && text == "Retry saved chat"));
+            });
         }).unwrap();
     }
 

@@ -491,7 +491,8 @@ impl WatchManager {
                                 }
                                 let summary =
                                     summarize_session_by_agent(agent, &path, mtime_ms, &ctx);
-                                if matches!(agent, AgentKind::Pi | AgentKind::Cursor) && summary.archived {
+                                if matches!(agent, AgentKind::Pi | AgentKind::Cursor)
+                                    && summary.archived && summary.archive_kill_process {
                                     continue;
                                 }
                                 let _ = out_c.send(ServerEvent::SessionUpdated { session: summary });

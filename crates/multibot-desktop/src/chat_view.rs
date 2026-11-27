@@ -2067,6 +2067,17 @@ impl MultibotView {
         let Some(session) = self.selected_session.clone() else {
             return false;
         };
+        let key = self.session_key_for(&session);
+        if (session.archived
+            || self
+                .sidebar_state
+                .workspace_store
+                .session_lifecycle(&key, &session, now_unix_ms())
+                == multibot_core::workspaces::SessionLifecycle::Dissolved)
+            && !self.reactivate_session_key(&key, cx)
+        {
+            return false;
+        }
         let Some(tx) = self.active_session_tx() else {
             return false;
         };
@@ -2081,6 +2092,11 @@ impl MultibotView {
             .is_ok();
         if sent {
             self.chat_state.failed_sends.remove(msg_id);
+            self.sidebar_state
+                .workspace_store
+                .record_session_input(&key, now_unix_ms());
+            self.persist_workspace_store_if_enabled();
+            self.sync_workspace_to_shared(cx);
         }
         cx.notify();
         sent
