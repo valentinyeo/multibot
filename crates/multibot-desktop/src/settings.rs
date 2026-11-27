@@ -1,10 +1,11 @@
 use crate::app::MultibotView;
-use crate::theme::{self, RADIUS_BUBBLE, RADIUS_CHIP, RADIUS_ROW};
+use crate::theme::{self, RADIUS_BUBBLE};
+use gpui_kit::base::FocusTrapElement;
 use gpui_kit::{
     Context, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, TestSupportExt, Window,
     component::{
-        Sizable,
+        Selectable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         input::Input,
@@ -17,6 +18,61 @@ use gpui_kit::{
 use multibot_core::zigshel_import::{import_zigshel_bundle_readonly, merge_zigshel_bundle};
 use multibot_core::{MultibotSettings, SshHostConfig};
 use multibot_gpu::GpuPreference;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SettingsTab {
+    #[default]
+    General,
+    Hosts,
+    Workspaces,
+    Gpu,
+    Shortcuts,
+    Updates,
+}
+
+impl SettingsTab {
+    const ALL: [Self; 6] = [
+        Self::General,
+        Self::Hosts,
+        Self::Workspaces,
+        Self::Gpu,
+        Self::Shortcuts,
+        Self::Updates,
+    ];
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::General => "settings-tab-general",
+            Self::Hosts => "settings-tab-hosts",
+            Self::Workspaces => "settings-tab-workspaces",
+            Self::Gpu => "settings-tab-gpu",
+            Self::Shortcuts => "settings-tab-shortcuts",
+            Self::Updates => "settings-tab-updates",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Hosts => "Hosts",
+            Self::Workspaces => "Workspaces",
+            Self::Gpu => "GPU & Performance",
+            Self::Shortcuts => "Shortcuts",
+            Self::Updates => "Updates",
+        }
+    }
+
+    fn subtitle(self) -> &'static str {
+        match self {
+            Self::General => "Composer preferences and queued message delivery.",
+            Self::Hosts => "Connect locally or over SSH. Your legacy app stays untouched.",
+            Self::Workspaces => "Organize sessions and switch your workspace.",
+            Self::Gpu => "Keep rendering efficient. Auto never selects NVIDIA.",
+            Self::Shortcuts => "The complete Multibot keyboard reference.",
+            Self::Updates => "Windows releases arrive here automatically.",
+        }
+    }
+}
 
 impl MultibotView {
     pub(crate) fn active_gpu_summary(&self) -> (String, bool) {
@@ -135,6 +191,28 @@ impl MultibotView {
         cx.notify();
     }
 
+    pub(crate) fn disconnect_host(&mut self, cx: &mut Context<Self>) {
+        if cx.has_global::<crate::state::SharedAppStore>() {
+            let store = cx.global_mut::<crate::state::SharedAppStore>();
+            store.connection_gen = store.connection_gen.wrapping_add(1);
+            store.connection_shutdown_tx = None;
+            store.connected_target = None;
+            store.connected_host = None;
+            store.daemon_tx = None;
+            store.daemon_version = None;
+            store.daemon_binary_hash = None;
+            store.sessions.clear();
+            store.connection_status = "Disconnected".into();
+            store.bump_revision();
+            self.sync_from_shared_store(cx);
+        } else {
+            self.daemon_tx = None;
+            self.connected_host = None;
+            self.connection_status = "Disconnected".into();
+        }
+        cx.notify();
+    }
+
     pub(crate) fn render_settings_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut discovered_col = v_flex().gap_2();
 
@@ -176,196 +254,391 @@ impl MultibotView {
                             cx,
                         );
                     }));
-                discovered_col = discovered_col.child(if is_selected { btn.primary() } else { btn });
+                discovered_col = discovered_col.child(btn.selected(is_selected));
             }
         }
 
-        v_flex()
-            .flex_1()
-            .h_full()
-            .min_w_0()
-            .child(self.render_top_floating_bar("GPU & VPS Settings".into(), cx))
-            .child(
-                div()
-                    .id("settings-scroll")
-                    .flex_1()
-                    .overflow_y_scroll()
+        let mut content = v_flex().gap_5().w_full();
+        match self.settings_tab {
+            SettingsTab::General => {
+                content = content.child(v_flex().gap_3().p_4().rounded(RADIUS_BUBBLE)
+                    .bg(theme::bg_surface()).border_1().border_color(theme::border_subtle())
+                    .child(div().text_sm().child("Input box"))
+                    .child(div().text_xs().text_color(theme::text_secondary()).child("Choose which key sends a message."))
+                    .child(h_flex().gap_2()
+                        .child(Button::new("send-key-enter").label("Enter").selected(!self.settings.composer_ctrl_enter)
+                            .on_click(cx.listener(|this, _, _, cx| { this.settings.composer_ctrl_enter = false; this.save_general_preferences(cx); })))
+                        .child(Button::new("send-key-ctrl-enter").label("Ctrl+Enter").selected(self.settings.composer_ctrl_enter)
+                            .on_click(cx.listener(|this, _, _, cx| { this.settings.composer_ctrl_enter = true; this.save_general_preferences(cx); }))))
+                    .child(div().text_sm().child("Queued messages"))
+                    .child(h_flex().gap_2()
+                        .child(Button::new("queue-messages").label("Queue").selected(self.settings.queue_while_working)
+                            .on_click(cx.listener(|this, _, _, cx| { this.settings.queue_while_working = true; this.save_general_preferences(cx); })))
+                        .child(Button::new("send-messages-immediately").label("Send immediately").selected(!self.settings.queue_while_working)
+                            .on_click(cx.listener(|this, _, _, cx| { this.settings.queue_while_working = false; this.save_general_preferences(cx); }))))
+                    .child(div().text_xs().text_color(theme::text_secondary())
+                        .child("Queue waits until the agent finishes. Send immediately starts another turn. Offline messages always stay in the outbox until reconnecting.")));
+            }
+            SettingsTab::Hosts => {
+                let mut hosts = v_flex().gap_3().p_4().rounded(RADIUS_BUBBLE)
+                    .bg(theme::bg_surface()).border_1().border_color(theme::border_subtle())
+                    .child(div().text_xs().text_color(theme::text_secondary()).child(self.connection_status.clone()))
+                    .child(h_flex().justify_between().items_center().gap_2().child("Local")
+                        .child(Button::new("connect-local").small().label("Connect")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(bin) = Self::find_local_daemon() {
+                                    this.connect_to_target("localhost".into(), multibot_core::DaemonTarget::LocalBinary(bin), cx);
+                                } else { this.notice = Some("No local multibotd found. Add a remote SSH host below.".into()); cx.notify(); }
+                            }))));
+                for (idx, host) in self.settings.ssh_hosts.iter().enumerate() {
+                    let host = host.clone();
+                    let active = self.connected_host.as_deref() == Some(host.name.as_str())
+                        && self.daemon_tx.is_some();
+                    hosts = hosts.child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                v_flex().gap_1().child(host.name.clone()).child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .child(host.ssh_target()),
+                                ),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("host-{idx}")))
+                                    .small()
+                                    .label(if active { "Disconnect" } else { "Connect" })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if active {
+                                            this.disconnect_host(cx);
+                                        } else {
+                                            this.connect_to_target(
+                                                host.name.clone(),
+                                                multibot_core::DaemonTarget::RemoteSsh {
+                                                    host: host.clone(),
+                                                    bundled_linux_binary:
+                                                        Self::find_bundled_linux_daemon(),
+                                                },
+                                                cx,
+                                            );
+                                        }
+                                    })),
+                            ),
+                    );
+                }
+                if self.connected_host.is_some() {
+                    hosts = hosts.child(
+                        Button::new("disconnect-host")
+                            .small()
+                            .label("Disconnect host")
+                            .on_click(cx.listener(|this, _, _, cx| this.disconnect_host(cx))),
+                    );
+                }
+                content = content.child(hosts).child(v_flex().gap_3().p_4().rounded(RADIUS_BUBBLE)
+                    .bg(theme::bg_surface()).border_1().border_color(theme::border_subtle())
+                    .child(div().text_sm().child("Add a host"))
+                    .child(h_flex().gap_2().child(div().flex_1().min_w_0().child(Input::new(&self.host_input).id("host-input")))
+                        .child(Button::new("add-host").label("Add Host").on_click(cx.listener(|this, _, window, cx| this.add_ssh_host_from_input(window, cx)))))
+                    .child(Button::new("import-zigshel").label("Import from ZigShell (read-only)")
+                        .on_click(cx.listener(|this, _, _, cx| this.import_from_zigshel(cx))))
+                    .child(div().text_xs().text_color(theme::text_secondary())
+                        .child("Imports hosts, SSH keys, workspaces, session assignments and favorites. Never changes ZigShell files.")));
+            }
+            SettingsTab::Workspaces => {
+                let mut workspaces = v_flex()
+                    .gap_3()
+                    .p_4()
+                    .rounded(RADIUS_BUBBLE)
+                    .bg(theme::bg_surface())
+                    .border_1()
+                    .border_color(theme::border_subtle());
+                for (idx, ws) in self
+                    .sidebar_state
+                    .workspace_store
+                    .visible_workspaces(multibot_core::workspaces::now_unix_ms())
+                    .into_iter()
+                    .enumerate()
+                {
+                    let id = ws.id.clone();
+                    workspaces =
+                        workspaces.child(
+                            h_flex()
+                                .justify_between()
+                                .items_center()
+                                .gap_2()
+                                .child(ws.name.clone())
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "settings-workspace-{idx}"
+                                    )))
+                                    .small()
+                                    .label("Open")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.sidebar_state.active_workspace_id = id.clone();
+                                        this.sidebar_state.active_workspace_view =
+                                            multibot_core::workspaces::WorkspaceView::All;
+                                        this.set_main_surface(crate::state::MainSurface::Chat);
+                                        this.focus_active_surface_default(window, cx);
+                                        cx.notify();
+                                    })),
+                                ),
+                        );
+                }
+                content = content
+                    .child(workspaces)
+                    .child(
+                        Button::new("settings-new-workspace")
+                            .label("New workspace")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.set_main_surface(crate::state::MainSurface::Chat);
+                                this.set_sidebar_mode_synced(multibot_core::SidebarMode::Open, cx);
+                                this.sidebar_state.new_workspace_draft = Some(String::new());
+                                this.focus_sidebar(window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("settings-manage-workspaces")
+                            .label("Manage workspaces…")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_palette(window, cx);
+                                this.palette_input.update(cx, |input, cx| {
+                                    input.set_value("workspace", window, cx)
+                                });
+                            })),
+                    );
+            }
+            SettingsTab::Gpu => {
+                let (gpu, _) = self.active_gpu_summary();
+                content =
+                    content.child(
+                        v_flex()
+                            .gap_3()
+                            .p_4()
+                            .rounded(RADIUS_BUBBLE)
+                            .bg(theme::bg_surface())
+                            .border_1()
+                            .border_color(theme::border_subtle())
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme::accent_green())
+                                    .child(format!("Active GPU: {gpu}")),
+                            )
+                            .child(div().text_xs().text_color(theme::text_secondary()).child(
+                                format!("{} · {}", self.footprint_label, self.connection_status),
+                            ))
+                            .child(
+                                Button::new("gpu-mode-auto")
+                                    .label("Auto (iGPU, 0% NVIDIA)")
+                                    .selected(self.settings.gpu == GpuPreference::AutoIntegrated)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_gpu_preference(GpuPreference::AutoIntegrated, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("gpu-mode-software")
+                                    .label("Software Only (WARP)")
+                                    .selected(self.settings.gpu == GpuPreference::SoftwareOnly)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_gpu_preference(GpuPreference::SoftwareOnly, cx)
+                                    })),
+                            )
+                            .child(discovered_col)
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_secondary())
+                                    .child("Restart Multibot after changing the adapter."),
+                            ),
+                    );
+            }
+            SettingsTab::Shortcuts => {
+                let mut index = 0;
+                for category in multibot_keys::ALL_CATEGORIES {
+                    let mut card = v_flex()
+                        .gap_2()
+                        .p_4()
+                        .rounded(RADIUS_BUBBLE)
+                        .bg(theme::bg_surface())
+                        .border_1()
+                        .border_color(theme::border_subtle())
+                        .child(div().text_sm().child(category.label()));
+                    for spec in multibot_keys::by_category(category) {
+                        card = card.child(
+                            h_flex()
+                                .id(SharedString::from(format!("settings-shortcut-{index}")))
+                                .test_support()
+                                .justify_between()
+                                .gap_3()
+                                .text_xs()
+                                .child(div().flex_1().child(spec.description))
+                                .child(
+                                    div()
+                                        .text_color(theme::text_secondary())
+                                        .child(spec.display),
+                                ),
+                        );
+                        index += 1;
+                    }
+                    content = content.child(card);
+                }
+            }
+            SettingsTab::Updates => {
+                content = content
                     .child(
                         v_flex()
-                            .w_full()
-                            .max_w(px(760.0))
-                            .mx_auto()
-                            .p_5()
-                            .gap_4()
+                            .gap_3()
+                            .p_4()
+                            .rounded(RADIUS_BUBBLE)
+                            .bg(theme::bg_surface())
+                            .border_1()
+                            .border_color(theme::border_subtle())
                             .child(
-                                v_flex()
-                                    .p_4()
-                                    .gap_3()
-                                    .rounded(RADIUS_BUBBLE)
-                                    .bg(theme::bg_surface())
-                                    .border_1()
-                                    .border_color(theme::border_subtle())
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(theme::text_primary())
-                                            .child("Graphics Adapter Policy (Windows DXGI)"),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .child({
-                                                let b = Button::new("gpu-mode-auto")
-                                                    .label("Auto Integrated (0% NVIDIA)")
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.set_gpu_preference(
-                                                            GpuPreference::AutoIntegrated,
-                                                            cx,
-                                                        );
-                                                    }));
-                                                if self.settings.gpu == GpuPreference::AutoIntegrated
-                                                {
-                                                    b.primary()
-                                                } else {
-                                                    b
-                                                }
-                                            })
-                                            .child({
-                                                let b = Button::new("gpu-mode-software")
-                                                    .label("Software Only (WARP)")
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.set_gpu_preference(
-                                                            GpuPreference::SoftwareOnly,
-                                                            cx,
-                                                        );
-                                                    }));
-                                                if self.settings.gpu == GpuPreference::SoftwareOnly {
-                                                    b.primary()
-                                                } else {
-                                                    b
-                                                }
-                                            }),
-                                    )
-                                    .child(discovered_col),
+                                div()
+                                    .id("settings-version-label")
+                                    .test_support()
+                                    .text_sm()
+                                    .child(format!(
+                                        "Multibot v{}",
+                                        multibot_proto::build_version()
+                                    )),
                             )
                             .child(
-                                v_flex()
-                                    .p_4()
+                                Button::new("settings-check-updates-btn")
+                                    .label("Check for Updates")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.trigger_update_check(cx)),
+                                    ),
+                            ),
+                    )
+                    .when_some(self.render_update_card(true, cx), |el, card| el.child(card));
+            }
+        }
+        let mut rail = v_flex()
+            .id("settings-nav")
+            .test_support()
+            .w(px(184.0))
+            .flex_shrink_0()
+            .h_full()
+            .p_3()
+            .gap_1()
+            .bg(theme::bg_sidebar())
+            .child(div().p_2().text_sm().child("Settings"));
+        for tab in SettingsTab::ALL {
+            rail = rail.child(
+                Button::new(tab.id())
+                    .w_full()
+                    .ghost()
+                    .label(tab.title())
+                    .child(div().flex_1())
+                    .selected(self.settings_tab == tab)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.settings_tab = tab;
+                        window.focus(&this.settings_focus_handle, cx);
+                        cx.notify();
+                    })),
+            );
+        }
+        div()
+            .id("settings-backdrop")
+            .absolute()
+            .inset_0()
+            .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.58))
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_5()
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.set_main_surface(crate::state::MainSurface::Chat);
+                    this.focus_active_surface_default(window, cx);
+                    cx.notify();
+                }),
+            )
+            .child(
+                h_flex()
+                    .id("settings-console")
+                    .test_support()
+                    .w(px(980.0))
+                    .max_w_full()
+                    .h_full()
+                    .max_h(px(760.0))
+                    .rounded(crate::theme::RADIUS_MODAL)
+                    .overflow_hidden()
+                    .bg(theme::bg_canvas())
+                    .border_1()
+                    .border_color(theme::border_subtle())
+                    .occlude()
+                    .focus_trap("settings-console", &self.settings_focus_handle)
+                    .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation()
+                    })
+                    .child(rail)
+                    .child(
+                        v_flex()
+                            .id("settings-content")
+                            .test_support()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(
+                                h_flex()
+                                    .p_5()
+                                    .justify_between()
+                                    .items_start()
                                     .gap_3()
-                                    .rounded(RADIUS_BUBBLE)
-                                    .bg(theme::bg_surface())
-                                    .border_1()
-                                    .border_color(theme::border_subtle())
                                     .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(theme::text_primary())
-                                            .child("VPS SSH Hosts (%APPDATA%\\Multibot\\settings.json)"),
-                                    )
-                                    .child(
-                                        h_flex()
+                                        v_flex()
                                             .gap_2()
+                                            .child(div().text_lg().child(self.settings_tab.title()))
                                             .child(
                                                 div()
-                                                    .flex_1()
-                                                    .child(Input::new(&self.host_input).id("host-input")),
-                                            )
-                                            .child(
-                                                Button::new("add-host")
-                                                    .primary()
-                                                    .label("Add Host")
-                                                    .on_click(cx.listener(|this, _, window, cx| {
-                                                        this.add_ssh_host_from_input(window, cx);
-                                                    })),
-                                            )
-                                            .child(
-                                                Button::new("import-zigshel")
-                                                    .label("Import ZigShell (read-only)")
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.import_from_zigshel(cx);
-                                                    })),
+                                                    .text_xs()
+                                                    .text_color(theme::text_secondary())
+                                                    .child(self.settings_tab.subtitle()),
                                             ),
                                     )
                                     .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme::text_muted())
-                                            .child("Imports SSH hosts (including IdentityFile keys), workspaces, sessions & favorites without modifying %APPDATA%\\ZigShell."),
+                                        Button::new("settings-close").xsmall().label("×").on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.set_main_surface(
+                                                    crate::state::MainSurface::Chat,
+                                                );
+                                                this.focus_active_surface_default(window, cx);
+                                                cx.notify();
+                                            }),
+                                        ),
                                     ),
                             )
                             .child(
-                                v_flex()
-                                    .p_4()
-                                    .gap_3()
-                                    .rounded(RADIUS_BUBBLE)
-                                    .bg(theme::bg_surface())
-                                    .border_1()
-                                    .border_color(theme::border_subtle())
-                                    .child(
-                                        h_flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .child(
-                                                h_flex()
-                                                    .items_center()
-                                                    .gap_2()
-                                                    .child(
-                                                        div()
-                                                            .text_sm()
-                                                            .text_color(theme::text_primary())
-                                                            .child("About & Updates"),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .id("settings-version-label")
-                                                            .test_support()
-                                                            .px_2p5()
-                                                            .py_0p5()
-                                                            .rounded(RADIUS_CHIP)
-                                                            .bg(theme::bg_canvas())
-                                                            .border_1()
-                                                            .border_color(theme::border_subtle())
-                                                            .text_xs()
-                                                            .text_color(theme::text_primary())
-                                                            .child(format!(
-                                                                "v{}",
-                                                                multibot_proto::build_version()
-                                                            )),
-                                                    ),
-                                            )
-                                            .child(
-                                                Button::new("settings-check-updates-btn")
-                                                    .small()
-                                                    .label("Check for Updates")
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.trigger_update_check(cx);
-                                                    })),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme::text_muted())
-                                            .child(format!(
-                                                "{} · {}",
-                                                self.footprint_label, self.connection_status
-                                            )),
-                                    ),
-                            )
-                            .when_some(self.notice.clone(), |el, note| {
-                                el.child(
-                                    div()
-                                        .p_3()
-                                        .rounded(RADIUS_ROW)
-                                        .bg(theme::bg_surface())
-                                        .border_1()
-                                        .border_color(theme::border_subtle())
-                                        .text_xs()
-                                        .text_color(theme::text_primary())
-                                        .child(note),
-                                )
-                            }),
+                                div()
+                                    .id("settings-scroll")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .p_5()
+                                    .pt_0()
+                                    .child(content)
+                                    .when_some(self.notice.clone(), |el, note| {
+                                        el.child(div().pt_4().text_xs().child(note))
+                                    }),
+                            ),
                     ),
             )
+    }
+
+    fn save_general_preferences(&mut self, cx: &mut Context<Self>) {
+        self.sync_settings_to_shared(cx);
+        if self.is_disk_persistence_enabled(cx) {
+            if let Err(err) = self.settings.save() {
+                self.notice = Some(format!("Could not save preferences: {err}"));
+            }
+        }
+        cx.notify();
     }
 }

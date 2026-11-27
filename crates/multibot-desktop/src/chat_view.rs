@@ -4,8 +4,8 @@ use crate::state::{ActiveModal, SharedAppStore};
 use crate::table_modal::{TableSource, extract_tables_from_markdown};
 use crate::theme::{self, RADIUS_BUBBLE, RADIUS_CHIP, RADIUS_ROW};
 use gpui_kit::{
-    AnyElement, ClipboardEntry, ClipboardItem, Context, ExternalPaths, FocusHandle, Hsla,
-    InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, MouseButton,
+    AnyElement, ClipboardEntry, ClipboardItem, Context, ExternalPaths, FocusHandle, Focusable,
+    Hsla, InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, MouseButton,
     MouseDownEvent, MouseUpEvent, ParentElement, Role, ScrollHandle, SharedString,
     StatefulInteractiveElement, Styled, TestSupportExt, Window,
     base::text::CodeBlock,
@@ -269,6 +269,8 @@ pub(crate) struct ChatViewState {
     pub chord_epoch: Instant,
     pub font_size_pt: u16,
     pub slash_sync_pending: bool,
+    pub composer_menu_open: bool,
+    pub queued_prompts: HashMap<String, Vec<(String, String)>>,
     pub focus_handle: Option<FocusHandle>,
 }
 
@@ -302,6 +304,8 @@ impl Default for ChatViewState {
             chord_epoch: Instant::now(),
             font_size_pt: DEFAULT_CHAT_FONT_SIZE_PT,
             slash_sync_pending: false,
+            composer_menu_open: false,
+            queued_prompts: HashMap::new(),
             focus_handle: None,
         }
     }
@@ -2146,6 +2150,48 @@ impl MultibotView {
         cx.notify();
     }
 
+    pub(crate) fn track_queued_prompt(&mut self, session_id: &str, message_id: &str, status: &str) {
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
+            return;
+        };
+        let key = self.session_key_for(session);
+        if status == "queued" {
+            let preview = "Waiting for the agent to finish".to_string();
+            let queue = self.chat_state.queued_prompts.entry(key).or_default();
+            if queue.len() < 20 && !queue.iter().any(|(id, _)| id == message_id) {
+                queue.push((message_id.to_string(), preview));
+            }
+        } else if matches!(status, "sent" | "cancelled" | "failed") {
+            if let Some(queue) = self.chat_state.queued_prompts.get_mut(&key) {
+                queue.retain(|(id, _)| id != message_id);
+                if queue.is_empty() {
+                    self.chat_state.queued_prompts.remove(&key);
+                }
+            }
+        }
+    }
+
+    fn prepare_composer_control(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_state.composer_menu_open = false;
+        if self.selected_session.is_none() {
+            self.notice = Some("Select a session first.".into());
+        } else if !self.prompt_input.read(cx).value().trim().is_empty() {
+            self.notice =
+                Some("Send or clear your draft before preparing an agent command.".into());
+        } else {
+            self.prompt_input
+                .update(cx, |input, cx| input.set_value(command, window, cx));
+            self.sync_slash_picker_from_composer(cx);
+            window.focus(&self.prompt_input.read(cx).focus_handle(cx), cx);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn send_current_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let raw = self.prompt_input.read(cx).value().to_string();
         let trimmed = raw.trim().to_string();
@@ -3923,6 +3969,52 @@ impl MultibotView {
         let trailing_prose_options = detect_trailing_prose_options(&self.messages);
         let active_find_idx = self.chat_state.active_find_message_index();
 
+        let mut queued_previews = Vec::new();
+        if let Some(session) = &self.selected_session {
+            let key = self.session_key_for(session);
+            if let Some(queue) = self.chat_state.queued_prompts.get(&key) {
+                queued_previews.extend(queue.iter().map(|(_, text)| text.clone()));
+            }
+            let outbox_key = multibot_core::outbox::ChatOutbox::session_key(
+                self.current_host_label(),
+                session.agent,
+                &session.id,
+            );
+            queued_previews.extend(
+                self.chat_outbox
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.session_key == outbox_key)
+                    .map(|entry| entry.text.clone()),
+            );
+        }
+        let mut queue_bar = v_flex()
+            .id("queued-messages-bar")
+            .test_support()
+            .w_full()
+            .max_w(px(760.0))
+            .mx_auto()
+            .p_3()
+            .gap_2()
+            .rounded(RADIUS_ROW)
+            .bg(theme::bg_surface())
+            .border_1()
+            .border_color(theme::border_subtle())
+            .child(
+                div()
+                    .text_xs()
+                    .child(format!("Queued messages · {}", queued_previews.len())),
+            );
+        for preview in &queued_previews {
+            queue_bar = queue_bar.child(
+                div()
+                    .text_xs()
+                    .text_color(theme::text_secondary())
+                    .truncate()
+                    .child(preview.clone()),
+            );
+        }
+
         let mut msg_col = v_flex()
             .w_full()
             .max_w(px(760.0))
@@ -4451,7 +4543,7 @@ impl MultibotView {
                     cx.stop_propagation();
                     return;
                 }
-                if !action.secondary && !action.shift {
+                if action.secondary == this.settings.composer_ctrl_enter && !action.shift {
                     this.chat_state.slash_sync_pending = false;
                     this.send_current_prompt(window, cx);
                     cx.stop_propagation();
@@ -4763,7 +4855,29 @@ impl MultibotView {
                 }
                 el.child(chips)
             })
+            .when(!queued_previews.is_empty(), |el| el.child(div().w_full().px_5().pt_2().child(queue_bar)))
             .when_some(self.render_slash_picker(cx), |el, picker| el.child(picker))
+            .when(self.chat_state.composer_menu_open, |el| el.child(
+                div().w_full().max_w(px(760.0)).mx_auto().px_5().child(
+                    v_flex().id("composer-options").test_support().w(px(300.0)).p_3().gap_2()
+                        .rounded(RADIUS_ROW).bg(theme::bg_surface()).border_1().border_color(theme::border_subtle())
+                        .child(div().text_xs().text_color(theme::text_secondary()).child("Agent controls · prepare a command"))
+                        .child(Button::new("composer-model").small().label(format!("AI model · {}", self.selected_session.as_ref().and_then(|s| s.model.as_deref()).unwrap_or("Agent default")))
+                            .on_click(cx.listener(|this, _, window, cx| this.prepare_composer_control("/model ", window, cx))))
+                        .child(Button::new("composer-effort").small().label("Effort level…")
+                            .on_click(cx.listener(|this, _, window, cx| this.prepare_composer_control("/effort ", window, cx))))
+                        .child(Button::new("composer-permissions").small().label("Permission level…")
+                            .on_click(cx.listener(|this, _, window, cx| this.prepare_composer_control("/permissions ", window, cx))))
+                        .child(Button::new("composer-attach").small().label("Attach from clipboard")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.chat_state.composer_menu_open = false;
+                                if !this.handle_paste_from_clipboard(window, cx) {
+                                    this.notice = Some("Drop files or paste images/files with Ctrl+V.".into());
+                                }
+                                cx.notify();
+                            })))
+                )
+            ))
             .child(
                 div().w_full().px_5().pb_4().pt_2().child(
                     h_flex()
@@ -4796,15 +4910,10 @@ impl MultibotView {
                                 .text_color(theme::text_secondary())
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(|this, _, window, cx| {
+                                    cx.listener(|this, _, _, cx| {
                                         cx.stop_propagation();
-                                        if !this.handle_paste_from_clipboard(window, cx) {
-                                            this.notice = Some(
-                                                "Drop files or paste (Ctrl+V) images/files to attach."
-                                                    .into(),
-                                            );
-                                            cx.notify();
-                                        }
+                                        this.chat_state.composer_menu_open = !this.chat_state.composer_menu_open;
+                                        cx.notify();
                                     }),
                                 )
                                 .child("+"),
@@ -4816,13 +4925,22 @@ impl MultibotView {
                                     .appearance(false),
                             ),
                         )
+                        .child(Button::new("composer-voice").small()
+                            .icon(gpui_kit::component::Icon::default().data(theme::MIC_ICON))
+                            .accessibility_label("Voice dictation").tooltip("Voice dictation · coming in Slice 6")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.notice = Some("Voice dictation is planned for Slice 6. Type or paste your message for now.".into());
+                                cx.notify();
+                            })))
                         .child(
                             Button::new("send-prompt")
                                 .small()
                                 .primary()
-                                .label("Send")
+                                .label(if is_working { "Stop" } else { "Send" })
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.send_current_prompt(window, cx);
+                                    if this.selected_session.as_ref().is_some_and(|s| s.working) {
+                                        this.interrupt_active_session(cx);
+                                    } else { this.send_current_prompt(window, cx); }
                                 })),
                         ),
                 ),

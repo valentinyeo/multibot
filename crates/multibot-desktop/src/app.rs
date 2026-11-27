@@ -14,7 +14,7 @@ use crate::update_ui::{UpdateUiAction, UpdateUiState};
 use gpui_kit::{
     App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement,
     IntoElement, KeyDownEvent, ModifiersChangedEvent, ParentElement, Render, Styled, Subscription,
-    Task, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
+    Task, TestSupportExt, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
     component::{
         Sizable,
         button::{Button, ButtonVariants},
@@ -291,6 +291,8 @@ pub struct MultibotView {
 
     // Navigation & overlays
     pub(crate) main_surface: MainSurface,
+    pub(crate) settings_tab: crate::settings::SettingsTab,
+    pub(crate) settings_focus_handle: FocusHandle,
     pub(crate) active_modal: ActiveModal,
     pub(crate) sidebar_state: SidebarState,
     pub(crate) inbox_state: InboxState,
@@ -457,7 +459,8 @@ impl MultibotView {
 
         let mut sidebar_state = SidebarState::default();
         sidebar_state.mode = settings.sidebar_mode;
-        sidebar_state.active_workspace_id = workspace_store.default_workspace_id();
+        sidebar_state.active_workspace_id =
+            multibot_core::workspaces::ALL_WORKSPACES_ID.to_string();
         sidebar_state.recents_collapsed = workspace_store.recents_section_collapsed;
         sidebar_state.unread_only = unread_only;
         sidebar_state.workspace_store = workspace_store;
@@ -590,6 +593,8 @@ impl MultibotView {
             footprint,
             footprint_label,
             main_surface: MainSurface::Chat,
+            settings_tab: crate::settings::SettingsTab::default(),
+            settings_focus_handle: cx.focus_handle(),
             active_modal: ActiveModal::None,
             sidebar_state,
             inbox_state: InboxState::default(),
@@ -966,8 +971,9 @@ impl MultibotView {
                 return true;
             }
         }
-        if !self.sidebar_state.recents_collapsed
-            && !self.sidebar_state.workspace_store.recents_section_collapsed
+        if (self.sidebar_state.active_workspace_id == multibot_core::workspaces::ALL_WORKSPACES_ID
+            || (!self.sidebar_state.recents_collapsed
+                && !self.sidebar_state.workspace_store.recents_section_collapsed))
             && layout.recents.iter().any(|r| r.session_key == session_key)
         {
             return true;
@@ -1059,6 +1065,8 @@ impl MultibotView {
     /// Transitions `self.main_surface` to `next` and clears any transient inline edit state
     /// that is no longer mounted or would lose focus across the surface transition.
     pub(crate) fn set_main_surface(&mut self, next: MainSurface) {
+        self.sidebar_state.workspace_menu_open = false;
+        self.chat_state.composer_menu_open = false;
         if self.main_surface != next {
             self.sidebar_state.rename = None;
             self.sidebar_state.new_workspace_draft = None;
@@ -2576,55 +2584,58 @@ impl MultibotView {
                     self.last_dispatched_prompt = None;
                 }
                 ServerEvent::PromptStatus {
-                    session_id: _,
+                    session_id,
                     message_id,
                     status,
                     detail,
-                } => match status.as_str() {
-                    "failed" => {
-                        let (msg_id, text) = if !message_id.is_empty() {
-                            let matched_text = self
-                                .last_dispatched_prompt
-                                .as_ref()
-                                .filter(|(id, _)| id == &message_id)
-                                .map(|(_, t)| t.clone())
-                                .or_else(|| {
-                                    self.messages
-                                        .iter()
-                                        .rev()
-                                        .find(|m| m.id == message_id)
-                                        .map(|m| m.text.clone())
-                                })
-                                .unwrap_or_default();
-                            (message_id, matched_text)
-                        } else if let Some((id, t)) = self.last_dispatched_prompt.take() {
-                            (id, t)
-                        } else {
-                            (format!("failed-{}", self.messages.len()), String::new())
-                        };
-                        let reason = if detail.is_empty() {
-                            "Message delivery failed".to_string()
-                        } else {
-                            detail
-                        };
-                        self.record_send_failure(msg_id, text, reason, cx);
-                    }
-                    "cancelled" => {
-                        self.notice = Some("Cancelled prompt.".to_string());
-                    }
-                    "sent" => {
-                        self.last_dispatched_prompt = None;
-                    }
-                    "queued" => {
-                        self.chat_state.advance_busy_tick();
-                    }
-                    "not_found" => {
-                        if !detail.is_empty() {
-                            self.notice = Some(detail);
+                } => {
+                    self.track_queued_prompt(&session_id, &message_id, &status);
+                    match status.as_str() {
+                        "failed" => {
+                            let (msg_id, text) = if !message_id.is_empty() {
+                                let matched_text = self
+                                    .last_dispatched_prompt
+                                    .as_ref()
+                                    .filter(|(id, _)| id == &message_id)
+                                    .map(|(_, t)| t.clone())
+                                    .or_else(|| {
+                                        self.messages
+                                            .iter()
+                                            .rev()
+                                            .find(|m| m.id == message_id)
+                                            .map(|m| m.text.clone())
+                                    })
+                                    .unwrap_or_default();
+                                (message_id, matched_text)
+                            } else if let Some((id, t)) = self.last_dispatched_prompt.take() {
+                                (id, t)
+                            } else {
+                                (format!("failed-{}", self.messages.len()), String::new())
+                            };
+                            let reason = if detail.is_empty() {
+                                "Message delivery failed".to_string()
+                            } else {
+                                detail
+                            };
+                            self.record_send_failure(msg_id, text, reason, cx);
                         }
+                        "cancelled" => {
+                            self.notice = Some("Cancelled prompt.".to_string());
+                        }
+                        "sent" => {
+                            self.last_dispatched_prompt = None;
+                        }
+                        "queued" => {
+                            self.chat_state.advance_busy_tick();
+                        }
+                        "not_found" => {
+                            if !detail.is_empty() {
+                                self.notice = Some(detail);
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                },
+                }
                 ServerEvent::SearchResults {
                     request_id,
                     session_id,
@@ -3128,6 +3139,7 @@ impl MultibotView {
                 status,
                 detail,
             } => {
+                self.track_queued_prompt(&session_id, &message_id, &status);
                 if self
                     .selected_session
                     .as_ref()
@@ -3245,6 +3257,7 @@ impl MultibotView {
     }
 
     pub(crate) fn select_session(&mut self, session: SessionSummary, cx: &mut Context<Self>) {
+        self.chat_state.composer_menu_open = false;
         // Reset per-session transient Chat View overlays, active inline rename & stale pagination
         self.sidebar_state.rename = None;
         self.pending_older_page_before.remove(&session.id);
@@ -3318,7 +3331,7 @@ impl MultibotView {
         text: String,
     ) {
         if let Some(ref tx) = self.daemon_tx {
-            let req = if session.working {
+            let req = if session.working && self.settings.queue_while_working {
                 ClientRequest::SteerSession {
                     session_id: session.id.clone(),
                     agent: session.agent,
@@ -3426,7 +3439,7 @@ impl MultibotView {
                 .find(|s| s.id == sid && s.agent == agent);
             let cwd = matched_sess.and_then(|s| s.cwd.clone());
             let is_working = matched_sess.is_some_and(|s| s.working);
-            let req = if is_working {
+            let req = if is_working && self.settings.queue_while_working {
                 ClientRequest::SteerSession {
                     session_id: sid.to_string(),
                     agent,
@@ -3791,14 +3804,13 @@ impl MultibotView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_inbox = self.main_surface == MainSurface::Inbox;
-        let is_settings = self.main_surface == MainSurface::Settings;
-        let header_rename_draft = if self.sidebar_state.mode != SidebarMode::Open
-            && self.is_sidebar_rename_mounted()
-        {
-            self.sidebar_state.rename.as_ref().map(|r| r.draft.clone())
-        } else {
-            None
-        };
+
+        let header_rename_draft =
+            if self.sidebar_state.mode != SidebarMode::Open && self.is_sidebar_rename_mounted() {
+                self.sidebar_state.rename.as_ref().map(|r| r.draft.clone())
+            } else {
+                None
+            };
 
         h_flex()
             .w_full()
@@ -3807,57 +3819,68 @@ impl MultibotView {
             .pb_2()
             .items_center()
             .justify_between()
+            .child(div().w(px(76.0)).flex_shrink_0())
             .child(
-                Button::new("toggle-sidebar-btn")
-                    .xsmall()
-                    .label(self.sidebar_state.toggle_button_label())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.cycle_sidebar_mode_synced(cx);
-                        if this.active_modal == ActiveModal::None
-                            && !this.table_modal_state.is_open()
-                            && !this.has_mounted_chat_overlay()
-                            && this.is_sidebar_inline_edit_mounted()
-                        {
-                            this.focus_sidebar(window, cx);
-                        } else if this.sidebar_state.mode != SidebarMode::Open
-                            && !this.is_focused_on_mounted_known_handle(window, cx)
-                        {
-                            this.focus_active_surface_default(window, cx);
-                        }
-                    })),
+                gpui_kit::component::v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap_1()
+                    .child(if let Some(draft) = header_rename_draft {
+                        div()
+                            .id("header-rename-input")
+                            .test_support()
+                            .px_4()
+                            .py_1p5()
+                            .rounded(RADIUS_CHIP)
+                            .bg(theme::bg_surface())
+                            .border_1()
+                            .border_color(theme::accent_blue())
+                            .text_sm()
+                            .text_color(theme::text_primary())
+                            .child(format!("{draft}|"))
+                    } else {
+                        div()
+                            .id("header-title-pill")
+                            .test_support()
+                            .px_4()
+                            .py_1p5()
+                            .rounded(RADIUS_CHIP)
+                            .bg(theme::bg_surface())
+                            .border_1()
+                            .border_color(theme::border_subtle())
+                            .text_sm()
+                            .text_color(theme::text_primary())
+                            .max_w_full()
+                            .truncate()
+                            .child(title)
+                    })
+                    .when(
+                        self.main_surface == MainSurface::Chat
+                            && self.selected_session.as_ref().is_some_and(|s| s.working),
+                        |el| {
+                            el.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .child("Agent is working"),
+                            )
+                        },
+                    ),
             )
-            .child(if let Some(draft) = header_rename_draft {
-                div()
-                    .id("header-rename-input")
-                    .px_4()
-                    .py_1p5()
-                    .rounded(RADIUS_CHIP)
-                    .bg(theme::bg_surface())
-                    .border_1()
-                    .border_color(theme::accent_blue())
-                    .text_sm()
-                    .text_color(theme::text_primary())
-                    .child(format!("{draft}|"))
-            } else {
-                div()
-                    .id("header-title-pill")
-                    .px_4()
-                    .py_1p5()
-                    .rounded(RADIUS_CHIP)
-                    .bg(theme::bg_surface())
-                    .border_1()
-                    .border_color(theme::border_subtle())
-                    .text_sm()
-                    .text_color(theme::text_primary())
-                    .child(title)
-            })
             .child(
                 h_flex()
+                    .w(px(76.0))
+                    .flex_shrink_0()
+                    .justify_end()
+                    .items_center()
                     .gap_1p5()
                     .child({
                         let b = Button::new("toggle-inbox")
                             .xsmall()
-                            .label(format!("Inbox ({})", self.sessions.len()))
+                            .icon(gpui_kit::component::Icon::default().data(theme::INBOX_ICON))
+                            .accessibility_label("Inbox")
+                            .tooltip("Inbox · Alt+I")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if this.table_modal_state.is_open() {
                                     this.table_modal_state.close();
@@ -3874,40 +3897,37 @@ impl MultibotView {
                             }));
                         if is_inbox { b.primary() } else { b }
                     })
-                    .child({
-                        let b = Button::new("toggle-settings")
-                            .xsmall()
-                            .label("GPU / Settings")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if this.table_modal_state.is_open() {
-                                    this.table_modal_state.close();
-                                }
-                                this.active_modal = ActiveModal::None;
-                                let next = if this.main_surface == MainSurface::Settings {
-                                    MainSurface::Chat
-                                } else {
-                                    MainSurface::Settings
-                                };
-                                this.set_main_surface(next);
-                                this.focus_active_surface_default(window, cx);
-                                cx.notify();
-                            }));
-                        if is_settings { b.primary() } else { b }
-                    })
+                    .when(
+                        self.sidebar_state
+                            .workspace_store
+                            .inbox_unread_count_at(&self.session_inputs(), now_unix_ms())
+                            > 0,
+                        |el| {
+                            el.child(
+                                div()
+                                    .w(px(5.0))
+                                    .h(px(5.0))
+                                    .rounded(RADIUS_CHIP)
+                                    .bg(theme::accent_blue()),
+                            )
+                        },
+                    )
                     .child(
-                        Button::new("toggle-shortcuts")
+                        Button::new("chat-menu")
                             .xsmall()
-                            .label("F1")
+                            .icon(gpui_kit::component::Icon::default().data(theme::MENU_ICON))
+                            .accessibility_label("Chat menu")
+                            .tooltip("Chat menu")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                if this.table_modal_state.is_open() {
-                                    this.table_modal_state.close();
+                                if let Some(session) = &this.selected_session {
+                                    this.open_palette_tab_context(
+                                        this.session_key_for(session),
+                                        window,
+                                        cx,
+                                    );
+                                } else {
+                                    this.open_palette(window, cx);
                                 }
-                                this.active_modal = match this.active_modal {
-                                    ActiveModal::Shortcuts => ActiveModal::None,
-                                    _ => ActiveModal::Shortcuts,
-                                };
-                                this.focus_active_surface_default(window, cx);
-                                cx.notify();
                             })),
                     ),
             )
@@ -4009,6 +4029,9 @@ impl MultibotView {
                         .focus_handle(cx)
                         .is_focused(window)))
             || (self.main_surface == MainSurface::Settings
+                && self.settings_focus_handle.is_focused(window))
+            || (self.main_surface == MainSurface::Settings
+                && self.settings_tab == crate::settings::SettingsTab::Hosts
                 && self.host_input.read(cx).focus_handle(cx).is_focused(window))
             || (self.is_sidebar_inline_edit_mounted()
                 && !self.has_mounted_chat_overlay()
@@ -4040,6 +4063,10 @@ impl MultibotView {
             self.palette_input.update(cx, |state, cx| {
                 state.focus(window, cx);
             });
+        } else if self.active_modal == ActiveModal::None
+            && self.main_surface == MainSurface::Settings
+        {
+            window.focus(&self.settings_focus_handle, cx);
         } else if self.active_modal == ActiveModal::None
             && self.main_surface == MainSurface::Chat
             && self.slash_picker_state.is_open()
@@ -4097,6 +4124,9 @@ impl MultibotView {
                         .focus_handle(cx)
                         .is_focused(window)))
             || (self.main_surface != MainSurface::Settings
+                && self.settings_focus_handle.is_focused(window))
+            || ((self.main_surface != MainSurface::Settings
+                || self.settings_tab != crate::settings::SettingsTab::Hosts)
                 && self.host_input.read(cx).focus_handle(cx).is_focused(window))
             || (self.sidebar_state.mode != SidebarMode::Open
                 && self
@@ -4280,6 +4310,12 @@ impl Render for MultibotView {
                     // 2. Modal dialogs (Command Palette / F1 Shortcuts)
                     this.active_modal = ActiveModal::None;
                     this.palette_state.tab_context_session_key = None;
+                    this.focus_active_surface_default(window, cx);
+                } else if this.sidebar_state.workspace_menu_open {
+                    this.sidebar_state.workspace_menu_open = false;
+                    this.focus_active_surface_default(window, cx);
+                } else if this.chat_state.composer_menu_open {
+                    this.chat_state.composer_menu_open = false;
                     this.focus_active_surface_default(window, cx);
                 } else if this.main_surface == MainSurface::Chat
                     && this.slash_picker_state.is_open()
@@ -4932,9 +4968,12 @@ impl Render for MultibotView {
                     .child(match self.main_surface {
                         MainSurface::Chat => self.render_chat_panel(cx).into_any_element(),
                         MainSurface::Inbox => self.render_inbox_panel(cx).into_any_element(),
-                        MainSurface::Settings => self.render_settings_panel(cx).into_any_element(),
+                        MainSurface::Settings => self.render_chat_panel(cx).into_any_element(),
                     }),
             )
+            .when(self.main_surface == MainSurface::Settings, |el| {
+                el.child(self.render_settings_panel(cx))
+            })
             .when(self.active_modal == ActiveModal::Palette, |el| {
                 el.child(self.render_palette_modal(cx))
             })
@@ -4999,11 +5038,430 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn wave1_general_preferences_control_send_key_and_queue_delivery(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        cx.update_window(handle, |_, window, cx| {
+            let session = make_session("prefs", AgentKind::Claude, "Preferences", true);
+            {
+                let store = cx.global_mut::<SharedAppStore>();
+                store.daemon_tx = Some(tx.clone());
+                store.sessions = vec![session.clone()];
+                store.bump_revision();
+            }
+            view.update(cx, |v, cx| {
+                v.sync_from_shared_store(cx);
+                v.selected_session = Some(session);
+            });
+            window.render_frame(cx);
+            window.press("ctrl-,", cx);
+            window.render_frame(cx);
+            window.click("send-key-ctrl-enter", cx);
+            window.render_frame(cx);
+            window.click("send-messages-immediately", cx);
+            window.render_frame(cx);
+            assert!(view.read(cx).settings.composer_ctrl_enter);
+            assert!(!view.read(cx).settings.queue_while_working);
+            for _ in 0..20 {
+                window.press("tab", cx);
+                window.render_frame(cx);
+                assert!(view.read(cx).settings_focus_handle.contains_focused(window, cx));
+            }
+            window.press("escape", cx);
+            window.render_frame(cx);
+            window.click("prompt-input", cx);
+            window.input("Send now", cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert!(rx.try_recv().is_err(), "Enter must not send in Ctrl+Enter mode");
+            window.press("ctrl-enter", cx);
+            window.render_frame(cx);
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "Send now"));
+            view.update(cx, |v, cx| {
+                v.settings.queue_while_working = true;
+                v.prompt_input.update(cx, |input, cx| input.set_value("Wait for agent", window, cx));
+            });
+            window.press("ctrl-enter", cx);
+            window.render_frame(cx);
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::SteerSession { text, .. }) if text == "Wait for agent"));
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn wave1_queue_bar_tracks_daemon_acknowledgements_and_offline_outbox(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.sessions = vec![make_session("queued", AgentKind::Claude, "Queue", true)];
+                v.selected_session = Some(v.sessions[0].clone());
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("queued-messages-bar").is_none());
+            view.update(cx, |v, cx| {
+                v.handle_daemon_server_event(
+                    ServerEvent::PromptStatus {
+                        session_id: "queued".into(),
+                        message_id: "q-1".into(),
+                        status: "queued".into(),
+                        detail: String::new(),
+                    },
+                    cx,
+                )
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("queued-messages-bar").is_some());
+            view.update(cx, |v, cx| {
+                v.handle_daemon_server_event(
+                    ServerEvent::PromptStatus {
+                        session_id: "queued".into(),
+                        message_id: "q-1".into(),
+                        status: "sent".into(),
+                        detail: String::new(),
+                    },
+                    cx,
+                )
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("queued-messages-bar").is_none());
+            view.update(cx, |v, cx| {
+                let session = v.selected_session.clone().unwrap();
+                v.send_or_queue_prompt(&session, "offline-1".into(), "Offline draft".into());
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("queued-messages-bar").is_some());
+            view.update(cx, |v, cx| {
+                v.cancel_outbox_message("offline-1");
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("queued-messages-bar").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn wave1_updates_offers_install_even_with_hidden_sidebar_and_dismissed_card(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.set_sidebar_mode_synced(SidebarMode::Hidden, cx);
+                v.settings.dismissed_update_version = Some("9.9.9".into());
+                v.update_ui
+                    .set_update_state(UpdateState::Available(ReleaseInfo {
+                        version: "9.9.9".into(),
+                        tag: "v9.9.9".into(),
+                        published_at: String::new(),
+                        notes: vec![],
+                        asset: WindowsAssetInfo {
+                            asset_name: "multibot-windows-x64.zip".into(),
+                            url: "https://example.invalid/release.zip".into(),
+                            sha256: "a".repeat(64),
+                            size_bytes: 1024,
+                            multibot_exe_sha256: "b".repeat(64),
+                            multibotd_linux_x86_64_sha256: "c".repeat(64),
+                        },
+                    }));
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("update-card").is_none());
+            window.press("ctrl-,", cx);
+            window.render_frame(cx);
+            window.click("settings-tab-updates", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("settings-version-label").is_some());
+            assert!(window.try_find("update-primary-btn").is_some());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn wave1_clean_chrome_keeps_status_and_keyboard_entry_points(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            for id in [
+                "sidebar-hosts-header",
+                "connect-local",
+                "import-zigshel-sidebar",
+                "open-palette-btn",
+                "new-window",
+                "sidebar-inbox-btn",
+                "toggle-sidebar-btn",
+                "toggle-settings",
+                "toggle-shortcuts",
+            ] {
+                assert!(
+                    window.try_find(id).is_none(),
+                    "Removed chrome still visible: {id}"
+                );
+            }
+            for id in [
+                "workspace-dropdown",
+                "gpu-status-card",
+                "header-title-pill",
+                "toggle-inbox",
+                "chat-menu",
+                "attach-file-btn",
+                "prompt-input",
+                "composer-voice",
+                "send-prompt",
+            ] {
+                assert!(
+                    window.try_find(id).is_some(),
+                    "Missing minimal control: {id}"
+                );
+            }
+            window.click("gpu-status-card", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).settings_tab,
+                crate::settings::SettingsTab::Gpu
+            );
+            assert!(window.try_find("gpu-mode-auto").is_some());
+            window.press("escape", cx);
+            window.render_frame(cx);
+            window.press("ctrl-k", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::Palette);
+            window.press("escape", cx);
+            window.press("f1", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::Shortcuts);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn wave1_workspace_dropdown_filters_all_favorites_and_named_workspace(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                let mut first = make_session("first", AgentKind::Claude, "First", false);
+                first.updated_at_ms = 10;
+                let mut second = make_session("second", AgentKind::Codex, "Second", false);
+                second.updated_at_ms = 20;
+                v.sessions = vec![first, second];
+                let workspace = v
+                    .sidebar_state
+                    .workspace_store
+                    .create_workspace("Work", None)
+                    .unwrap();
+                let key = v.session_key_for(&v.sessions[0]);
+                v.sidebar_state
+                    .workspace_store
+                    .assign_session_workspace(&key, &workspace.id);
+                v.sidebar_state.workspace_store.toggle_favorite(&key);
+                v.sidebar_state
+                    .workspace_store
+                    .record_session_input(&key, now_unix_ms());
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).sidebar_state.active_workspace_id,
+                multibot_core::workspaces::ALL_WORKSPACES_ID
+            );
+            assert!(window.try_find("session-0").is_some());
+            assert!(window.try_find("session-1").is_some());
+            assert!(window.try_find("workspace-menu").is_none());
+            window.click("workspace-dropdown", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("workspace-menu").is_some());
+            assert!(window.try_find("workspace-new").is_some());
+            assert_eq!(
+                window.find("workspace-option-0").label(),
+                Some("All, 2 sessions")
+            );
+            assert_eq!(
+                window.find("workspace-option-1").label(),
+                Some("Frequent, 1 sessions")
+            );
+            assert_eq!(
+                window.find("workspace-option-2").label(),
+                Some("Favorites, 1 sessions")
+            );
+            window.click("workspace-option-1", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).sidebar_state.active_workspace_view,
+                WorkspaceView::Frequent
+            );
+            assert!(window.try_find("session-0").is_some());
+            assert!(window.try_find("session-1").is_none());
+            window.click("workspace-dropdown", cx);
+            window.render_frame(cx);
+            window.click("workspace-option-2", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).sidebar_state.active_workspace_view,
+                WorkspaceView::Favorites
+            );
+            assert!(window.try_find("workspace-menu").is_none());
+            assert!(window.try_find("session-0").is_some());
+            assert!(window.try_find("session-1").is_none());
+            window.click("workspace-dropdown", cx);
+            window.render_frame(cx);
+            window.click("workspace-option-4", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx)
+                    .sidebar_state
+                    .workspace_store
+                    .workspace_by_id(&view.read(cx).sidebar_state.active_workspace_id)
+                    .unwrap()
+                    .name,
+                "Work"
+            );
+            assert_eq!(
+                view.read(cx).sidebar_state.active_workspace_view,
+                WorkspaceView::All
+            );
+            assert!(window.try_find("session-0").is_some());
+            assert!(window.try_find("session-1").is_none());
+            window.click("workspace-dropdown", cx);
+            window.render_frame(cx);
+            window.click("workspace-option-0", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("session-1").is_some());
+            window.click("workspace-dropdown", cx);
+            window.render_frame(cx);
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("workspace-menu").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn wave1_settings_console_tabs_hosts_and_canonical_shortcuts(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, _| {
+                v.settings.ssh_hosts.push(multibot_core::SshHostConfig {
+                    name: "Saved VPS".into(),
+                    hostname: "example.invalid".into(),
+                    user: "user".into(),
+                    port: 22,
+                    identity_file: None,
+                });
+            });
+            window.render_frame(cx);
+            window.press("ctrl-,", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("settings-console").is_some());
+            assert!(window.try_find("settings-nav").is_some());
+            assert!(window.try_find("settings-content").is_some());
+            assert_eq!(
+                view.read(cx).settings_tab,
+                crate::settings::SettingsTab::General
+            );
+            assert!(window.try_find("send-key-enter").is_some());
+            for (tab, control) in [
+                ("settings-tab-hosts", "connect-local"),
+                ("settings-tab-gpu", "gpu-mode-auto"),
+                ("settings-tab-shortcuts", "settings-shortcut-0"),
+                ("settings-tab-updates", "settings-version-label"),
+                ("settings-tab-workspaces", "settings-new-workspace"),
+            ] {
+                window.click(tab, cx);
+                window.render_frame(cx);
+                assert!(window.try_find(control).is_some(), "Missing {control}");
+                if tab == "settings-tab-hosts" {
+                    assert!(window.try_find("host-0").is_some());
+                    assert!(window.try_find("import-zigshel").is_some());
+                    assert!(window.try_find("add-host").is_some());
+                }
+            }
+            window.click("settings-tab-shortcuts", cx);
+            window.render_frame(cx);
+            for index in 0..multibot_keys::SHORTCUTS.len() {
+                // Scrolled-off rows still exist in this non-virtualized reference.
+                assert!(
+                    window
+                        .try_find(gpui_kit::SharedString::from(format!(
+                            "settings-shortcut-{index}"
+                        )))
+                        .is_some()
+                );
+            }
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn wave1_composer_controls_preserve_drafts_and_stop_working_session(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.sessions = vec![make_session("active", AgentKind::Claude, "Active", true)];
+                v.selected_session = Some(v.sessions[0].clone());
+                v.daemon_tx = Some(tx);
+                v.prompt_input.update(cx, |input, cx| input.set_value("Unsent draft", window, cx));
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.click("attach-file-btn", cx);
+            window.render_frame(cx);
+            for id in ["composer-options", "composer-model", "composer-effort", "composer-permissions"] {
+                assert!(window.try_find(id).is_some());
+            }
+            window.click("composer-effort", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "Unsent draft");
+            window.click("send-prompt", cx);
+            window.render_frame(cx);
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::InterruptSession { session_id, .. }) if session_id == "active"));
+            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "Unsent draft");
+            view.update(cx, |v, cx| v.prompt_input.update(cx, |input, cx| input.set_value("", window, cx)));
+            window.click("attach-file-btn", cx);
+            window.render_frame(cx);
+            window.click("composer-model", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "/model ");
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn wave1_palette_keeps_removed_actions_discoverable(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-k", cx);
+            window.render_frame(cx);
+            let catalog = view.read(cx).build_palette_command_catalog(now_unix_ms());
+            for id in [
+                "pal-cmd-settings",
+                "pal-cmd-import",
+                "pal-cmd-hosts",
+                "pal-cmd-sidebar",
+                "pal-cmd-inbox",
+                "pal-cmd-shortcuts",
+                "pal-cmd-spawn-claude",
+                "pal-cmd-spawn-antigravity",
+                "pal-cmd-spawn-codex",
+                "pal-cmd-window",
+            ] {
+                assert!(catalog.iter().any(|c| c.id == id), "Missing command: {id}");
+            }
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
     fn renders_dark_shell_and_toggles_gpu_settings(cx: &mut TestAppContext) {
         let handle = open_test_view(cx);
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
-            window.click("toggle-settings", cx);
+            window.click("gpu-status-card", cx);
             window.render_frame(cx);
             window.click("gpu-mode-software", cx);
             window.render_frame(cx);
@@ -5016,17 +5474,17 @@ mod tests {
         let handle = open_test_view(cx);
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
-            window.click("open-palette-btn", cx);
+            window.press("ctrl-k", cx);
             window.render_frame(cx);
             window.click("pal-cmd-inbox", cx);
             window.render_frame(cx);
             window.click("inbox-tab-claude", cx);
             window.render_frame(cx);
-            window.click("toggle-shortcuts", cx);
+            window.press("f1", cx);
             window.render_frame(cx);
             window.click("close-shortcuts", cx);
             window.render_frame(cx);
-            window.click("toggle-sidebar-btn", cx);
+            window.press("ctrl-shift-b", cx);
             window.render_frame(cx);
         })
         .unwrap();
@@ -5358,10 +5816,14 @@ mod tests {
         )
         .unwrap();
 
+        let before_hosts = std::fs::read(ssh_dir.join("config")).unwrap();
+        let before_workspaces = std::fs::read(root.join("session.json")).unwrap();
         let (handle, view) = open_test_view_with_entity(cx);
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
-            window.click("toggle-settings", cx);
+            window.press("ctrl-,", cx);
+            window.render_frame(cx);
+            window.click("settings-tab-updates", cx);
             window.render_frame(cx);
             assert!(window.try_find("settings-version-label").is_some());
             assert!(window.try_find("settings-check-updates-btn").is_some());
@@ -5399,6 +5861,11 @@ mod tests {
         })
         .unwrap();
 
+        assert_eq!(std::fs::read(ssh_dir.join("config")).unwrap(), before_hosts);
+        assert_eq!(
+            std::fs::read(root.join("session.json")).unwrap(),
+            before_workspaces
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7849,9 +8316,22 @@ mod tests {
             });
             window.render_frame(cx);
             // Click #ws-pill-new (+) in Window 1 -> creates Workspace 2
-            window.click("ws-pill-new", cx);
+            window.click("workspace-dropdown", cx);
             window.render_frame(cx);
-            assert_eq!(view1.read(cx).sidebar_state.workspace_store.workspaces.len(), 2);
+            window.click("workspace-new", cx);
+            window.render_frame(cx);
+            window.press("w", cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                view1
+                    .read(cx)
+                    .sidebar_state
+                    .workspace_store
+                    .workspaces
+                    .len(),
+                2
+            );
         })
         .unwrap();
         cx.run_until_parked();
@@ -8091,7 +8571,7 @@ mod tests {
                 cx.notify();
             });
             window.render_frame(cx);
-            window.click("sidebar-inbox-btn", cx);
+            window.press("alt-i", cx);
             window.render_frame(cx);
             assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
             assert!(
@@ -8357,17 +8837,14 @@ mod tests {
             window.press("ctrl-f", cx);
             window.render_frame(cx);
             assert!(view.read(cx).chat_state.find_open);
-            // Inside `#chat-panel-root`, the 4 top-bar buttons (`toggle-sidebar-btn`,
-            // `toggle-inbox`, `toggle-settings`, `toggle-shortcuts`) precede the 3 find-bar
-            // buttons (`chat-find-prev`, `chat-find-next`, `chat-find-close`), so 7 Tabs land on
-            // `chat-find-close`.
+            // Two header icon buttons precede the three Find controls.
             view.update(cx, |v, cx| {
                 if let Some(fh) = v.chat_state.focus_handle.clone() {
                     window.focus(&fh, cx);
                 }
             });
             window.render_frame(cx);
-            for _ in 0..7 {
+            for _ in 0..5 {
                 window.press("tab", cx);
                 window.render_frame(cx);
             }
@@ -8417,16 +8894,13 @@ mod tests {
                 view.read(cx).sidebar_state.is_shown(),
                 view.read(cx).settings.dismissed_update_version.as_deref(),
             ));
-            // Sidebar buttons in order: open-palette-btn, new-window, connect-local,
-            // import-zigshel-sidebar, update-dismiss-x, update-primary-btn, update-later-btn (7 tabs).
-            for _ in 0..7 {
+            // Reach the action through keyboard navigation, independent of chrome count.
+            for _ in 0..12 {
+                if window.find("update-later-btn").focused() == Some(true) { break; }
                 window.press("tab", cx);
                 window.render_frame(cx);
             }
-            assert!(
-                !view.read_with(cx, |v, cx| v.is_focused_on_mounted_known_handle(window, cx)),
-                "Tab inside sidebar must reach update-later-btn Button"
-            );
+            assert_eq!(window.find("update-later-btn").focused(), Some(true));
             window.press("enter", cx);
             window.render_frame(cx);
             assert!(
@@ -8457,11 +8931,12 @@ mod tests {
                 cx.notify();
             });
             window.render_frame(cx);
-            for _ in 0..7 {
+            for _ in 0..12 {
+                if window.find("update-later-btn").focused() == Some(true) { break; }
                 window.press("tab", cx);
                 window.render_frame(cx);
             }
-            assert!(!view.read_with(cx, |v, cx| v.is_focused_on_mounted_known_handle(window, cx)));
+            assert_eq!(window.find("update-later-btn").focused(), Some(true));
             // Background state change unmounts update card without any button click handler running
             view.update(cx, |v, cx| {
                 v.update_ui.set_update_state(UpdateState::UpToDate);
@@ -8731,21 +9206,21 @@ mod tests {
             assert_eq!(view.read(cx).chat_state.find_matches, vec![0, 1, 2]);
             assert_eq!(view.read(cx).chat_state.find_current, 0);
 
-            // Focus #chat-panel-root, then Tab 5 times to land on `chat-find-prev`
-            // (4 top-bar buttons precede the 3 find-bar buttons: prev, next, close).
+            // Focus #chat-panel-root, then Tab 3 times to land on `chat-find-prev`
+            // (2 top-bar buttons precede the 3 find-bar buttons: prev, next, close).
             view.update(cx, |v, cx| {
                 if let Some(fh) = v.chat_state.focus_handle.clone() {
                     window.focus(&fh, cx);
                 }
             });
             window.render_frame(cx);
-            for _ in 0..5 {
+            for _ in 0..3 {
                 window.press("tab", cx);
                 window.render_frame(cx);
             }
             assert!(
                 !view.read_with(cx, |v, cx| v.is_focused_on_mounted_known_handle(window, cx)),
-                "5th Tab from chat-panel must focus chat-find-prev Button"
+                "3rd Tab from chat-panel must focus chat-find-prev Button"
             );
 
             // Enter on `chat-find-prev` must step backward by exactly 1 (0 -> 2), NOT net 0!
@@ -9023,7 +9498,7 @@ mod tests {
                 "Ctrl+, (ToggleSettings) must close open Table Modal"
             );
             assert_eq!(view.read(cx).main_surface, MainSurface::Settings);
-            assert!(view.read(cx).root_focus_handle.is_focused(window));
+            assert!(view.read(cx).settings_focus_handle.is_focused(window));
             window.press("ctrl-k", cx);
             window.render_frame(cx);
             assert_eq!(
@@ -10479,7 +10954,9 @@ mod tests {
                 });
                 window.render_frame(cx);
                 assert!(view1.read(cx).is_sidebar_rename_mounted());
-                window.click("ws-pill-starred", cx);
+                window.click("workspace-dropdown", cx);
+                window.render_frame(cx);
+                window.click("workspace-option-2", cx);
                 window.render_frame(cx);
                 assert!(view1.read(cx).sidebar_state.rename.is_none());
                 assert!(
@@ -10496,7 +10973,9 @@ mod tests {
                 assert_eq!(view1.read(cx).inbox_state.selected_row, 1);
 
                 // --- Path C: Open-sidebar rename on Inbox cleared via Alt+3 workspace switch ---
-                window.click("ws-pill-0", cx);
+                window.click("workspace-dropdown", cx);
+                window.render_frame(cx);
+                window.click("workspace-option-3", cx);
                 window.render_frame(cx);
                 view1.update(cx, |v, cx| {
                     v.start_sidebar_rename_with_window(k2.clone(), window, cx);

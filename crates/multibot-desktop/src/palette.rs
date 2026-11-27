@@ -381,7 +381,7 @@ impl MultibotView {
             // Look and settings
             PaletteCommandSpec {
                 id: "pal-cmd-settings".into(),
-                label: "Open GPU & VPS Settings".into(),
+                label: "Open Settings".into(),
                 chord: "Ctrl+,".into(),
                 category: PaletteCategory::LookAndSettings,
                 destructive: false,
@@ -406,6 +406,21 @@ impl MultibotView {
                 category: PaletteCategory::LookAndSettings,
                 destructive: false,
                 aliases: vec!["keys".into(), "help".into()],
+                tab_context: false,
+                global: true,
+            },
+            PaletteCommandSpec {
+                id: "pal-cmd-hosts".into(),
+                label: "Connect Host / Switch Host".into(),
+                chord: String::new(),
+                category: PaletteCategory::LookAndSettings,
+                destructive: false,
+                aliases: vec![
+                    "connect".into(),
+                    "ssh".into(),
+                    "hosts".into(),
+                    "local".into(),
+                ],
                 tab_context: false,
                 global: true,
             },
@@ -727,6 +742,10 @@ impl MultibotView {
                             self.focus_inbox(win, cx);
                         }
                     }
+                    "pal-cmd-hosts" => {
+                        self.settings_tab = crate::settings::SettingsTab::Hosts;
+                        self.set_main_surface(MainSurface::Settings);
+                    }
                     "pal-cmd-settings" => {
                         self.sidebar_state.rename = None;
                         self.sidebar_state.new_workspace_draft = None;
@@ -767,7 +786,15 @@ impl MultibotView {
                     }
                     "pal-cmd-group-toggle" => {
                         if let Some(ref key) = target_key {
-                            let ws_id = self.sidebar_state.active_workspace_id.clone();
+                            let ws_id = if self.sidebar_state.active_workspace_id
+                                == multibot_core::workspaces::ALL_WORKSPACES_ID
+                            {
+                                self.sidebar_state
+                                    .workspace_store
+                                    .effective_workspace_id(key)
+                            } else {
+                                self.sidebar_state.active_workspace_id.clone()
+                            };
                             if self
                                 .sidebar_state
                                 .workspace_store
@@ -785,7 +812,15 @@ impl MultibotView {
                     }
                     "pal-cmd-group-assign" => {
                         if let Some(ref key) = target_key {
-                            let ws_id = self.sidebar_state.active_workspace_id.clone();
+                            let ws_id = if self.sidebar_state.active_workspace_id
+                                == multibot_core::workspaces::ALL_WORKSPACES_ID
+                            {
+                                self.sidebar_state
+                                    .workspace_store
+                                    .effective_workspace_id(key)
+                            } else {
+                                self.sidebar_state.active_workspace_id.clone()
+                            };
                             self.sidebar_state
                                 .workspace_store
                                 .toggle_group_for_session(key, &ws_id, None, "Group");
@@ -1810,7 +1845,7 @@ mod tests {
         let (handle, view) = open_view(cx);
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
-            window.click("open-palette-btn", cx);
+            window.press("ctrl-k", cx);
             window.render_frame(cx);
 
             // Backward-compat contract (`app.rs:639`): pal-cmd-inbox MUST be visible in 520px viewport

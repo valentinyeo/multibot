@@ -53,7 +53,7 @@ fn default_ui_scale_pct() -> u16 {
     DEFAULT_UI_SCALE_PCT
 }
 
-fn default_auto_check_updates() -> bool {
+fn default_true() -> bool {
     true
 }
 
@@ -115,13 +115,17 @@ pub struct MultibotSettings {
     pub sidebar_mode: SidebarMode,
     #[serde(default = "default_chat_font_size_pt")]
     pub chat_font_size_pt: u16,
+    #[serde(default)]
+    pub composer_ctrl_enter: bool,
+    #[serde(default = "default_true")]
+    pub queue_while_working: bool,
     #[serde(default = "default_ui_scale_pct")]
     pub ui_scale_pct: u16,
     #[serde(default)]
     pub dismissed_update_version: Option<String>,
     #[serde(default)]
     pub last_update_etag: Option<String>,
-    #[serde(default = "default_auto_check_updates")]
+    #[serde(default = "default_true")]
     pub auto_check_updates: bool,
 }
 
@@ -133,6 +137,8 @@ impl Default for MultibotSettings {
             selected_host: None,
             sidebar_mode: SidebarMode::Open,
             chat_font_size_pt: DEFAULT_CHAT_FONT_SIZE_PT,
+            composer_ctrl_enter: false,
+            queue_while_working: true,
             ui_scale_pct: DEFAULT_UI_SCALE_PCT,
             dismissed_update_version: None,
             last_update_etag: None,

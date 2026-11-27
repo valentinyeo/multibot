@@ -636,11 +636,23 @@ impl MultibotView {
 
     /// Sidebar update card rendered directly above `#gpu-status-card`.
     /// Uses `self.sidebar_state.is_shown()` and `self.settings.sidebar_mode` (M4-parallel safe).
-    pub(crate) fn render_update_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn render_update_card(
+        &self,
+        in_settings: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let visible = self.update_ui.is_card_visible(
-            self.settings.sidebar_mode,
-            self.sidebar_state.is_shown(),
-            self.settings.dismissed_update_version.as_deref(),
+            if in_settings {
+                SidebarMode::Open
+            } else {
+                self.settings.sidebar_mode
+            },
+            in_settings || self.sidebar_state.is_shown(),
+            if in_settings {
+                None
+            } else {
+                self.settings.dismissed_update_version.as_deref()
+            },
         );
         if !visible {
             return None;

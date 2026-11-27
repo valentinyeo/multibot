@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const STARRED_WORKSPACE_ID: &str = "__starred__";
+pub const ALL_WORKSPACES_ID: &str = "__all__";
 pub const DEFAULT_WORKSPACE_ID: &str = "general";
 pub const DEFAULT_WORKSPACE_NAME: &str = "General";
 pub const RESERVED_OTHER_NAME: &str = "Other";
@@ -753,9 +754,10 @@ impl WorkspaceStore {
         }
     }
 
-    /// Cycles across `[STARRED_WORKSPACE_ID, visible_workspaces...]` by `delta` (wrapping).
+    /// Cycles across `[ALL_WORKSPACES_ID, STARRED_WORKSPACE_ID, visible_workspaces...]` by `delta` (wrapping).
     pub fn cycle_workspace_id(&self, current_id: &str, delta: isize, now_ms: i64) -> String {
-        let mut ring = Vec::with_capacity(self.workspaces.len() + 1);
+        let mut ring = Vec::with_capacity(self.workspaces.len() + 2);
+        ring.push(ALL_WORKSPACES_ID.to_string());
         ring.push(STARRED_WORKSPACE_ID.to_string());
         for ws in self.visible_workspaces(now_ms) {
             ring.push(ws.id.clone());
@@ -1399,6 +1401,7 @@ impl WorkspaceStore {
         now_ms: i64,
     ) -> SidebarLayout {
         let in_starred = workspace_id == STARRED_WORKSPACE_ID;
+        let in_all = workspace_id == ALL_WORKSPACES_ID;
 
         let ws_name_map: HashMap<&str, &str> = self
             .workspaces
@@ -1434,7 +1437,7 @@ impl WorkspaceStore {
                 if !self.favorites.contains(&input.key) {
                     continue;
                 }
-            } else if eff_ws != workspace_id {
+            } else if !in_all && eff_ws != workspace_id {
                 continue;
             }
 
@@ -1519,7 +1522,9 @@ impl WorkspaceStore {
                 row,
             };
 
-            if let Some(gid) = eff_group {
+            if in_all {
+                ungrouped_recents.push(cand);
+            } else if let Some(gid) = eff_group {
                 grouped_buckets.entry(gid).or_default().push(cand);
             } else if eff_pinned {
                 ungrouped_pinned.push(cand);
@@ -1563,7 +1568,14 @@ impl WorkspaceStore {
         let pinned_tiles: Vec<SidebarRow> = ungrouped_pinned.into_iter().map(|c| c.row).collect();
 
         // Ungrouped recents: auto-sort (!muted -> used_ms desc -> pos asc) or manual order
-        if self.auto_sort {
+        if in_all {
+            ungrouped_recents.sort_by(|a, b| {
+                b.row
+                    .used_ms
+                    .cmp(&a.row.used_ms)
+                    .then_with(|| a.orig_pos.cmp(&b.orig_pos))
+            });
+        } else if self.auto_sort {
             ungrouped_recents.sort_by(|a, b| {
                 a.row
                     .muted
@@ -1605,7 +1617,7 @@ impl WorkspaceStore {
                 }
             }
         }
-        if !self.recents_section_collapsed {
+        if in_all || !self.recents_section_collapsed {
             for item in &recents {
                 ctrl_digit_order.push(item.session_key.clone());
             }
@@ -2874,6 +2886,68 @@ mod tests {
             host,
             summary,
         }
+    }
+
+    #[test]
+    fn all_workspaces_is_flat_recent_order_including_pinned_grouped_and_muted() {
+        let mut store = WorkspaceStore::new();
+        let work = store.create_workspace("Work", None).unwrap();
+        let first = make_session("first", AgentKind::Claude, "First", 10, false, false);
+        let second = make_session("second", AgentKind::Codex, "Second", 20, false, false);
+        let archived = SessionSummary {
+            archived: true,
+            ..make_session("archived", AgentKind::Claude, "Archived", 30, false, false)
+        };
+        let inputs = vec![
+            make_input("host", &first),
+            make_input("host", &second),
+            make_input("host", &archived),
+        ];
+        store.assign_session_workspace(&inputs[0].key, &work.id);
+        store.toggle_pin(&inputs[0].key, false);
+        store.toggle_favorite(&inputs[0].key);
+        store.toggle_group_for_session(&inputs[1].key, DEFAULT_WORKSPACE_ID, None, "Group");
+        store.session_meta.get_mut(&inputs[1].key).unwrap().muted = true;
+        store.recents_section_collapsed = true;
+        store.auto_sort = false;
+        let all = store.compute_sidebar_layout(ALL_WORKSPACES_ID, &inputs, false, 100);
+        assert!(all.pinned_tiles.is_empty());
+        assert!(all.groups.is_empty());
+        assert_eq!(
+            all.recents
+                .iter()
+                .map(|r| r.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second", "first"]
+        );
+        assert_eq!(
+            all.ctrl_digit_order,
+            vec![inputs[1].key.clone(), inputs[0].key.clone()]
+        );
+        let favorites = store.compute_sidebar_layout_with_options(
+            ALL_WORKSPACES_ID,
+            WorkspaceView::Favorites,
+            &inputs,
+            false,
+            None,
+            100,
+        );
+        assert_eq!(
+            favorites
+                .recents
+                .iter()
+                .map(|r| r.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first"]
+        );
+        assert_eq!(
+            store.cycle_workspace_id(ALL_WORKSPACES_ID, 1, 100),
+            STARRED_WORKSPACE_ID
+        );
+        assert_eq!(
+            store.cycle_workspace_id(STARRED_WORKSPACE_ID, -1, 100),
+            ALL_WORKSPACES_ID
+        );
     }
 
     #[test]
