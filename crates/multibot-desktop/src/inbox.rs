@@ -44,6 +44,25 @@ pub(crate) enum InboxKeyOutcome {
 }
 
 impl InboxState {
+    /// Clamps `active_split` onto the visible (non-empty) split bar.
+    ///
+    /// A split that dropped to `0` sessions is hidden from the bar, so the Inbox would sit on
+    /// a dead-end tab. Fall back to `All` (or the first visible split) instead.
+    /// Returns `true` when `active_split` changed.
+    pub(crate) fn normalize_active_split(&mut self, visible_splits: &[InboxSplit]) -> bool {
+        if visible_splits.is_empty() || visible_splits.contains(&self.active_split) {
+            return false;
+        }
+        self.active_split = if visible_splits.contains(&InboxSplit::All) {
+            InboxSplit::All
+        } else {
+            visible_splits[0].clone()
+        };
+        self.selected_row = 0;
+        self.last_g_press_ms = None;
+        true
+    }
+
     pub(crate) fn select_all_split(&mut self) {
         self.active_split = InboxSplit::All;
         self.selected_row = 0;
@@ -343,9 +362,30 @@ pub(crate) fn format_relative_age(timestamp_ms: i64, now_ms: i64) -> String {
 
 impl MultibotView {
     pub(crate) fn compute_inbox_rows(&self, now_ms: i64) -> Vec<InboxRow> {
+        self.compute_inbox_rows_for(&self.inbox_state.active_split, now_ms)
+    }
+
+    pub(crate) fn compute_inbox_rows_for(
+        &self,
+        split: &InboxSplit,
+        now_ms: i64,
+    ) -> Vec<InboxRow> {
         let inputs = self.session_inputs();
         self.sidebar_state.workspace_store.query_inbox(
-            &self.inbox_state.active_split,
+            split,
+            &inputs,
+            self.sidebar_state.unread_only,
+            &self.inbox_state.filter_query,
+            now_ms,
+        )
+    }
+
+    /// The Inbox split bar and `Tab` / `Shift+Tab` cycle order: non-empty splits only, with
+    /// `All` always present. The Sidebar workspace switcher and Settings keep their own
+    /// unfiltered workspace lists.
+    pub(crate) fn inbox_visible_splits(&self, now_ms: i64) -> Vec<InboxSplit> {
+        let inputs = self.session_inputs();
+        self.sidebar_state.workspace_store.inbox_splits_with_sessions(
             &inputs,
             self.sidebar_state.unread_only,
             &self.inbox_state.filter_query,
@@ -379,8 +419,11 @@ impl MultibotView {
         }
         self.inbox_state.rename = None;
         let now = now_unix_ms();
-        let splits = self.sidebar_state.workspace_store.visible_inbox_splits(now);
+        let splits = self.inbox_visible_splits(now);
         if !splits.is_empty() {
+            // Cycle strictly across the visible (non-empty) splits so `Tab` never lands on a
+            // hidden `0`-count split.
+            self.inbox_state.normalize_active_split(&splits);
             let len = splits.len();
             let cur = splits
                 .iter()
@@ -431,10 +474,8 @@ impl MultibotView {
             self.inbox_state.rename = None;
         }
         let now = now_unix_ms();
-        let splits = self
-            .sidebar_state
-            .workspace_store
-            .visible_inbox_splits(now);
+        let splits = self.inbox_visible_splits(now);
+        self.inbox_state.normalize_active_split(&splits);
         let rows = self.compute_inbox_rows(now);
         let keys: Vec<String> = rows.iter().map(|r| r.session_key.clone()).collect();
 
@@ -519,11 +560,18 @@ impl MultibotView {
     pub(crate) fn render_inbox_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let now = now_unix_ms();
         let inputs = self.session_inputs();
-        let splits = self
-            .sidebar_state
-            .workspace_store
-            .visible_inbox_splits(now);
-        let filtered_rows = self.compute_inbox_rows(now);
+        let splits = self.inbox_visible_splits(now);
+        // `inbox_state` may still point at a split that just dropped to `0` sessions (render is
+        // `&self`, so it cannot normalize state). Show `All` instead of rows from a tab that is
+        // no longer in the bar; the next key press normalizes the state for good.
+        let active_split = if splits.contains(&self.inbox_state.active_split) {
+            self.inbox_state.active_split.clone()
+        } else if splits.contains(&InboxSplit::All) {
+            InboxSplit::All
+        } else {
+            splits.first().cloned().unwrap_or(InboxSplit::All)
+        };
+        let filtered_rows = self.compute_inbox_rows_for(&active_split, now);
         let selected_idx = self
             .inbox_state
             .selected_row
@@ -533,7 +581,7 @@ impl MultibotView {
         let mut split_row = h_flex().flex_wrap().gap_1p5().items_center();
         let mut ws_split_counter = 0usize;
         for split in splits {
-            let active = self.inbox_state.active_split == split;
+            let active = active_split == split;
             let split_rows = self.sidebar_state.workspace_store.query_inbox(
                 &split,
                 &inputs,
@@ -1164,7 +1212,11 @@ mod tests {
                     },
                 ];
                 let k1 = v.session_key_for(&v.sessions[0]);
+                // Favorites and Frequent each hold one session so their pills render
                 v.sidebar_state.workspace_store.toggle_favorite(&k1);
+                v.sidebar_state
+                    .workspace_store
+                    .record_session_input(&k1, now_unix_ms());
                 cx.notify();
             });
             window.render_frame(cx);
@@ -1586,6 +1638,7 @@ mod tests {
         });
 
         let now = now_unix_ms();
+        let mut empty_ws_id = String::new();
         cx.update_window(handle, |_, window, cx| {
             view.update(cx, |v, cx| {
                 let s1 = SessionSummary {
@@ -1604,12 +1657,14 @@ mod tests {
                 };
                 let k1 = v.session_key_for(&s1);
                 v.sessions = vec![s1, s2];
-                // Ensure Favorites + Workspace splits are visible alongside All
+                // Favorites gains a session, the Backend workspace stays empty and is hidden
                 v.sidebar_state.workspace_store.toggle_favorite(&k1);
-                let _ = v
+                empty_ws_id = v
                     .sidebar_state
                     .workspace_store
-                    .create_workspace("Backend", Some("#3B82F6".into()));
+                    .create_workspace("Backend", Some("#3B82F6".into()))
+                    .expect("Backend workspace must be created")
+                    .id;
                 cx.notify();
             });
             window.render_frame(cx);
@@ -1621,20 +1676,32 @@ mod tests {
             let splits = view.read_with(cx, |v, _| {
                 assert_eq!(v.main_surface, MainSurface::Inbox);
                 assert_eq!(v.inbox_state.active_split, InboxSplit::All);
-                v.sidebar_state
-                    .workspace_store
-                    .visible_inbox_splits(now_unix_ms())
+                v.inbox_visible_splits(now_unix_ms())
             });
+            assert_eq!(
+                splits.iter().take(2).cloned().collect::<Vec<_>>(),
+                vec![InboxSplit::All, InboxSplit::Favorites],
+                "only non-empty splits stay in the bar (All + Favorites); Frequent 0 is hidden"
+            );
             assert!(
-                splits.len() >= 3,
-                "expected at least 3 visible splits (All, Favorites, Workspaces), got {splits:?}"
+                !splits.contains(&InboxSplit::Workspace(empty_ws_id.clone())),
+                "the 0-session Backend workspace split must be hidden: {splits:?}"
+            );
+            let rendered_ws_pills = splits
+                .iter()
+                .filter(|split| matches!(split, InboxSplit::Workspace(_)))
+                .count();
+            let hidden_pill_id = format!("inbox-split-ws-{rendered_ws_pills}");
+            assert!(
+                window.try_find(hidden_pill_id).is_none(),
+                "no pill may render for a hidden 0-session workspace split"
             );
             let start_idx = splits
                 .iter()
                 .position(|s| *s == InboxSplit::All)
                 .unwrap();
 
-            // Press real Tab across every split and wrap around back to All
+            // Press real Tab across every visible split and wrap around back to All
             for step in 1..=splits.len() {
                 window.press("tab", cx);
                 window.render_frame(cx);
@@ -1678,6 +1745,228 @@ mod tests {
                 1,
                 "`j` must still navigate Inbox rows after Tab/Shift+Tab"
             );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn inbox_split_bar_hides_zero_count_splits_and_tab_skips_them(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::theme::apply_multibot_dark_theme(cx);
+            crate::bind_multibot_keys(cx);
+            crate::state::SharedAppStore::init(cx, multibot_core::MultibotSettings::default());
+        });
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let (handle, view): (gpui_kit::AnyWindowHandle, Entity<MultibotView>) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
+                cx.new(|cx| MultibotView::new(rt, window, cx))
+            })
+            .unwrap()
+        });
+
+        // 1. Empty Inbox: `All` stays visible with 0 sessions, every other split is hidden
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("alt-i", cx);
+            window.render_frame(cx);
+            let splits = view.read_with(cx, |v, _| v.inbox_visible_splits(now_unix_ms()));
+            assert_eq!(
+                splits,
+                vec![InboxSplit::All],
+                "All must stay visible even at 0 total sessions"
+            );
+            assert!(
+                window.try_find("inbox-tab-all").is_some(),
+                "the All pill must render in an empty Inbox"
+            );
+            assert!(
+                window.try_find("inbox-split-frequent").is_none(),
+                "Frequent 0 must be hidden"
+            );
+            assert!(
+                window.try_find("inbox-split-favorites").is_none(),
+                "Favorites 0 must be hidden"
+            );
+        })
+        .unwrap();
+
+        // 2. Give Frequent, Favorites and Backend one session each; Empty Shelf stays at 0
+        let now = now_unix_ms();
+        let mut backend_ws_id = String::new();
+        let mut empty_ws_id = String::new();
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                let s1 = SessionSummary {
+                    id: "hide-s1".into(),
+                    agent: AgentKind::Claude,
+                    title: "Hidden Split Session 1".into(),
+                    updated_at_ms: now - 3_000,
+                    ..Default::default()
+                };
+                let s2 = SessionSummary {
+                    id: "hide-s2".into(),
+                    agent: AgentKind::Codex,
+                    title: "Hidden Split Session 2".into(),
+                    updated_at_ms: now - 2_000,
+                    ..Default::default()
+                };
+                let s3 = SessionSummary {
+                    id: "hide-s3".into(),
+                    agent: AgentKind::Claude,
+                    title: "Hidden Split Session 3".into(),
+                    updated_at_ms: now - 1_000,
+                    ..Default::default()
+                };
+                let k1 = v.session_key_for(&s1);
+                let k2 = v.session_key_for(&s2);
+                let k3 = v.session_key_for(&s3);
+                v.sessions = vec![s1, s2, s3];
+                let store = &mut v.sidebar_state.workspace_store;
+                store.toggle_favorite(&k1);
+                store.record_session_input(&k2, now);
+                backend_ws_id = store
+                    .create_workspace("Backend", None)
+                    .expect("Backend workspace must be created")
+                    .id;
+                empty_ws_id = store
+                    .create_workspace("Empty Shelf", None)
+                    .expect("Empty Shelf workspace must be created")
+                    .id;
+                store.assign_session_workspace(&k3, &backend_ws_id);
+                cx.notify();
+            });
+            window.render_frame(cx);
+
+            let splits = view.read_with(cx, |v, _| v.inbox_visible_splits(now_unix_ms()));
+            assert!(
+                splits.contains(&InboxSplit::Frequent)
+                    && splits.contains(&InboxSplit::All)
+                    && splits.contains(&InboxSplit::Favorites)
+                    && splits.contains(&InboxSplit::Workspace(backend_ws_id.clone())),
+                "every split with >= 1 session stays in the bar: {splits:?}"
+            );
+            assert!(
+                !splits.contains(&InboxSplit::Workspace(empty_ws_id.clone())),
+                "the 0-session Empty Shelf workspace split must be hidden: {splits:?}"
+            );
+
+            // Counts on the surviving pills still come from the live Inbox query
+            for (split, expected) in [
+                (InboxSplit::Frequent, 1usize),
+                (InboxSplit::All, 3),
+                (InboxSplit::Favorites, 1),
+                (InboxSplit::Workspace(backend_ws_id.clone()), 1),
+            ] {
+                assert_eq!(
+                    view.read_with(cx, |v, _| {
+                        v.compute_inbox_rows_for(&split, now_unix_ms()).len()
+                    }),
+                    expected,
+                    "visible split {split:?} keeps its real count"
+                );
+            }
+
+            // Rendered pills: one per visible workspace split, none for the hidden one
+            assert!(window.try_find("inbox-split-frequent").is_some());
+            assert!(window.try_find("inbox-tab-all").is_some());
+            assert!(window.try_find("inbox-split-favorites").is_some());
+            let rendered_ws_pills = splits
+                .iter()
+                .filter(|split| matches!(split, InboxSplit::Workspace(_)))
+                .count();
+            assert!(
+                rendered_ws_pills >= 1,
+                "the non-empty workspace splits must render: {splits:?}"
+            );
+            assert!(
+                window.try_find("inbox-split-ws-0").is_some(),
+                "the first non-empty workspace pill must render"
+            );
+            let hidden_pill_id = format!("inbox-split-ws-{rendered_ws_pills}");
+            assert!(
+                window.try_find(hidden_pill_id).is_none(),
+                "the 0-session Empty Shelf pill must NOT render"
+            );
+
+            // Empty workspaces stay manageable in the Sidebar/Settings workspace lists
+            let managed = view.read_with(cx, |v, _| {
+                v.sidebar_state
+                    .workspace_store
+                    .visible_workspaces(now_unix_ms())
+                    .iter()
+                    .map(|w| w.id.clone())
+                    .collect::<Vec<_>>()
+            });
+            assert!(
+                managed.contains(&empty_ws_id),
+                "empty workspaces must stay visible in the Sidebar workspace switcher"
+            );
+            assert!(managed.contains(&backend_ws_id));
+        })
+        .unwrap();
+
+        // 3. Tab / Shift+Tab cycle strictly across the visible splits
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.inbox_state.select_all_split();
+                v.focus_inbox(window, cx);
+                cx.notify();
+            });
+            window.render_frame(cx);
+
+            // Tab walks the visible order and wraps back to `All` after one full lap
+            let order = view.read_with(cx, |v, _| v.inbox_visible_splits(now_unix_ms()));
+            assert_eq!(order.first(), Some(&InboxSplit::Frequent));
+            let start_idx = order
+                .iter()
+                .position(|split| *split == InboxSplit::All)
+                .expect("All must be in the visible order");
+            for step in 1..=order.len() {
+                window.press("tab", cx);
+                window.render_frame(cx);
+                let active = view.read_with(cx, |v, _| v.inbox_state.active_split.clone());
+                assert!(
+                    active != InboxSplit::Workspace(empty_ws_id.clone()),
+                    "Tab must never select a hidden 0-count split"
+                );
+                assert_eq!(
+                    active,
+                    order[(start_idx + step) % order.len()],
+                    "Tab step {step} must walk the visible splits only"
+                );
+            }
+            assert_eq!(view.read_with(cx, |v, _| v.inbox_state.selected_row), 0);
+
+            // Shift+Tab from All steps backward to the split before it in the visible order
+            window.press("shift-tab", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                view.read_with(cx, |v, _| v.inbox_state.active_split.clone()),
+                order[(start_idx + order.len() - 1) % order.len()],
+                "Shift+Tab must wrap backward through visible splits only"
+            );
+
+            // 4. A split that empties out is dropped: Tab recovers onto a visible split
+            view.update(cx, |v, cx| {
+                v.inbox_state.active_split = InboxSplit::Workspace(empty_ws_id.clone());
+                v.inbox_state.selected_row = 1;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.press("tab", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                view.read_with(cx, |v, _| v.inbox_state.active_split.clone()),
+                order[(start_idx + 1) % order.len()],
+                "Tab from a hidden split must land on the next visible split, never on a dead end"
+            );
+            assert_eq!(view.read_with(cx, |v, _| v.inbox_state.selected_row), 0);
         })
         .unwrap();
     }

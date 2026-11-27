@@ -157,12 +157,14 @@ Opening multiprompt is locked until device login is validated and the initial se
 
 The Inbox is keyboard-first and minimal. While it is open, the sidebar and the floating header bar (title pill, Inbox and menu buttons) are hidden. Your sidebar preference is untouched and comes back when you leave the Inbox. The provider filter pills (Claude, Antigravity, Codex) and the Unread Only button are not shown; the unread-only filter still works through Ctrl+Shift+U.
 
+The split bar shows only splits that hold at least one session, so no wall of `Frequent 0`, `★ Favorites 0` or `0`-count workspace pills. ALL always stays visible, even with no sessions at all. Tab, Shift+Tab, h and l cycle only across the visible splits. A split that empties out drops from the bar and the Inbox falls back to ALL. Empty workspaces still appear in the sidebar workspace switcher and in Settings -> Workspaces.
+
 | Keys | Action |
 | --- | --- |
 | Sidebar inbox button | Click to open; Ctrl+Shift+I toggles; Alt+I opens / selects All |
 | Ctrl+F or / | Reduce Inbox to matching sessions |
 | j/k or Alt+J/K  gg/G or Alt+G Alt+G / Alt+Shift+G  1-9 | Move / top / bottom / jump row |
-| Tab / h / l | Switch workspace split |
+| Tab / Shift+Tab / h / l | Switch workspace split (visible non-empty splits only) |
 | e or Alt+E / z or Alt+Z / u | Archive / undo archive / toggle read-unread |
 | Ctrl+K -&gt; Copy chat ID | Copy the chosen chat identity |
 | Ctrl+Shift+U | Toggle unread-only filter (global) |
