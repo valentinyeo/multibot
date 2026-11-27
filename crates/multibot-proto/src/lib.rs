@@ -981,6 +981,7 @@ mod tests {
             todos_total: 2,
             needs_attention: true,
             archived: false,
+            archive_kill_process: false,
             model: Some("claude-opus".into()),
             workspace: Some("Yeo UX".into()),
         };
