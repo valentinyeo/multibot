@@ -55,6 +55,9 @@ opt-level = "s"
 [profile.dev.package.regex-syntax]
 opt-level = "s"
 
+[profile.dev.package.serde_json]
+opt-level = "s"
+
 [profile.dev.package.sha2]
 opt-level = 3
 

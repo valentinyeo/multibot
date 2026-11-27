@@ -13,6 +13,7 @@ use multibot_proto::{
 };
 use regex::Regex;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -723,30 +724,33 @@ impl ClaudeProvider {
                     let mut had_tool_use = false;
                     let msg_idx = parsed.messages.len();
 
-                    let flush_text = |current: &mut String,
-                                      blocks: &mut Vec<MessageBlock>,
-                                      segments: &mut Vec<String>| {
-                        if current.is_empty() {
-                            return;
-                        }
-                        let cleaned = strip_base64_in_str(&strip_system_reminders(current))
-                            .trim()
-                            .to_string();
-                        current.clear();
-                        if !cleaned.is_empty() {
-                            let imgs = extract_image_blocks(&cleaned);
-                            blocks.push(MessageBlock::Text {
-                                text: cleaned.clone(),
-                            });
-                            blocks.extend(imgs);
-                            segments.push(cleaned);
-                        }
-                    };
+                    let flush_text =
+                        |current: Cow<'_, str>,
+                         blocks: &mut Vec<MessageBlock>,
+                         segments: &mut Vec<String>| {
+                            if current.is_empty() {
+                                return;
+                            }
+                            let without_reminders = if current.contains("<system-reminder>") {
+                                Cow::Owned(strip_system_reminders(&current))
+                            } else {
+                                current
+                            };
+                            let scrubbed = strip_base64_cow(&without_reminders);
+                            let cleaned = scrubbed.trim();
+                            if !cleaned.is_empty() {
+                                let imgs = extract_image_blocks(cleaned);
+                                blocks.push(MessageBlock::Text {
+                                    text: cleaned.to_string(),
+                                });
+                                blocks.extend(imgs);
+                                segments.push(cleaned.to_string());
+                            }
+                        };
 
                     match content {
                         Value::String(s) => {
-                            current_text.push_str(s);
-                            flush_text(&mut current_text, &mut blocks, &mut text_segments);
+                            flush_text(Cow::Borrowed(s), &mut blocks, &mut text_segments);
                         }
                         Value::Array(parts) => {
                             for part in parts {
@@ -766,7 +770,7 @@ impl ClaudeProvider {
                                     "image" => match extract_image_part(part) {
                                         ClaudeImagePart::Block(img) => {
                                             flush_text(
-                                                &mut current_text,
+                                                Cow::Owned(std::mem::take(&mut current_text)),
                                                 &mut blocks,
                                                 &mut text_segments,
                                             );
@@ -782,7 +786,7 @@ impl ClaudeProvider {
                                     },
                                     "tool_use" => {
                                         flush_text(
-                                            &mut current_text,
+                                            Cow::Owned(std::mem::take(&mut current_text)),
                                             &mut blocks,
                                             &mut text_segments,
                                         );
@@ -951,13 +955,17 @@ impl ClaudeProvider {
                                     }
                                 }
                             }
-                            flush_text(&mut current_text, &mut blocks, &mut text_segments);
+                            flush_text(Cow::Owned(current_text), &mut blocks, &mut text_segments);
                         }
                         _ => {}
                     }
 
                     if !blocks.is_empty() {
-                        let text = text_segments.join("\n\n");
+                        let text = if text_segments.len() == 1 {
+                            text_segments.pop().unwrap()
+                        } else {
+                            text_segments.join("\n\n")
+                        };
                         parsed.messages.push(ChatMessage {
                             id: msg_id,
                             role: MessageRole::Assistant,

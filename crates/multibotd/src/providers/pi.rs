@@ -72,10 +72,11 @@ fn normalize(mut value: Value) -> Option<Value> {
             }
         }
     }
-    Some(
+    let mut normalized =
         json!({"type":kind, "uuid":value.get("id"), "timestamp":value.get("timestamp"),
-        "message":{"content":content, "model":message.get("model")}}),
-    )
+        "message":{"model":message.get("model")}});
+    normalized["message"]["content"] = content;
+    Some(normalized)
 }
 
 impl AgentProvider for PiProvider {

@@ -7,6 +7,7 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 
+- Reduce server memory use when reading Pi and Cursor chats with long replies or images.
 - Open Changelog from Ctrl+K to read the full release history, even offline.
 - Discover live tmux server shells and use the built-in Windows terminal. Escape stays with the terminal while it is visible.
 - Toggle Deepgram dictation with Ctrl+D as well as Ctrl+Shift+Space. Multibot can load DEEPGRAM_API_KEY from your environment.

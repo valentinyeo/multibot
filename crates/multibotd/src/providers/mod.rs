@@ -2140,17 +2140,24 @@ pub fn populate_last_assistant_fields(parsed: &mut ParsedSlice) {
                 .lines()
                 .map(str::trim)
                 .find(|l| !l.is_empty())
-                .map(collapse_whitespace)
                 .or_else(|| {
                     msg.blocks.iter().rev().find_map(|b| match b {
                         MessageBlock::ToolUse { summary, .. } if !summary.trim().is_empty() => {
-                            Some(collapse_whitespace(summary))
+                            Some(summary.as_str())
                         }
                         _ => None,
                     })
                 });
-            parsed.last_assistant_preview =
-                preview_src.map(|s| cap_chars(&strip_base64_cow(&s), MAX_PREVIEW_CHARS));
+            parsed.last_assistant_preview = preview_src.map(|s| {
+                let scrubbed = strip_base64_cow(s);
+                let preview: String = scrubbed
+                    .split_whitespace()
+                    .enumerate()
+                    .flat_map(|(i, word)| (i > 0).then_some(' ').into_iter().chain(word.chars()))
+                    .take(MAX_PREVIEW_CHARS + 1)
+                    .collect();
+                cap_chars(&preview, MAX_PREVIEW_CHARS)
+            });
             break;
         }
     }
@@ -2174,6 +2181,14 @@ pub fn collapse_whitespace(s: &str) -> String {
 }
 
 pub fn strip_base64_cow(s: &str) -> Cow<'_, str> {
+    if !contains_ascii_ci(s.as_bytes(), b"data:image/")
+        && !s
+            .as_bytes()
+            .split(|&b| !is_raw_b64_body(b))
+            .any(|run| run.len() >= RAW_BASE64_MIN_LEN)
+    {
+        return Cow::Borrowed(s);
+    }
     static BASE64_RE: OnceLock<Regex> = OnceLock::new();
     let re = BASE64_RE.get_or_init(|| {
         Regex::new(
@@ -2498,6 +2513,10 @@ pub fn build_diff_block(path: Option<String>, raw_lines: Vec<String>) -> Option<
 }
 
 pub fn extract_image_blocks(text: &str) -> Vec<MessageBlock> {
+    // Every supported image URL or local path contains a slash.
+    if !text.contains('/') {
+        return Vec::new();
+    }
     static MD_IMG_RE: OnceLock<Regex> = OnceLock::new();
     static URL_IMG_RE: OnceLock<Regex> = OnceLock::new();
     static LOCAL_IMG_RE: OnceLock<Regex> = OnceLock::new();
@@ -2949,6 +2968,42 @@ mod tests {
         ));
         let _ = fs::create_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn assistant_preview_preserves_scrubbing_whitespace_and_character_limit() {
+        for text in [
+            "A bounded prose segment. ".repeat(9000),
+            " 🚀\t日本語\u{2003} ".repeat(100),
+            "x".repeat(MAX_PREVIEW_CHARS),
+            "x".repeat(MAX_PREVIEW_CHARS + 1),
+            format!(
+                " screenshot data:image/png;base64,{} done ",
+                "A".repeat(4096)
+            ),
+            format!("\t{}\t answer ", "A".repeat(4096)),
+            "  short\t\u{2003} reply  ".into(),
+        ] {
+            let expected = cap_chars(
+                &strip_base64_cow(&collapse_whitespace(&text)),
+                MAX_PREVIEW_CHARS,
+            );
+            let mut parsed = ParsedSlice {
+                messages: vec![ChatMessage {
+                    id: "reply".into(),
+                    role: MessageRole::Assistant,
+                    text,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            populate_last_assistant_fields(&mut parsed);
+            assert_eq!(
+                parsed.last_assistant_preview.as_deref(),
+                Some(expected.as_str())
+            );
+            assert_eq!(parsed.last_assistant_id.as_deref(), Some("reply"));
+        }
     }
 
     #[test]
