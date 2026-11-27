@@ -518,6 +518,7 @@ fn make_builtin(name: &str, description: &str, opens_in_terminal: bool) -> Slash
 /// have not arrived yet or as a fallback merged underneath daemon items).
 pub fn builtin_commands_for(agent: AgentKind) -> Vec<SlashCommandItem> {
     match agent {
+        AgentKind::Shell => vec![],
         AgentKind::Claude => vec![
             make_builtin("rename", "Rename this chat session", false),
             make_builtin("clear", "Clear conversation and start fresh", false),

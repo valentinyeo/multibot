@@ -69,6 +69,8 @@ impl ServerWorkspaceIndex {
         for (session_id, name) in &chat_names.name_by_session_id {
             index.insert_name(session_id, name);
         }
+        index.assignments.extend(chat_names.by_tmux.clone());
+        index.names.extend(chat_names.name_by_tmux.clone());
         index.add_agent_host(&state_dir.join("agent-host"), &chat_names);
         index
     }
@@ -313,7 +315,7 @@ fn read_chat_names(path: &Path) -> ChatNames {
         if workspace.is_none() && name.is_none() {
             continue;
         }
-        if key.starts_with("live-") {
+        if !key.is_empty() {
             if let Some(workspace) = &workspace {
                 out.by_tmux.insert(key.clone(), workspace.clone());
             }
@@ -421,6 +423,31 @@ mod tests {
     fn write(path: &Path, body: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn terminal_keys_resolve_names_and_workspaces_without_provider_ids() {
+        let root =
+            std::env::temp_dir().join(format!("multibot-shell-index-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let raw = r#"{"term-56d16ef56ce668ab2d7235d20e7ecd75":{"name":"Multi Bot AGY Shell","workspace":"Multi Bot"},"btop":{"name":"BTOP","workspace":"Health"}}"#;
+        std::fs::write(root.join("chat-names.json"), raw).unwrap();
+        let index = ServerWorkspaceIndex::load_from_state_dir(&root);
+        assert_eq!(
+            index.name_for("term-56d16ef56ce668ab2d7235d20e7ecd75"),
+            Some("Multi Bot AGY Shell")
+        );
+        assert_eq!(
+            index.workspace_for("term-56d16ef56ce668ab2d7235d20e7ecd75"),
+            Some("Multi Bot")
+        );
+        assert_eq!(index.name_for("btop"), Some("BTOP"));
+        assert_eq!(index.workspace_for("btop"), Some("Health"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("chat-names.json")).unwrap(),
+            raw
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

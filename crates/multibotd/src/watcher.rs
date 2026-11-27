@@ -45,6 +45,7 @@ pub struct WatchManager {
     disk_tx: Option<std::sync::mpsc::Sender<DiskJob>>,
     sessions: HashMap<String, ActiveSessionWatch>,
     dir_watch: Option<ActiveDirWatch>,
+    shell_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 async fn run_on_disk<T, F>(disk_tx: Option<&std::sync::mpsc::Sender<DiskJob>>, f: F) -> Option<T>
@@ -81,6 +82,7 @@ impl WatchManager {
             disk_tx: None,
             sessions: HashMap::new(),
             dir_watch: None,
+            shell_task: None,
         }
     }
 
@@ -97,6 +99,7 @@ impl WatchManager {
             disk_tx: Some(disk_tx),
             sessions: HashMap::new(),
             dir_watch: None,
+            shell_task: None,
         }
     }
 
@@ -106,6 +109,13 @@ impl WatchManager {
         source_path: PathBuf,
         agent: AgentKind,
     ) -> Result<()> {
+        if agent == AgentKind::Shell {
+            let _ = self
+                .out_tx
+                .send(crate::providers::tmux::empty_history(session_id));
+            return Ok(());
+        }
+
         // Idempotent re-watch for the same session_id without affecting other sessions.
         if let Some(prev) = self.sessions.remove(&session_id) {
             let _ = prev.stop_tx.try_send(());
@@ -289,6 +299,15 @@ impl WatchManager {
     }
 
     pub fn watch_directory(&mut self) {
+        if self.shell_task.is_none() && self.disk_tx.is_some() {
+            self.shell_task = Some(crate::shell_watch::start(
+                self.home.clone(),
+                self.out_tx.clone(),
+                Arc::clone(&self.process_mgr),
+                self.disk_tx.as_ref().unwrap().clone(),
+            ));
+        }
+
         if let Some(ref w) = self.dir_watch {
             let _ = w.rescan_tx.send(DirEvent::Rescan);
             return;
@@ -489,6 +508,9 @@ impl WatchManager {
     }
 
     pub fn unwatch_directory(&mut self) {
+        if let Some(task) = self.shell_task.take() {
+            task.abort();
+        }
         if let Some(w) = self.dir_watch.take() {
             let _ = w.stop_tx.try_send(());
         }
@@ -497,6 +519,10 @@ impl WatchManager {
     /// Stops all active session and directory watchers and awaits their tasks so every
     /// task drops its `disk_tx` and `out_tx` clones cleanly before shutdown.
     pub async fn shutdown(&mut self) {
+        if let Some(task) = self.shell_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
         let handles: Vec<tokio::task::JoinHandle<()>> = self
             .sessions
             .drain()

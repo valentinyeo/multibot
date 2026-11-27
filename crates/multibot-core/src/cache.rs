@@ -56,6 +56,7 @@ impl CacheKey {
             AgentKind::Claude => "claude",
             AgentKind::Antigravity => "antigravity",
             AgentKind::Codex => "codex",
+            AgentKind::Shell => "shell",
         }
     }
 

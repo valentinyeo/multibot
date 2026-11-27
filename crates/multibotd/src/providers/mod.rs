@@ -2,6 +2,7 @@ pub mod activity;
 pub mod antigravity;
 pub mod claude;
 pub mod codex;
+pub mod tmux;
 
 use anyhow::Result;
 use multibot_proto::{
@@ -271,6 +272,7 @@ pub fn provider_for(kind: AgentKind) -> Box<dyn AgentProvider> {
         AgentKind::Claude => Box::new(ClaudeProvider),
         AgentKind::Antigravity => Box::new(AntigravityProvider),
         AgentKind::Codex => Box::new(CodexProvider),
+        AgentKind::Shell => Box::new(tmux::TmuxProvider),
     }
 }
 
@@ -373,6 +375,9 @@ pub fn discover_all_sessions_with_ctx(
         let Some(agent) = meta.agent else {
             continue;
         };
+        if agent == AgentKind::Shell {
+            continue;
+        }
         if seen_ids.contains(&(agent, sid.clone())) {
             continue;
         }
@@ -425,6 +430,35 @@ pub fn discover_all_sessions_with_ctx(
     all.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
     all.truncate(limit);
     all
+}
+
+pub fn discover_live_sessions_with_ctx(
+    home: &Path,
+    limit: usize,
+    ctx: &DiscoveryContext<'_>,
+) -> Vec<SessionSummary> {
+    let mut sessions = discover_all_sessions_with_ctx(home, limit, ctx);
+    let mut shells = tmux::discover_sessions();
+    for shell in &mut shells {
+        shell.title = ctx
+            .metadata
+            .get(&shell.id)
+            .and_then(|m| m.title.clone())
+            .or_else(|| {
+                ctx.server_workspaces
+                    .name_for(&shell.id)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| shell.id.clone());
+        shell.workspace = ctx
+            .server_workspaces
+            .workspace_for(&shell.id)
+            .map(str::to_string);
+    }
+    // The transcript limit must never hide a live terminal.
+    sessions.extend(shells);
+    sessions.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+    sessions
 }
 
 impl DiscoveryContext<'_> {

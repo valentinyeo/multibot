@@ -256,6 +256,7 @@ pub(crate) fn parse_outbox_session_key(key: &str) -> Option<(&str, AgentKind, &s
         "claude" => AgentKind::Claude,
         "antigravity" => AgentKind::Antigravity,
         "codex" => AgentKind::Codex,
+        "shell" => AgentKind::Shell,
         _ => return None,
     };
     let (sid_len_str, sid) = after_agent.split_once(':')?;
@@ -315,6 +316,7 @@ pub struct MultibotView {
     pub(crate) table_modal_state: TableModalState,
     /// Built-in native GPU terminal pane (`Alt+C`). Owns no PTY while closed.
     pub(crate) terminal: TerminalPaneState,
+    pub(crate) shell_host: crate::shell_host::ShellHost,
     /// Lazy-loaded Computer View pane (MBRU-7). Owns no webview while closed.
     pub(crate) computer: ComputerViewState,
     /// Last Computer View URL this window connected to, offered again on reopen. A
@@ -386,15 +388,33 @@ pub struct MultibotView {
 }
 
 fn backfill_zigshel_workspaces(store: &mut WorkspaceStore, dir: &std::path::Path) -> bool {
+    if !dir.exists() {
+        return false;
+    }
+    let mut bundle = import_zigshel_bundle_readonly(Some(dir));
     if store
         .session_meta
         .values()
         .any(|m| m.workspace_id.is_some())
-        || !dir.exists()
     {
-        return false;
+        // Existing installs already imported chats, but older builds misclassified tmux tabs.
+        let is_shell = |key: &str| {
+            multibot_core::workspaces::parse_session_key(key)
+                .is_some_and(|(_, agent, _)| agent == "shell")
+        };
+        bundle.sessions.retain(|s| {
+            is_shell(&s.session_key) && !store.session_titles.contains_key(&s.session_key)
+        });
+        bundle.favorites.retain(|s| {
+            bundle
+                .sessions
+                .iter()
+                .any(|session| session.session_key == s.session_key)
+        });
+        if bundle.sessions.is_empty() {
+            return false;
+        }
     }
-    let bundle = import_zigshel_bundle_readonly(Some(dir));
     let stats = merge_zigshel_bundle(store, &bundle);
     stats.sessions_assigned > 0 || stats.favorites_added > 0 || stats.workspaces_added > 0
 }
@@ -662,6 +682,7 @@ impl MultibotView {
             slash_picker_state: SlashPickerState::default(),
             table_modal_state: TableModalState::default(),
             terminal: TerminalPaneState::default(),
+            shell_host: crate::shell_host::ShellHost::default(),
             computer: ComputerViewState::default(),
             last_computer_url: None,
             connected_host,
@@ -4153,6 +4174,13 @@ impl MultibotView {
         self.chat_state.scroll_handle = gpui_kit::ScrollHandle::default();
         self.chat_state.prepend_scroll_anchor = None;
         self.chat_state.newest_chord.reset();
+        if session.agent == AgentKind::Shell {
+            self.shell_host.prepare_selection(&canonical_session_key(
+                &host,
+                session.agent,
+                &session.id,
+            ));
+        }
         self.chat_state.composer_menu_open = false;
         // Reset per-session transient Chat View overlays, active inline rename & stale pagination
         self.sidebar_state.rename = None;
@@ -4719,6 +4747,7 @@ impl MultibotView {
             AgentKind::Claude => gpui_kit::rgb(0xD97757).into(),
             AgentKind::Antigravity => gpui_kit::rgb(0x60A5FA).into(),
             AgentKind::Codex => gpui_kit::rgb(0x34D399).into(),
+            AgentKind::Shell => gpui_kit::rgb(0xE2E8F0).into(),
         }
     }
 
@@ -5102,6 +5131,7 @@ impl Render for MultibotView {
             self.sidebar_state.rename = None;
             self.sidebar_state.new_workspace_draft = None;
         }
+        self.sync_embedded_shell(window, cx);
         let current_sig = self.focus_layout_signature();
         let prev_sig = self.last_focus_layout_sig.replace(current_sig.clone());
         let layout_changed = prev_sig.as_ref().is_some_and(|prev| prev != &current_sig);
@@ -5124,6 +5154,12 @@ impl Render for MultibotView {
         div()
             .id("multibot-root")
             .track_focus(&self.root_focus_handle)
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.shell_host.focus_parent();
+                }),
+            )
             .relative()
             .size_full()
             .bg(theme::bg_canvas())
@@ -5532,6 +5568,14 @@ impl Render for MultibotView {
             }))
             .on_action(cx.listener(|this, _: &ReconnectSession, _, cx| {
                 if this.table_modal_state.is_open() || this.active_modal != ActiveModal::None {
+                    return;
+                }
+                if this
+                    .selected_session
+                    .as_ref()
+                    .is_some_and(|s| s.agent == AgentKind::Shell)
+                {
+                    this.reconnect_embedded_shell(cx);
                     return;
                 }
                 if !this.host_statuses.is_empty() || !this.settings.ssh_hosts.is_empty() {
@@ -5972,6 +6016,14 @@ impl Render for MultibotView {
                         el.child(self.render_sidebar(cx))
                     })
                     .child(match self.main_surface {
+                        MainSurface::Chat
+                            if self
+                                .selected_session
+                                .as_ref()
+                                .is_some_and(|s| s.agent == AgentKind::Shell) =>
+                        {
+                            self.render_shell_panel(cx).into_any_element()
+                        }
                         MainSurface::Chat => self.render_chat_panel(cx).into_any_element(),
                         MainSurface::Inbox => self.render_inbox_panel(cx).into_any_element(),
                         MainSurface::Settings => self.render_chat_panel(cx).into_any_element(),

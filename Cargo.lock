@@ -4586,8 +4586,10 @@ dependencies = [
  "multibot-proto",
  "multibot-updater",
  "portable-pty",
+ "raw-window-handle",
  "sysinfo 0.35.2",
  "tokio",
+ "windows-sys 0.61.2",
  "wry",
 ]
 

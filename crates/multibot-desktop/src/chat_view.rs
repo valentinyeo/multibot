@@ -2231,7 +2231,7 @@ impl MultibotView {
                 ("GPT-5.4", Some("gpt-5.4")),
                 ("Codex", Some("gpt-5.3-codex")),
             ],
-            AgentKind::Antigravity => &[("Default", None)],
+            AgentKind::Antigravity | AgentKind::Shell => &[("Default", None)],
         };
         let mut row = h_flex().gap_1();
         for (index, &(label, model)) in models.iter().enumerate() {
@@ -3042,7 +3042,7 @@ impl MultibotView {
         }
     }
 
-    fn handle_chat_key_down(
+    pub(crate) fn handle_chat_key_down(
         &mut self,
         ev: &KeyDownEvent,
         window: &mut Window,
@@ -4046,7 +4046,7 @@ impl MultibotView {
         Some(wrapper.into_any_element())
     }
 
-    fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.chat_state.find_open {
             return None;
         }

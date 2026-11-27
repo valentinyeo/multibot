@@ -86,6 +86,7 @@ impl ChatOutbox {
             AgentKind::Claude => "claude",
             AgentKind::Antigravity => "antigravity",
             AgentKind::Codex => "codex",
+            AgentKind::Shell => "shell",
         };
         format!(
             "{}:{host}|{agent_str}|{}:{session_id}",

@@ -208,10 +208,12 @@ impl ProcessManager {
             AgentKind::Claude => "claude",
             AgentKind::Codex => "codex",
             AgentKind::Antigravity => "agy",
+            AgentKind::Shell => return Err(anyhow!("Use the embedded terminal for shell input")),
         };
         let bin_path = self.resolve_agent_binary(bin_name);
 
         match agent {
+            AgentKind::Shell => Err(anyhow!("Use the embedded terminal for shell input")),
             AgentKind::Claude => {
                 let args = build_claude_args(session_id, text, is_new_session, options)?;
                 let mut cmd = Command::new(&bin_path);
@@ -769,6 +771,11 @@ impl ProcessManager {
         }
 
         let session_id = mint_uuid_v4(self.next_seq(), &cwd);
+        let session_id = if agent == AgentKind::Shell {
+            format!("term-{session_id}")
+        } else {
+            session_id
+        };
         let clean_title = title
             .as_deref()
             .and_then(sanitize_title)
@@ -780,6 +787,23 @@ impl ProcessManager {
                     .map(String::from)
                     .unwrap_or_else(|| format!("New {} session", agent.label()))
             });
+
+        if agent == AgentKind::Shell {
+            let result = Command::new("tmux")
+                .args(["new-session", "-d", "-s", &session_id, "-c", &cwd])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+            if !result.is_ok_and(|status| status.success()) {
+                let _ = self.out_tx.send(ServerEvent::Error {
+                    code: "spawn_failed".into(),
+                    message: "Could not create server shell with tmux".into(),
+                });
+                return;
+            }
+        }
 
         let source_path = self.resolve_session_source_path(&session_id, agent, Some(&cwd));
         let ts = now_ms();
@@ -826,6 +850,15 @@ impl ProcessManager {
             if created_history_file {
                 let _ = std::fs::remove_file(&source_path);
             }
+            if agent == AgentKind::Shell {
+                let _ = Command::new("tmux")
+                    .args(["kill-session", "-t", &format!("={session_id}")])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await;
+            }
             let _ = self.out_tx.send(ServerEvent::Error {
                 code: "spawn_failed".to_string(),
                 message: format!("Failed to save session metadata: {err}"),
@@ -835,6 +868,7 @@ impl ProcessManager {
 
         let mut working = false;
         if let Some(prompt) = initial_prompt
+            && agent != AgentKind::Shell
             && !prompt.trim().is_empty()
         {
             match self.dispatch_prompt_internal(
@@ -1131,6 +1165,7 @@ impl ProcessManager {
         cwd: Option<&str>,
     ) -> PathBuf {
         match agent {
+            AgentKind::Shell => PathBuf::from(format!("tmux:{session_id}")),
             AgentKind::Antigravity => {
                 let meta = MetadataStore::load(&self.home);
                 let recorded = meta

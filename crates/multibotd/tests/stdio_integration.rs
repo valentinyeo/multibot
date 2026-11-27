@@ -109,6 +109,8 @@ async fn multibotd_stdio_full_wire_roundtrip() {
     let mut child = Command::new(bin)
         .arg("--stdio")
         .env("HOME", &home)
+        .env("TMUX_TMPDIR", &home)
+        .env_remove("TMUX")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
         .stdin(Stdio::piped())
@@ -472,6 +474,8 @@ async fn multibotd_stdio_huge_base64_and_20mib_non_base64_stay_under_10mb_vmhwm(
     let mut child = Command::new(bin)
         .arg("--stdio")
         .env("HOME", &home)
+        .env("TMUX_TMPDIR", &home)
+        .env_remove("TMUX")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
         .stdin(Stdio::piped())
@@ -684,4 +688,213 @@ async fn multibotd_stdio_huge_base64_and_20mib_non_base64_stay_under_10mb_vmhwm(
     assert!(status.success());
 
     let _ = fs::remove_dir_all(&home);
+}
+
+#[tokio::test]
+async fn shell_sessions_spawn_open_refresh_and_disappear_without_transcripts() {
+    if !std::process::Command::new("tmux")
+        .arg("-V")
+        .stdout(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+    {
+        return;
+    }
+    struct IsolatedTmux(PathBuf);
+    impl Drop for IsolatedTmux {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("tmux")
+                .args(["kill-server"])
+                .env("TMUX_TMPDIR", &self.0)
+                .env_remove("TMUX")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let home = temp_home("shell");
+    let _server = IsolatedTmux(home.clone());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_multibotd"))
+        .env("HOME", &home)
+        .env("TMUX_TMPDIR", &home)
+        .env_remove("TMUX")
+        .env_remove("MULTIPROMPT_STATE_DIR")
+        .env_remove("XDG_STATE_HOME")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
+    input
+        .write_all(
+            encode_line(&ClientRequest::WatchDirectory)
+                .unwrap()
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    input
+        .write_all(
+            encode_line(&ClientRequest::SpawnSession {
+                agent: AgentKind::Shell,
+                cwd: home.to_string_lossy().into(),
+                title: Some("Native shell".into()),
+                initial_prompt: None,
+                options: None,
+            })
+            .unwrap()
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let session = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let line = output.next_line().await.unwrap().unwrap();
+            match decode_line::<ServerEvent>(&line).unwrap() {
+                ServerEvent::SessionSpawned { session } => break session,
+                ServerEvent::Error { code, message } => panic!("{code}: {message}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(session.agent, AgentKind::Shell);
+    assert_eq!(session.title, "Native shell");
+    assert!(session.id.starts_with("term-"));
+    assert_eq!(session.source_path, format!("tmux:{}", session.id));
+    input
+        .write_all(
+            encode_line(&ClientRequest::ReadHistory {
+                session_id: session.id.clone(),
+                source_path: session.source_path.clone(),
+                agent: AgentKind::Shell,
+                tail: None,
+                before_offset: None,
+                max_bytes: None,
+                known_probe: None,
+            })
+            .unwrap()
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    input
+        .write_all(
+            encode_line(&ClientRequest::WatchSession {
+                session_id: session.id.clone(),
+                source_path: session.source_path.clone(),
+                agent: AgentKind::Shell,
+            })
+            .unwrap()
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut histories = 0;
+        let mut listed = false;
+        while histories < 2 || !listed {
+            match decode_line::<ServerEvent>(&output.next_line().await.unwrap().unwrap()).unwrap() {
+                ServerEvent::History {
+                    session_id,
+                    messages,
+                    ..
+                } => {
+                    assert_eq!(session_id, session.id);
+                    assert!(messages.is_empty());
+                    histories += 1;
+                }
+                ServerEvent::Sessions { sessions } => {
+                    listed |= sessions.iter().any(|s| s.id == session.id);
+                }
+                ServerEvent::Error { code, message } => panic!("{code}: {message}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    // Create a second shell without asking Multibot to refresh.
+    assert!(
+        Command::new("tmux")
+            .args(["new-session", "-d", "-s", "external-shell", "-c"])
+            .arg(&home)
+            .env("TMUX_TMPDIR", &home)
+            .env_remove("TMUX")
+            .status()
+            .await
+            .unwrap()
+            .success()
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let ServerEvent::Sessions { sessions } =
+                decode_line::<ServerEvent>(&output.next_line().await.unwrap().unwrap()).unwrap()
+                && sessions.iter().any(|s| s.id == "external-shell")
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        Command::new("tmux")
+            .args(["kill-session", "-t", "=external-shell"])
+            .env("TMUX_TMPDIR", &home)
+            .env_remove("TMUX")
+            .status()
+            .await
+            .unwrap()
+            .success()
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let ServerEvent::Sessions { sessions } =
+                decode_line::<ServerEvent>(&output.next_line().await.unwrap().unwrap()).unwrap()
+                && !sessions.iter().any(|s| s.id == "external-shell")
+                && sessions.iter().any(|s| s.id == session.id)
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    // Killing our only remaining session must also remove the daemon's metadata fallback.
+    assert!(
+        Command::new("tmux")
+            .args(["kill-session", "-t", &format!("={}", session.id)])
+            .env("TMUX_TMPDIR", &home)
+            .env_remove("TMUX")
+            .status()
+            .await
+            .unwrap()
+            .success()
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let ServerEvent::Sessions { sessions } =
+                decode_line::<ServerEvent>(&output.next_line().await.unwrap().unwrap()).unwrap()
+                && sessions.iter().all(|s| s.agent != AgentKind::Shell)
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(input);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
 }

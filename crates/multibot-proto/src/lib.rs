@@ -47,6 +47,7 @@ pub enum AgentKind {
     Claude,
     Antigravity,
     Codex,
+    Shell,
 }
 
 impl AgentKind {
@@ -55,6 +56,7 @@ impl AgentKind {
             Self::Claude => "Claude",
             Self::Antigravity => "Antigravity",
             Self::Codex => "Codex",
+            Self::Shell => "Shell",
         }
     }
 
@@ -63,6 +65,7 @@ impl AgentKind {
             Self::Claude => "✳",
             Self::Antigravity => "◈",
             Self::Codex => "⬡",
+            Self::Shell => ">_",
         }
     }
 }
@@ -508,6 +511,20 @@ pub fn decode_line<T: for<'de> Deserialize<'de>>(line: &str) -> Result<T, serde_
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_agent_wire_label_and_glyph() {
+        assert_eq!(
+            serde_json::to_string(&AgentKind::Shell).unwrap(),
+            "\"shell\""
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentKind>("\"shell\"").unwrap(),
+            AgentKind::Shell
+        );
+        assert_eq!(AgentKind::Shell.label(), "Shell");
+        assert_eq!(AgentKind::Shell.glyph(), ">_");
+    }
 
     #[test]
     fn composer_options_roundtrip_and_legacy_requests() {

@@ -3,13 +3,14 @@ mod process;
 mod providers;
 mod search;
 mod server_workspaces;
+mod shell_watch;
 mod watcher;
 
 use anyhow::Result;
 use multibot_proto::{ClientRequest, PROTOCOL_VERSION, ServerEvent, build_version, decode_line};
 use process::ProcessManager;
 use providers::{
-    ArchiveStore, DiscoveryContext, LiveActivity, MetadataStore, discover_all_sessions_with_ctx,
+    ArchiveStore, DiscoveryContext, LiveActivity, MetadataStore, discover_live_sessions_with_ctx,
     now_ms, read_history_page,
 };
 use search::{SearchError, search_history};
@@ -159,7 +160,7 @@ async fn async_main(
                         include_archived,
                         server_workspaces: &server_workspaces,
                     };
-                    let sessions = discover_all_sessions_with_ctx(&home_c, lim, &ctx);
+                    let sessions = discover_live_sessions_with_ctx(&home_c, lim, &ctx);
                     let _ = tx.send(ServerEvent::Sessions { sessions });
                 }));
             }
@@ -172,6 +173,10 @@ async fn async_main(
                 max_bytes,
                 known_probe,
             } => {
+                if agent == multibot_proto::AgentKind::Shell {
+                    let _ = out_tx.send(providers::tmux::empty_history(session_id));
+                    continue;
+                }
                 let tx = out_tx.clone();
                 let _ = disk_tx.send(Box::new(move || {
                     let path = PathBuf::from(&source_path);

@@ -307,15 +307,28 @@ pub fn import_zigshel_bundle_from_dir(dir: &Path) -> ZigShellImportBundle {
                 let Some(obj) = tab.as_object() else {
                     continue;
                 };
-                let Some(sid) = ["csid", "session_id", "tmux_identity", "tmux_session", "name"]
-                    .iter()
-                    .find_map(|field| {
-                        obj.get(*field)
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                    })
-                else {
+                let fields: &[&str] = if obj.get("kind").and_then(Value::as_str) == Some("tmux")
+                    && obj
+                        .get("tmux_session")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.trim().is_empty())
+                {
+                    &["tmux_session"]
+                } else {
+                    &[
+                        "csid",
+                        "session_id",
+                        "tmux_identity",
+                        "tmux_session",
+                        "name",
+                    ]
+                };
+                let Some(sid) = fields.iter().find_map(|field| {
+                    obj.get(*field)
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                }) else {
                     continue;
                 };
 
@@ -852,6 +865,14 @@ fn derive_tab_host(
 }
 
 fn derive_tab_agent(obj: &serde_json::Map<String, Value>) -> String {
+    if obj.get("kind").and_then(Value::as_str) == Some("tmux")
+        && obj
+            .get("tmux_session")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty())
+    {
+        return "shell".to_string();
+    }
     if let Some(a) = obj
         .get("agent")
         .and_then(Value::as_str)
@@ -1026,6 +1047,64 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn tmux_tabs_keep_exact_identity_and_restore_shell_metadata_across_host_aliases() {
+        use crate::workspaces::{SessionInput, WorkspaceView, canonical_session_key};
+        use multibot_proto::{AgentKind, SessionSummary};
+        let dir = unique_dir("shells");
+        let raw = r#"{"workspaces":[{"name":"Multi Bot","wid":"multibot"}],"tabs":[
+            {"kind":"tmux","csid":"not-the-shell-id","tmux_session":"term-56d16ef56ce668ab2d7235d20e7ecd75","name":"Multi Bot AGY Shell","workspace":0,"favorite":true,"muted":true},
+            {"kind":"tmux","tmux_session":"faceless-channels","name":"Faceless Channels","workspace":0},
+            {"kind":"tmux","tmux_session":"term-btop-session","name":"BTOP","workspace":0}
+        ]}"#;
+        std::fs::write(dir.join("session.json"), raw).unwrap();
+        let bundle = import_zigshel_bundle_from_dir(&dir);
+        assert_eq!(bundle.sessions.len(), 3);
+        assert_eq!(
+            bundle.sessions[0].session_key,
+            "vps0:shell:term-56d16ef56ce668ab2d7235d20e7ecd75"
+        );
+        let mut store = WorkspaceStore::new();
+        merge_zigshel_bundle(&mut store, &bundle);
+        let live = SessionSummary {
+            id: "term-56d16ef56ce668ab2d7235d20e7ecd75".into(),
+            agent: AgentKind::Shell,
+            title: "fallback".into(),
+            ..Default::default()
+        };
+        let key = canonical_session_key("hypertask-vps", live.agent, &live.id);
+        assert!(store.reconcile_live_session_keys(&[key.clone()]) > 0);
+        assert_eq!(
+            store.effective_title(&key, &live.title),
+            "Multi Bot AGY Shell"
+        );
+        assert_eq!(
+            store.session_meta[&key].workspace_id.as_deref(),
+            Some("multibot")
+        );
+        assert!(store.session_meta[&key].muted);
+        assert!(store.favorites.contains(&key));
+        let input = SessionInput {
+            key: key.clone(),
+            host: "hypertask-vps",
+            summary: &live,
+        };
+        let layout = store.compute_sidebar_layout_with_options(
+            "multibot",
+            WorkspaceView::All,
+            &[input],
+            false,
+            Some(&key),
+            0,
+        );
+        assert!(layout.ctrl_digit_order.contains(&key));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("session.json")).unwrap(),
+            raw
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

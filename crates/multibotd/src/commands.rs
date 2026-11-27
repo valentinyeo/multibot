@@ -30,6 +30,7 @@ pub fn list_commands(home: &Path, agent: AgentKind, cwd: Option<&Path>) -> Vec<S
     let ancestors = collect_ancestors(cwd, home);
 
     match agent {
+        AgentKind::Shell => return Vec::new(),
         AgentKind::Claude => {
             scan_skills_dir(
                 &home.join(".claude/skills"),
@@ -666,6 +667,7 @@ fn builtin_item(name: &str, description: &str, opens_in_terminal: bool) -> Slash
 
 fn builtin_commands(agent: AgentKind) -> Vec<SlashCommandItem> {
     match agent {
+        AgentKind::Shell => return Vec::new(),
         AgentKind::Claude => {
             let live = [
                 ("clear", "Clear conversation history"),

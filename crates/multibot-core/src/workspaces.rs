@@ -165,6 +165,7 @@ pub fn agent_slug(agent: AgentKind) -> &'static str {
         AgentKind::Claude => "claude",
         AgentKind::Antigravity => "antigravity",
         AgentKind::Codex => "codex",
+        AgentKind::Shell => "shell",
     }
 }
 

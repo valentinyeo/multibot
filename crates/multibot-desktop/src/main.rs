@@ -9,6 +9,7 @@ mod computer_view;
 mod inbox;
 mod palette;
 mod settings;
+mod shell_host;
 mod sidebar;
 mod slash_picker;
 mod state;
