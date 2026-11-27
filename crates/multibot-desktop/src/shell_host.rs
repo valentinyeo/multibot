@@ -103,7 +103,8 @@ pub(crate) fn should_show_embedded_shell(
 
 #[cfg(any(windows, test))]
 fn forwarded_shortcut(key: u32, ctrl: bool, alt: bool, shift: bool) -> Option<&'static str> {
-    if ctrl && alt {
+    // App overlays hide the console, so Escape belongs to the terminal while visible.
+    if (ctrl && alt) || key == 0x1B {
         return None;
     }
     let name = match key {
@@ -662,6 +663,8 @@ mod tests {
             multibot_keys::by_gpui_key("ctrl-d").is_some_and(|spec| spec.wired)
         );
         assert!(forwarded_shortcut(0x41, false, false, false).is_none());
+        assert!(forwarded_shortcut(0x1B, false, false, false).is_none());
+        assert!(forwarded_shortcut(0x4B, true, true, false).is_none());
     }
     #[test]
     fn windows_command_line_quotes_spaces_quotes_and_trailing_slashes() {
