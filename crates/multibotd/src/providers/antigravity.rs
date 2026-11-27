@@ -55,6 +55,33 @@ pub fn append_history_record(path: &Path, record: &Value) -> Result<()> {
     Ok(())
 }
 
+/// The `brain/` roots the `agy` CLI itself writes conversations into.
+pub fn native_brain_roots(home: &Path) -> Vec<PathBuf> {
+    [
+        home.join(".gemini").join("antigravity-cli").join("brain"),
+        home.join(".gemini").join("antigravity").join("brain"),
+        home.join(".gemini").join("jetski").join("brain"),
+    ]
+    .into_iter()
+    .filter(|root| root.is_dir())
+    .collect()
+}
+
+/// The transcript `agy --conversation <id>` itself appends to, if that conversation exists.
+pub fn native_brain_transcript(home: &Path, conversation_id: &str) -> Option<PathBuf> {
+    if !is_conversation_id(conversation_id) {
+        return None;
+    }
+    native_brain_roots(home).into_iter().find_map(|root| {
+        let path = root
+            .join(conversation_id)
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript.jsonl");
+        path.is_file().then_some(path)
+    })
+}
+
 pub fn antigravity_discovery_roots(home: &Path) -> Vec<PathBuf> {
     let candidates = [
         home.join(".multibot").join("history"),
@@ -74,6 +101,50 @@ pub fn antigravity_discovery_roots(home: &Path) -> Vec<PathBuf> {
             out.push(root);
         }
     }
+    out
+}
+
+/// True for the shape of an Antigravity conversation uuid (`4d5d5535-249c-...`).
+pub fn is_conversation_id(candidate: &str) -> bool {
+    let trimmed = candidate.trim();
+    trimmed.len() >= 8
+        && !trimmed.starts_with('-')
+        && trimmed.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+/// The user's own words from a native `USER_INPUT` row.
+///
+/// `agy` wraps the prompt in `<USER_REQUEST>`, then appends `<ADDITIONAL_METADATA>` and
+/// `<USER_SETTINGS_CHANGE>` blocks. Showing those raw makes the chat read like a log file.
+fn native_user_text(content: &str) -> String {
+    let mut body = content;
+    if let Some(start) = content.find("<USER_REQUEST>") {
+        let after = &content[start + "<USER_REQUEST>".len()..];
+        body = match after.find("</USER_REQUEST>") {
+            Some(end) => &after[..end],
+            None => after,
+        };
+    }
+    let mut cleaned = strip_tag_block(body, "ADDITIONAL_METADATA");
+    cleaned = strip_tag_block(&cleaned, "USER_SETTINGS_CHANGE");
+    cleaned = strip_tag_block(&cleaned, "SYSTEM_MESSAGE");
+    cleaned.trim().to_string()
+}
+
+fn strip_tag_block(text: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(&open) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + open.len()..];
+        rest = match after.find(&close) {
+            Some(end) => &after[end + close.len()..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
     out
 }
 
@@ -559,11 +630,22 @@ impl AgentProvider for AntigravityProvider {
 
     fn extract_header_meta(&self, path: &Path) -> HeaderMeta {
         let mut meta = HeaderMeta::default();
+        let mut assistant_title = None;
         for line in read_header_lines_bounded(path, 24) {
             let Ok(val) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
             let top_type = val.get("type").and_then(Value::as_str).unwrap_or("");
+            if top_type.eq_ignore_ascii_case("SYSTEM_MESSAGE")
+                || top_type.eq_ignore_ascii_case("GENERIC")
+                || (top_type.eq_ignore_ascii_case("USER_INPUT")
+                    && val
+                        .get("source")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| s.to_ascii_uppercase().starts_with("SYSTEM")))
+            {
+                continue;
+            }
             if top_type == "multibot_meta" {
                 if let Some(sid) = val
                     .get("session_id")
@@ -624,15 +706,34 @@ impl AgentProvider for AntigravityProvider {
                     .filter(|s| !s.trim().is_empty())
                     .map(String::from);
             }
+            if assistant_title.is_none() && top_type.eq_ignore_ascii_case("PLANNER_RESPONSE") {
+                let text = val.get("content").and_then(Value::as_str).unwrap_or("");
+                let cleaned = strip_base64_in_str(&strip_system_reminders(text));
+                assistant_title = cleaned
+                    .lines()
+                    .map(str::trim)
+                    .find(|s| !s.is_empty())
+                    .map(|s| truncate_title(s, 64));
+            }
             if meta.title_hint.is_none() {
+                let native_user = if top_type.eq_ignore_ascii_case("USER_INPUT") {
+                    val.get("content")
+                        .and_then(Value::as_str)
+                        .map(native_user_text)
+                } else {
+                    None
+                };
                 let candidate = val
                     .get("title")
                     .and_then(Value::as_str)
+                    .map(String::from)
+                    .or(native_user)
                     .or_else(|| {
                         val.get("row")
                             .filter(|r| r.get("role").and_then(Value::as_str) == Some("user"))
                             .and_then(|r| r.get("text"))
                             .and_then(Value::as_str)
+                            .map(String::from)
                     })
                     .or_else(|| {
                         val.get("step_update")
@@ -641,6 +742,7 @@ impl AgentProvider for AntigravityProvider {
                             })
                             .and_then(|u| u.get("text").or_else(|| u.get("content")))
                             .and_then(Value::as_str)
+                            .map(String::from)
                     })
                     .or_else(|| {
                         if matches!(
@@ -650,12 +752,13 @@ impl AgentProvider for AntigravityProvider {
                             val.get("text")
                                 .or_else(|| val.get("content"))
                                 .and_then(Value::as_str)
+                                .map(String::from)
                         } else {
                             None
                         }
                     });
                 if let Some(t) = candidate {
-                    let scrubbed = strip_base64_in_str(&strip_system_reminders(t));
+                    let scrubbed = strip_base64_in_str(&strip_system_reminders(&t));
                     if let Some(first) = scrubbed.lines().map(str::trim).find(|l| !l.is_empty()) {
                         meta.title_hint = Some(truncate_title(first, 64));
                     }
@@ -667,6 +770,10 @@ impl AgentProvider for AntigravityProvider {
         // transcript collapses onto the stem `transcript` and they dedupe into one chat.
         if meta.session_id_hint.is_none() {
             meta.session_id_hint = brain_conversation_id(path);
+        }
+        if meta.title_hint.is_none() && brain_conversation_id(path).is_some() {
+            meta.title_hint =
+                assistant_title.or_else(|| Some("Antigravity conversation".to_string()));
         }
         meta
     }
@@ -689,6 +796,16 @@ impl AgentProvider for AntigravityProvider {
             };
             let byte_range = Some((line.start_offset, line.end_offset));
             let top_type = val.get("type").and_then(Value::as_str).unwrap_or("");
+            if top_type.eq_ignore_ascii_case("SYSTEM_MESSAGE")
+                || top_type.eq_ignore_ascii_case("GENERIC")
+                || (top_type.eq_ignore_ascii_case("USER_INPUT")
+                    && val
+                        .get("source")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| s.to_ascii_uppercase().starts_with("SYSTEM")))
+            {
+                continue;
+            }
 
             // 1. Daemon-owned metadata header
             if top_type == "multibot_meta" {
@@ -837,9 +954,7 @@ impl AgentProvider for AntigravityProvider {
                             .get("detail")
                             .and_then(Value::as_str)
                             .map(strip_base64_in_str)
-                            .unwrap_or_else(|| {
-                                tool_text(row.get("input").unwrap_or(&Value::Null))
-                            });
+                            .unwrap_or_else(|| tool_text(row.get("input").unwrap_or(&Value::Null)));
                         let detail = cap_chars(&raw_detail, MAX_TOOL_DETAIL_CHARS);
                         let status = row
                             .get("status")
@@ -1109,7 +1224,80 @@ impl AgentProvider for AntigravityProvider {
                 continue;
             }
 
-            // 5. Generic JSONL fallback (compatible with arbitrary brain/sessions files)
+            // 5. Native `agy` brain transcript rows
+            //    (`brain/<uuid>/.system_generated/logs/transcript.jsonl`). `agy --conversation`
+            //    appends to this file itself, so the daemon only has to read it.
+            if top_type.eq_ignore_ascii_case("USER_INPUT")
+                || top_type.eq_ignore_ascii_case("PLANNER_RESPONSE")
+            {
+                let is_user = top_type.eq_ignore_ascii_case("USER_INPUT");
+                let raw_text = val
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(|s| {
+                        if is_user {
+                            native_user_text(s)
+                        } else {
+                            s.to_string()
+                        }
+                    })
+                    .unwrap_or_default();
+                let text = strip_base64_in_str(&strip_system_reminders(&raw_text))
+                    .trim()
+                    .to_string();
+                let ts = parse_row_timestamp(&val).or_else(|| {
+                    val.get("created_at")
+                        .and_then(Value::as_str)
+                        .and_then(parse_iso_ms)
+                });
+                if let Some(m) = val
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    parsed.model = Some(cap_chars(m.trim(), 128));
+                }
+                let has_tools = val
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .is_some_and(|calls| !calls.is_empty());
+                let completed = val
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .is_none_or(|s| matches!(s, "DONE" | "ERROR" | "CANCELED"));
+                parsed.tail_activity = if is_user || has_tools || text.is_empty() || !completed {
+                    TailActivity::Working
+                } else {
+                    TailActivity::Idle
+                };
+                if !text.is_empty() {
+                    if is_user && parsed.title_hint.is_none() {
+                        parsed.title_hint = text
+                            .lines()
+                            .map(str::trim)
+                            .find(|s| !s.is_empty())
+                            .map(|s| truncate_title(s, 64));
+                    }
+                    let mut blocks = vec![MessageBlock::Text { text: text.clone() }];
+                    blocks.extend(extract_image_blocks(&text));
+                    parsed.messages.push(ChatMessage {
+                        id: format!("agy-native-{}", line.start_offset),
+                        role: if is_user {
+                            MessageRole::User
+                        } else {
+                            MessageRole::Assistant
+                        },
+                        text,
+                        timestamp_ms: ts,
+                        blocks,
+                        source_byte_range: byte_range,
+                        ..Default::default()
+                    });
+                }
+                continue;
+            }
+
+            // 6. Generic JSONL fallback (compatible with arbitrary brain/sessions files)
             let Some(role_str) = val
                 .get("role")
                 .or_else(|| val.get("author"))
@@ -1242,12 +1430,21 @@ mod tests {
         assert_eq!(parsed.messages[0].text, "Refactor parser");
         assert_eq!(parsed.messages[2].text, "Hello world!");
 
-        let tool_blk = parsed.messages[1].blocks.iter().find_map(|b| match b {
-            MessageBlock::ToolUse { call_id, summary, status, diff, output, .. } => {
-                Some((call_id, summary, status, diff, output))
-            }
-            _ => None,
-        }).unwrap();
+        let tool_blk = parsed.messages[1]
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                MessageBlock::ToolUse {
+                    call_id,
+                    summary,
+                    status,
+                    diff,
+                    output,
+                    ..
+                } => Some((call_id, summary, status, diff, output)),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(tool_blk.0, "agy-tool-1");
         assert_eq!(tool_blk.1, "Edited lib.rs +1 -1");
         assert_eq!(*tool_blk.2, ToolStatus::Completed);
@@ -1403,6 +1600,328 @@ mod tests {
         assert!(!preview.contains("data:image"));
         assert!(!preview.contains("iVBOR"));
         assert!(!preview.contains("ZZZZ"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A real `agy` brain transcript nests its rows under `<uuid>/.system_generated/logs/` and
+    /// stamps them with a different layout (`USER_INPUT` / `PLANNER_RESPONSE` + `created_at`).
+    fn seed_native_brain_transcript(home: &Path, conversation: &str) -> PathBuf {
+        let path = home
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("brain")
+            .join(conversation)
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let lines = [
+            json!({
+                "step_index": 0,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "status": "DONE",
+                "created_at": "2026-11-27T16:24:09Z",
+                "content": "<USER_REQUEST>\nkeep my chats responsive\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-11-27T17:24:09+01:00.\n</ADDITIONAL_METADATA>"
+            }),
+            json!({
+                "step_index": 1,
+                "source": "SYSTEM_SDK",
+                "type": "SYSTEM_MESSAGE",
+                "status": "DONE",
+                "created_at": "2026-11-27T16:24:09Z",
+                "content": "<SYSTEM_MESSAGE>\nreminder the agent must ignore\n</SYSTEM_MESSAGE>"
+            }),
+            json!({
+                "step_index": 2,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-11-27T16:24:11Z",
+                "model": "gemini-4-neon-high",
+                "input_tokens": 21,
+                "content": "On it."
+            }),
+        ];
+        let payload: String = lines.into_iter().map(|v| format!("{v}\n")).collect();
+        fs::write(&path, payload).unwrap();
+        path
+    }
+
+    #[test]
+    fn native_brain_transcript_parses_into_the_users_words() {
+        let dir = std::env::temp_dir().join(format!("multibotd-agy-native-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let conversation = "4d5d5535-249c-4f10-90d9-7ec49c2eeb53";
+        let path = seed_native_brain_transcript(&dir, conversation);
+
+        let parsed = AntigravityProvider.parse_slice(&fs::read(&path).unwrap(), 0);
+        assert_eq!(
+            parsed.title_hint.as_deref(),
+            Some("keep my chats responsive")
+        );
+        assert_eq!(parsed.messages.len(), 2, "{:?}", parsed.messages);
+        assert_eq!(parsed.messages[0].role, MessageRole::User);
+        assert_eq!(parsed.messages[0].text, "keep my chats responsive");
+        assert_eq!(parsed.messages[1].role, MessageRole::Assistant);
+        assert_eq!(parsed.messages[1].text, "On it.");
+        assert_eq!(parsed.tail_activity, TailActivity::Idle);
+        assert_eq!(parsed.model.as_deref(), Some("gemini-4-neon-high"));
+        assert!(parsed.messages[0].timestamp_ms.is_some());
+
+        // One conversation, one entry: the daemon must not list it twice.
+        let sessions = discover_all_sessions(&dir, 10);
+        assert_eq!(sessions.len(), 1, "{sessions:?}");
+        assert_eq!(sessions[0].id, conversation);
+        assert_eq!(sessions[0].title, "keep my chats responsive");
+        assert_eq!(sessions[0].source_path, path.to_string_lossy());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn native_transcript_skips_internal_records_and_cleans_unwrapped_prompts() {
+        let rows = [
+            json!({"type":"SYSTEM_MESSAGE","role":"user","title":"internal title","content":"system noise"}),
+            json!({"type":"USER_INPUT","source":"SYSTEM_SDK","content":"injected prompt"}),
+            json!({"type":"USER_INPUT","source":"USER_EXPLICIT","content":"<ADDITIONAL_METADATA>private</ADDITIONAL_METADATA><SYSTEM_MESSAGE>hidden</SYSTEM_MESSAGE>\nFirst clean line\nsecond line"}),
+            json!({"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE","model":"gemini-4-neon-high","thinking":"private reasoning","content":"Here is the answer"}),
+            json!({"type":"GENERIC","role":"assistant","content":"raw tool noise"}),
+        ];
+        let payload: String = rows.iter().map(|r| format!("{r}\n")).collect();
+        let parsed = AntigravityProvider.parse_slice(payload.as_bytes(), 100);
+        assert_eq!(parsed.messages.len(), 2);
+        assert_eq!(parsed.messages[0].text, "First clean line\nsecond line");
+        assert_eq!(parsed.messages[1].text, "Here is the answer");
+        assert_eq!(parsed.title_hint.as_deref(), Some("First clean line"));
+        assert_eq!(parsed.tail_activity, TailActivity::Idle);
+        assert_eq!(
+            parsed.messages[0].source_byte_range.unwrap().0,
+            100 + format!("{}\n{}\n", rows[0], rows[1]).len() as u64
+        );
+        let dir =
+            std::env::temp_dir().join(format!("multibotd-agy-clean-header-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("transcript.jsonl");
+        fs::write(&path, payload).unwrap();
+        let header = AntigravityProvider.extract_header_meta(&path);
+        assert_eq!(header.title_hint.as_deref(), Some("First clean line"));
+        assert_eq!(header.model.as_deref(), Some("gemini-4-neon-high"));
+        assert_eq!(
+            native_user_text("<SYSTEM_MESSAGE>only noise</SYSTEM_MESSAGE>"),
+            ""
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn native_transcript_activity_tracks_tools_thinking_and_completed_answers() {
+        let rows = [
+            (
+                json!({"type":"USER_INPUT","source":"USER_EXPLICIT","content":"hello"}),
+                TailActivity::Working,
+                1,
+            ),
+            (
+                json!({"type":"PLANNER_RESPONSE","status":"DONE","content":"Checking", "tool_calls":[{"name":"read_file"}]}),
+                TailActivity::Working,
+                2,
+            ),
+            (
+                json!({"type":"GENERIC","content":"tool output"}),
+                TailActivity::Working,
+                2,
+            ),
+            (
+                json!({"type":"PLANNER_RESPONSE","status":"DONE","content":"Done"}),
+                TailActivity::Idle,
+                3,
+            ),
+            (
+                json!({"type":"SYSTEM_MESSAGE","content":"internal"}),
+                TailActivity::Idle,
+                3,
+            ),
+            (
+                json!({"type":"PLANNER_RESPONSE","status":"DONE","thinking":"still thinking","content":""}),
+                TailActivity::Working,
+                3,
+            ),
+            (
+                json!({"type":"PLANNER_RESPONSE","status":"RUNNING","content":"Partial"}),
+                TailActivity::Working,
+                4,
+            ),
+            (
+                json!({"type":"PLANNER_RESPONSE","status":"DONE","content":"Finished"}),
+                TailActivity::Idle,
+                5,
+            ),
+        ];
+        let mut payload = String::new();
+        for (row, activity, count) in rows {
+            payload.push_str(&format!("{row}\n"));
+            let parsed = AntigravityProvider.parse_slice(payload.as_bytes(), 0);
+            assert_eq!(parsed.tail_activity, activity, "{row}");
+            assert_eq!(parsed.messages.len(), count, "{row}");
+        }
+    }
+
+    #[test]
+    fn native_history_page_and_live_delta_keep_messages_and_activity_coherent() {
+        use crate::providers::{
+            DeltaRead, read_history_delta, read_history_page, summarize_session,
+        };
+        let dir =
+            std::env::temp_dir().join(format!("multibotd-agy-native-delta-{}", std::process::id()));
+        let path = seed_native_brain_transcript(&dir, "4d5d5535-249c-4f10-90d9-7ec49c2eeb53");
+        let page =
+            read_history_page(AgentKind::Antigravity, &path, None, None, None, None).unwrap();
+        assert_eq!(page.messages.len(), 2);
+        assert_eq!(page.tail_activity, TailActivity::Idle);
+        let offset = page.latest_offset;
+        append_history_record(&path, &json!({"type":"USER_INPUT","source":"USER_EXPLICIT","content":"<USER_REQUEST>Next data:image/png;base64,iVBORw0KGgo=</USER_REQUEST><ADDITIONAL_METADATA>hidden</ADDITIONAL_METADATA>"})).unwrap();
+        let DeltaRead::Appended {
+            messages,
+            latest_offset,
+            probe_sha256,
+            tail_activity,
+            ..
+        } = read_history_delta(
+            AgentKind::Antigravity,
+            &path,
+            offset,
+            Some(&page.probe_sha256),
+        )
+        .unwrap()
+        else {
+            panic!("native prompt must arrive as a live delta");
+        };
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "Next [image omitted]");
+        assert_eq!(tail_activity, TailActivity::Working);
+        let metadata = crate::providers::MetadataStore::default();
+        let archive = crate::providers::ArchiveStore::default();
+        let live = crate::providers::LiveActivity::default();
+        let empty = HashSet::new();
+        let server_workspaces = crate::server_workspaces::ServerWorkspaceIndex::default();
+        let ctx = crate::providers::DiscoveryContext {
+            active_session_ids: &empty,
+            connected_session_ids: &empty,
+            metadata: &metadata,
+            archive: &archive,
+            live: &live,
+            server_workspaces: &server_workspaces,
+            include_archived: true,
+        };
+        assert!(
+            summarize_session(
+                &AntigravityProvider,
+                &path,
+                crate::providers::now_ms(),
+                &ctx
+            )
+            .working
+        );
+        append_history_record(
+            &path,
+            &json!({"type":"PLANNER_RESPONSE","status":"DONE","content":"Finished"}),
+        )
+        .unwrap();
+        append_history_record(&path, &json!({"type":"SYSTEM_MESSAGE","content":"hidden"})).unwrap();
+        append_history_record(&path, &json!({"type":"GENERIC","content":"raw noise"})).unwrap();
+        let DeltaRead::Appended {
+            messages,
+            tail_activity,
+            ..
+        } = read_history_delta(
+            AgentKind::Antigravity,
+            &path,
+            latest_offset,
+            Some(&probe_sha256),
+        )
+        .unwrap()
+        else {
+            panic!("native reply must arrive as a live delta");
+        };
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "Finished");
+        assert_eq!(tail_activity, TailActivity::Idle);
+        assert!(
+            !summarize_session(
+                &AntigravityProvider,
+                &path,
+                crate::providers::now_ms(),
+                &ctx
+            )
+            .working
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn native_subagent_title_uses_assistant_text_not_system_text_or_uuid() {
+        let dir =
+            std::env::temp_dir().join(format!("multibotd-agy-subagent-{}", std::process::id()));
+        let conversation = "4d5d5535-249c-4f10-90d9-7ec49c2eeb53";
+        let path = seed_native_brain_transcript(&dir, conversation);
+        let payload = [
+            json!({"type":"SYSTEM_MESSAGE","content":"secret instructions"}),
+            json!({"type":"PLANNER_RESPONSE","thinking":"private","content":"","model":"gemini-4-neon-high"}),
+            json!({"type":"PLANNER_RESPONSE","content":"Inspect the workspace\nDetails", "tool_calls":[{}]}),
+        ].iter().map(|r| format!("{r}\n")).collect::<String>();
+        fs::write(&path, &payload).unwrap();
+        assert_eq!(
+            AntigravityProvider
+                .extract_header_meta(&path)
+                .title_hint
+                .as_deref(),
+            Some("Inspect the workspace")
+        );
+        fs::write(&path, format!("{payload}{}\n", json!({"type":"USER_INPUT","source":"USER_EXPLICIT","content":"<USER_REQUEST>Actual user title</USER_REQUEST>"}))).unwrap();
+        assert_eq!(
+            AntigravityProvider
+                .extract_header_meta(&path)
+                .title_hint
+                .as_deref(),
+            Some("Actual user title")
+        );
+        fs::write(
+            &path,
+            "{\"type\":\"SYSTEM_MESSAGE\",\"content\":\"internal\"}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            AntigravityProvider
+                .extract_header_meta(&path)
+                .title_hint
+                .as_deref(),
+            Some("Antigravity conversation")
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn native_brain_transcript_is_found_for_a_bare_conversation_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "multibotd-agy-native-lookup-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let conversation = "4d5d5535-249c-4f10-90d9-7ec49c2eeb53";
+
+        assert!(native_brain_transcript(&dir, conversation).is_none());
+        let path = seed_native_brain_transcript(&dir, conversation);
+        assert_eq!(native_brain_transcript(&dir, conversation), Some(path));
+
+        assert!(is_conversation_id(conversation));
+        for rejected in ["", "   ", "-4d5d5535", "my session", "../etc"] {
+            assert!(
+                !is_conversation_id(rejected),
+                "{rejected:?} must be rejected"
+            );
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -1,5 +1,6 @@
 use crate::providers::antigravity::{
     AgyStreamAccumulator, AgyStreamOutput, append_history_record, hosted_history_path,
+    is_conversation_id, native_brain_transcript,
 };
 use crate::providers::claude::sanitize_claude_project_dir;
 use crate::providers::{
@@ -114,6 +115,18 @@ impl ProcessManager {
         guard.active.get(session_id).is_some_and(|p| p.busy)
     }
 
+    /// Whether `session_id` has a live `agy` process whose stdin is still open.
+    ///
+    /// `busy` is about the turn, not about whether the process can take another message. A
+    /// hosted `agy` keeps reading stdin after its turn ends and while background tools run.
+    fn session_accepts_live_stdin(&self, session_id: &str) -> bool {
+        let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .active
+            .get(session_id)
+            .is_some_and(|p| p.stdin_tx.is_some())
+    }
+
     fn next_seq(&self) -> u64 {
         self.seq.fetch_add(1, Ordering::Relaxed)
     }
@@ -151,7 +164,12 @@ impl ProcessManager {
                 {
                     proc.busy = true;
                     proc.interrupted = false;
-                    Some((tx.clone(), proc.source_path.clone(), proc.pid, proc.cwd.clone()))
+                    Some((
+                        tx.clone(),
+                        proc.source_path.clone(),
+                        proc.pid,
+                        proc.cwd.clone(),
+                    ))
                 } else {
                     None
                 }
@@ -163,13 +181,18 @@ impl ProcessManager {
                 }))? + "\n";
                 if tx.send(wire).is_ok() {
                     let effective_cwd = cwd.map(String::from).or(proc_cwd);
-                    append_agy_user_row(
-                        &history_path,
-                        session_id,
-                        effective_cwd.as_deref(),
-                        text,
-                        self.next_seq(),
-                    )?;
+                    // `agy --conversation <uuid>` appends the turn to its own brain transcript.
+                    // Mirroring the row into `~/.multibot/history/` would show it twice, and
+                    // the desktop is watching whichever file the session actually lives in.
+                    if history_path.starts_with(self.home.join(".multibot")) {
+                        append_agy_user_row(
+                            &history_path,
+                            session_id,
+                            effective_cwd.as_deref(),
+                            text,
+                            self.next_seq(),
+                        )?;
+                    }
                     return Ok(format!("dispatched agy stream-json (pid {pid})"));
                 }
                 // Channel closed — remove stale active entry (only if same pid) and fall through
@@ -240,10 +263,8 @@ impl ProcessManager {
                 Ok(format!("dispatched codex (pid {pid})"))
             }
             AgentKind::Antigravity => {
-                let meta = MetadataStore::load(&self.home);
-                let native_conv_id = meta
-                    .get(session_id)
-                    .and_then(|e| e.native_session_id.clone());
+                let conversation = self.resolve_agy_conversation(session_id, is_new_session);
+                let history_path = self.agy_history_sink(session_id, conversation.as_deref());
 
                 let mut args = vec![
                     "--input-format".to_string(),
@@ -253,12 +274,9 @@ impl ProcessManager {
                     "--dangerously-skip-permissions".to_string(),
                     "--print=".to_string(),
                 ];
-                if let Some(conv_id) = native_conv_id
-                    && !conv_id.trim().is_empty()
-                    && !conv_id.starts_with('-')
-                {
+                if let Some(conv_id) = conversation.as_deref() {
                     args.push("--conversation".to_string());
-                    args.push(conv_id);
+                    args.push(conv_id.to_string());
                 }
 
                 let wire = serde_json::to_string(&json!({
@@ -281,7 +299,6 @@ impl ProcessManager {
                     .spawn()
                     .with_context(|| format!("spawning {}", bin_path.display()))?;
                 let pid = child.id().unwrap_or(0);
-                let history_path = hosted_history_path(&self.home, session_id);
 
                 let io_setup = (|| -> Result<_> {
                     let stdin = child
@@ -292,7 +309,11 @@ impl ProcessManager {
                         .stdout
                         .take()
                         .ok_or_else(|| anyhow!("failed to capture agy stdout"))?;
-                    append_agy_user_row(&history_path, session_id, cwd, text, self.next_seq())?;
+                    // Only a daemon-owned chat gets a daemon-written row; a native brain
+                    // transcript is appended by `agy` itself.
+                    if history_path.starts_with(self.home.join(".multibot")) {
+                        append_agy_user_row(&history_path, session_id, cwd, text, self.next_seq())?;
+                    }
                     Ok((stdin, stdout))
                 })();
 
@@ -322,6 +343,12 @@ impl ProcessManager {
 
                 let _ = stdin_tx.send(wire);
 
+                if let Some(conv_id) = conversation.as_deref()
+                    && !history_path.starts_with(self.home.join(".multibot"))
+                {
+                    self.record_resumed_agy_session(conv_id, cwd, &history_path);
+                }
+
                 {
                     let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
                     guard.active.insert(
@@ -337,7 +364,7 @@ impl ProcessManager {
                     );
                 }
 
-                // Spawn stdout stream-json reader writing to daemon-owned ~/.multibot/history/
+                // Spawn stdout stream-json reader writing to `history_path`.
                 let mgr_stdout = Arc::clone(self);
                 let sid_stdout = session_id.to_string();
                 let hp_stdout = history_path.clone();
@@ -580,6 +607,39 @@ impl ProcessManager {
         }
 
         let message_id = format!("q-{}-{}", now_ms(), self.next_seq());
+        // A live `agy --input-format stream-json` process takes a new user frame at any time,
+        // even mid-turn or while a background tool runs. Queueing it behind the turn is what
+        // made Antigravity chats look stuck: the frame only left the queue when the turn ended.
+        if agent == AgentKind::Antigravity && self.session_accepts_live_stdin(&session_id) {
+            match self.dispatch_prompt_internal(
+                &session_id,
+                agent,
+                cwd.as_deref(),
+                &text,
+                false,
+                options.as_ref(),
+            ) {
+                Ok(detail) => {
+                    let _ = self.out_tx.send(ServerEvent::PromptStatus {
+                        session_id,
+                        message_id,
+                        status: "sent".to_string(),
+                        detail,
+                    });
+                    return;
+                }
+                Err(err) => {
+                    let _ = self.out_tx.send(ServerEvent::PromptStatus {
+                        session_id,
+                        message_id,
+                        status: "failed".to_string(),
+                        detail: err.to_string(),
+                    });
+                    return;
+                }
+            }
+        }
+
         let enqueue_result: Option<Result<(), String>> = {
             let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if guard.active.get(&session_id).is_some_and(|p| p.busy) {
@@ -1002,6 +1062,68 @@ impl ProcessManager {
         });
     }
 
+    /// The conversation `agy` must resume for `session_id`, so clicking an existing chat never
+    /// starts a blank one.
+    ///
+    /// `metadata.json` only knows chats this daemon spawned. A chat the user opens from
+    /// `brain/<uuid>/.system_generated/logs/transcript.jsonl` was never recorded there, but its
+    /// own id *is* the conversation id.
+    fn resolve_agy_conversation(&self, session_id: &str, is_new_session: bool) -> Option<String> {
+        if is_new_session {
+            return None;
+        }
+        let meta = MetadataStore::load(&self.home);
+        let recorded = meta
+            .get(session_id)
+            .and_then(|e| e.native_session_id.clone())
+            .filter(|id| is_conversation_id(id));
+        recorded
+            .or_else(|| {
+                native_brain_transcript(&self.home, session_id).map(|_| session_id.to_string())
+            })
+            .or_else(|| {
+                meta.get(session_id)
+                    .and_then(|e| e.source_path.clone())
+                    .map(PathBuf::from)
+                    .and_then(|p| crate::providers::antigravity::brain_conversation_id(&p))
+            })
+    }
+
+    /// Keep a resumed native chat discoverable after its process exits.
+    fn record_resumed_agy_session(
+        &self,
+        conversation: &str,
+        cwd: Option<&str>,
+        source_path: &Path,
+    ) {
+        let mut meta = MetadataStore::load(&self.home);
+        if meta.get(conversation).is_some() {
+            return;
+        }
+        meta.sessions.insert(
+            conversation.to_string(),
+            SessionMetaEntry {
+                title: None,
+                cwd: cwd.map(String::from),
+                agent: Some(AgentKind::Antigravity),
+                source_path: Some(source_path.to_string_lossy().to_string()),
+                native_session_id: Some(conversation.to_string()),
+                updated_at_ms: now_ms(),
+            },
+        );
+        let _ = meta.save(&self.home);
+    }
+
+    fn agy_history_sink(&self, session_id: &str, conversation: Option<&str>) -> PathBuf {
+        let hosted = hosted_history_path(&self.home, session_id);
+        if hosted.is_file() {
+            return hosted;
+        }
+        conversation
+            .and_then(|id| native_brain_transcript(&self.home, id))
+            .unwrap_or(hosted)
+    }
+
     fn resolve_session_source_path(
         &self,
         session_id: &str,
@@ -1009,7 +1131,15 @@ impl ProcessManager {
         cwd: Option<&str>,
     ) -> PathBuf {
         match agent {
-            AgentKind::Antigravity => hosted_history_path(&self.home, session_id),
+            AgentKind::Antigravity => {
+                let meta = MetadataStore::load(&self.home);
+                let recorded = meta
+                    .get(session_id)
+                    .and_then(|e| e.source_path.clone())
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_file());
+                recorded.unwrap_or_else(|| hosted_history_path(&self.home, session_id))
+            }
             AgentKind::Claude => {
                 let sanitized = sanitize_claude_project_dir(cwd.unwrap_or("."));
                 self.home
@@ -1240,7 +1370,12 @@ fn append_agy_user_row(
 }
 
 /// Applies one decoded `AgyStreamOutput` event to daemon-owned `~/.multibot/history/`
-/// and `~/.multibot/metadata.json`. Returns `true` if a turn ended (`event == "result"`).
+/// and `~/.multibot/metadata.json`.
+///
+/// Returns `true` when the assistant has finished answering. That is a completed
+/// `agent_response` step as well as `event == "result"`: `result` can wait on background tasks,
+/// and a chat that stays `busy` until then cannot take a follow-up and shows "Working" for
+/// minutes after the reply already landed. The turn-end marker is written once, at `result`.
 pub fn apply_agy_stream_output(
     home: &Path,
     session_id: &str,
@@ -1249,18 +1384,29 @@ pub fn apply_agy_stream_output(
     seq: u64,
 ) -> bool {
     let ts = now_ms();
+    if let AgyStreamOutput::Init {
+        conversation_id: Some(ref cid),
+        ..
+    } = out
+    {
+        let mut meta = MetadataStore::load(home);
+        let entry = meta.sessions.entry(session_id.to_string()).or_default();
+        entry.native_session_id = Some(cid.clone());
+        entry.updated_at_ms = ts;
+        let _ = meta.save(home);
+    }
+    // Native transcripts belong to the CLI. Mirroring stdout there duplicates its replies.
+    if !history_path.starts_with(home.join(".multibot/history")) {
+        return matches!(
+            out,
+            AgyStreamOutput::AssistantMessage(_) | AgyStreamOutput::TurnEnded { .. }
+        );
+    }
     match out {
         AgyStreamOutput::Init {
             conversation_id,
             model,
         } => {
-            if let Some(ref cid) = conversation_id {
-                let mut meta = MetadataStore::load(home);
-                let entry = meta.sessions.entry(session_id.to_string()).or_default();
-                entry.native_session_id = Some(cid.clone());
-                entry.updated_at_ms = ts;
-                let _ = meta.save(home);
-            }
             let _ = append_history_record(
                 history_path,
                 &json!({
@@ -1288,7 +1434,7 @@ pub fn apply_agy_stream_output(
                     }
                 }),
             );
-            false
+            true
         }
         AgyStreamOutput::ToolStarted {
             call_id,
@@ -1667,12 +1813,7 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        mgr.register_one_shot_child(
-            "live-sleep".into(),
-            None,
-            home.join("live.jsonl"),
-            child,
-        );
+        mgr.register_one_shot_child("live-sleep".into(), None, home.join("live.jsonl"), child);
         assert!(mgr.is_session_busy("live-sleep"));
 
         // Queue two prompts while busy, cancel the first one
@@ -1941,6 +2082,338 @@ mod tests {
         );
         assert_eq!(page.messages[0].text, "single message");
 
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// Writes a stand-in `agy` that behaves like the real CLI in stream-json mode: it answers
+    /// every stdin frame with a turn and records each frame plus its own argv.
+    ///
+    /// The real CLI keeps reading stdin after a turn ends and while background tools run, which
+    /// is exactly the state where a chat looks like it "cannot take new messages".
+    #[cfg(unix)]
+    fn fake_agy(home: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = home.join("fake-agy");
+        let log = home.join("fake-agy.log");
+        let mut script = String::from("#!/bin/sh\n");
+        script.push_str(&format!(
+            "printf 'ARGV %s\\n' \"$*\" >> {}\n",
+            log.display()
+        ));
+        // Echo the conversation the CLI was resumed on, like the real `agy` init event does.
+        script.push_str("conv=fake-conv\n");
+        script.push_str("while [ $# -gt 0 ]; do\n");
+        script.push_str("  if [ \"$1\" = \"--conversation\" ]; then conv=\"$2\"; fi\n");
+        script.push_str("  shift\n");
+        script.push_str("done\n");
+        script.push_str("printf '{\"event\":\"init\",\"conversation_id\":\"%s\"}\\n' \"$conv\"\n");
+        script.push_str("while IFS= read -r line; do\n");
+        script.push_str(&format!(
+            "  printf 'STDIN %s\\n' \"$line\" >> {}\n",
+            log.display()
+        ));
+        script.push_str(
+            "  printf '{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"agent_response\",\"step_index\":1,\"state\":\"DONE\",\"text_delta\":\"reply\"}}\\n'\n",
+        );
+        script
+            .push_str("  printf '{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\"}}\\n'\n");
+        script.push_str("done\n");
+        fs::write(&bin, script).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        (bin, log)
+    }
+
+    /// Waits for the process that owns the log to write `needle`.
+    ///
+    /// The child runs on its own process and its stdin writer is a task on this runtime, so the
+    /// wait has to yield. A busy machine can take a few seconds to schedule either one.
+    #[cfg(unix)]
+    async fn wait_for_log_line(log: &Path, needle: &str) -> String {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            let body = fs::read_to_string(log).unwrap_or_default();
+            if let Some(line) = body.lines().find(|l| l.contains(needle)) {
+                return line.to_string();
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!(
+            "never saw {needle:?} in {}: {:?}",
+            log.display(),
+            fs::read_to_string(log).unwrap_or_default()
+        );
+    }
+
+    /// A follow-up typed while the turn is still running must reach the live `agy` stdin.
+    /// Queueing it behind the turn is what makes an Antigravity chat look stuck.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn steer_session_writes_to_live_agy_stdin_while_busy() {
+        let home = temp_home("agy-steer-live");
+        let (bin, log) = fake_agy(&home);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mgr = ProcessManager::new(home.clone(), tx);
+        mgr.set_test_bin_override(Some(bin));
+
+        mgr.send_prompt("agy-1", AgentKind::Antigravity, None, "first message", None)
+            .await
+            .unwrap();
+        assert!(mgr.is_session_busy("agy-1"));
+        wait_for_log_line(&log, "STDIN ").await;
+
+        mgr.steer_session(
+            "agy-1".into(),
+            AgentKind::Antigravity,
+            None,
+            "follow-up while working".into(),
+            None,
+        )
+        .await;
+
+        match rx.recv().await.unwrap() {
+            ServerEvent::PromptStatus { status, detail, .. } => {
+                assert_eq!(status, "sent", "follow-up must not be queued: {detail}");
+            }
+            other => panic!("expected PromptStatus(sent), got {other:?}"),
+        }
+
+        let frame = wait_for_log_line(&log, "follow-up while working").await;
+        let payload = frame
+            .split_once("STDIN ")
+            .map(|(_, rest)| rest)
+            .expect("log line carries the stdin frame");
+        let parsed: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(parsed["event"], "user");
+        assert_eq!(parsed["message"]["role"], "user");
+        assert_eq!(parsed["message"]["content"], "follow-up while working");
+        assert!(
+            !mgr.state.lock().unwrap().queues.contains_key("agy-1"),
+            "the follow-up was trapped in the queue"
+        );
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// Resuming a chat the daemon never spawned still hands its uuid to `agy`, and its replies
+    /// land in the transcript the desktop is watching instead of a parallel hosted file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resumed_brain_conversation_passes_conversation_flag_and_writes_watched_transcript() {
+        let home = temp_home("agy-resume");
+        let (bin, log) = fake_agy(&home);
+        let conversation = "4d5d5535-249c-4f10-90d9-7ec49c2eeb53";
+        let transcript = home
+            .join(".gemini/antigravity-cli/brain")
+            .join(conversation)
+            .join(".system_generated/logs/transcript.jsonl");
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(&transcript, "").unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mgr = ProcessManager::new(home.clone(), tx);
+        mgr.set_test_bin_override(Some(bin));
+
+        mgr.send_prompt(
+            conversation,
+            AgentKind::Antigravity,
+            None,
+            "resume me",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let argv = wait_for_log_line(&log, "ARGV ").await;
+        assert!(
+            argv.contains(&format!("--conversation {conversation}")),
+            "agy was not resumed on the existing conversation: {argv}"
+        );
+
+        let reply = wait_for_log_line(&log, "STDIN ").await;
+        assert!(reply.contains("resume me"));
+
+        // The daemon must not create a second, unwatched hosted history for this chat.
+        let hosted = hosted_history_path(&home, conversation);
+        assert!(
+            !hosted.exists(),
+            "resumed native conversation also wrote {}",
+            hosted.display()
+        );
+        assert!(transcript.is_file());
+
+        // The resumed chat stays in the sidebar after its process exits.
+        let recorded = MetadataStore::load(&home);
+        assert_eq!(
+            recorded
+                .get(conversation)
+                .and_then(|e| e.native_session_id.as_deref()),
+            Some(conversation)
+        );
+        let connected = mgr.connected_session_ids();
+        let archive = ArchiveStore::load(&home);
+        let live = crate::providers::LiveActivity::load(&home);
+        let server_workspaces = crate::server_workspaces::ServerWorkspaceIndex::default();
+        let ctx = DiscoveryContext {
+            active_session_ids: &connected,
+            connected_session_ids: &connected,
+            metadata: &recorded,
+            archive: &archive,
+            live: &live,
+            server_workspaces: &server_workspaces,
+            include_archived: false,
+        };
+        let listed = crate::providers::discover_all_sessions_with_ctx(&home, 50, &ctx);
+        assert_eq!(
+            listed.iter().filter(|s| s.id == conversation).count(),
+            1,
+            "resumed conversation must list exactly once: {listed:?}"
+        );
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// A finished reply must clear `working` before `event == "result"`, which can wait on
+    /// background tasks for minutes.
+    #[tokio::test]
+    async fn completed_agent_response_ends_turn_before_result_event() {
+        let home = temp_home("agy-early-end");
+        let sid = "agy-early-1";
+        let hp = hosted_history_path(&home, sid);
+        let mut acc = AgyStreamAccumulator::new();
+
+        let mut ended = false;
+        for ev in [
+            json!({"event":"step_update","step_update":{"step_type":"agent_response","step_index":1,"state":"DONE","text_delta":"Done already"}}),
+        ] {
+            for out in acc.feed_value(&ev, Some(1000), None) {
+                if apply_agy_stream_output(&home, sid, &hp, out, 1) {
+                    ended = true;
+                }
+            }
+        }
+        assert!(
+            ended,
+            "a completed agent_response must end the turn without waiting for event == \"result\""
+        );
+        let page = read_history_page(AgentKind::Antigravity, &hp, None, None, None, None).unwrap();
+        assert_eq!(page.messages.last().unwrap().text, "Done already");
+        assert_eq!(page.tail_activity, crate::providers::TailActivity::Idle);
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn native_stream_events_never_duplicate_cli_transcript_rows() {
+        let home = temp_home("agy-native-no-duplicates");
+        let conversation = "4d5d5535-249c-4f10-90d9-7ec49c2eeb53";
+        let path = home
+            .join(".gemini/antigravity-cli/brain")
+            .join(conversation)
+            .join(".system_generated/logs/transcript.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = "{\"type\":\"PLANNER_RESPONSE\",\"content\":\"native reply\"}\n";
+        fs::write(&path, original).unwrap();
+        let mut acc = AgyStreamAccumulator::new();
+        for event in [
+            json!({"event":"init","conversation_id":conversation}),
+            json!({"event":"step_update","step_update":{"step_type":"agent_response","step_index":1,"state":"DONE","text_delta":"native reply"}}),
+            json!({"event":"result","result":{"status":"SUCCESS"}}),
+        ] {
+            for out in acc.feed_value(&event, Some(1000), None) {
+                apply_agy_stream_output(&home, conversation, &path, out, 1);
+            }
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(
+            MetadataStore::load(&home)
+                .get(conversation)
+                .unwrap()
+                .native_session_id
+                .as_deref(),
+            Some(conversation)
+        );
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mgr = ProcessManager::new(home.clone(), tx);
+        let hosted = hosted_history_path(&home, "hosted-session");
+        fs::create_dir_all(hosted.parent().unwrap()).unwrap();
+        fs::write(&hosted, "").unwrap();
+        assert_eq!(
+            mgr.agy_history_sink("hosted-session", Some(conversation)),
+            hosted
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn send_and_steer_bypass_queue_on_busy_live_agy() {
+        let home = temp_home("agy-busy-stdin");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel();
+        let mgr = ProcessManager::new(home.clone(), tx);
+        mgr.state.lock().unwrap().active.insert(
+            "s1".into(),
+            ActiveProcess {
+                pid: 999_998,
+                cwd: None,
+                source_path: hosted_history_path(&home, "s1"),
+                stdin_tx: Some(stdin_tx),
+                busy: true,
+                interrupted: false,
+            },
+        );
+        mgr.send_prompt("s1", AgentKind::Antigravity, None, "send while busy", None)
+            .await
+            .unwrap();
+        assert!(mgr.is_session_busy("s1"));
+        mgr.steer_session(
+            "s1".into(),
+            AgentKind::Antigravity,
+            None,
+            "steer while busy".into(),
+            None,
+        )
+        .await;
+        for expected in ["send while busy", "steer while busy"] {
+            let frame: serde_json::Value = serde_json::from_str(
+                &stdin_rx
+                    .try_recv()
+                    .expect("prompt must reach live stdin immediately"),
+            )
+            .unwrap();
+            assert_eq!(frame["message"]["content"], expected);
+        }
+        assert!(
+            matches!(rx.try_recv().unwrap(), ServerEvent::PromptStatus { status, .. } if status == "sent")
+        );
+        assert!(!mgr.state.lock().unwrap().queues.contains_key("s1"));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn steer_session_on_busy_claude_still_queues() {
+        let home = temp_home("claude-queue");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mgr = ProcessManager::new(home.clone(), tx);
+        {
+            let mut guard = mgr.state.lock().unwrap();
+            guard.active.insert(
+                "s1".into(),
+                ActiveProcess {
+                    pid: 999_998,
+                    cwd: None,
+                    source_path: home.join("s1.jsonl"),
+                    stdin_tx: None,
+                    busy: true,
+                    interrupted: false,
+                },
+            );
+        }
+        mgr.steer_session("s1".into(), AgentKind::Claude, None, "later".into(), None)
+            .await;
+        match rx.recv().await.unwrap() {
+            ServerEvent::PromptStatus { status, .. } => assert_eq!(status, "queued"),
+            other => panic!("expected queued, got {other:?}"),
+        }
         let _ = fs::remove_dir_all(&home);
     }
 }
