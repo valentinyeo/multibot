@@ -946,8 +946,8 @@ impl TerminalPaneState {
     }
 }
 
-/// Focuses the terminal, or falls back to the root handle when the pane is closed.
 impl TerminalPaneState {
+    /// Creates the grid's focus handle once, on first open. Closed panes hold none.
     pub(crate) fn ensure_focus_handle(&mut self, cx: &mut Context<crate::app::MultibotView>) {
         if self.focus_handle.is_none() {
             self.focus_handle = Some(cx.focus_handle());
