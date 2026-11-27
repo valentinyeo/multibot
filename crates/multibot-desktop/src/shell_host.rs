@@ -132,7 +132,7 @@ fn forwarded_shortcut(key: u32, ctrl: bool, alt: bool, shift: bool) -> Option<&'
         if alt { "alt-" } else { "" },
         if shift { "shift-" } else { "" }
     );
-    // Only app-owned bindings escape the console. Ctrl+C/D/L stay terminal-owned.
+    // Only app-owned bindings escape the console. Unbound Ctrl+C/L stay terminal-owned.
     multibot_keys::by_gpui_key(&chord)
         .filter(|spec| spec.wired)
         .map(|spec| spec.gpui_key)
@@ -657,7 +657,10 @@ mod tests {
         assert!(forwarded_shortcut(0x4B, false, true, false).is_some());
         assert!(forwarded_shortcut(0x70, false, false, false).is_some());
         assert!(forwarded_shortcut(0x43, true, false, false).is_none());
-        assert!(forwarded_shortcut(0x44, true, false, false).is_none());
+        assert_eq!(
+            forwarded_shortcut(0x44, true, false, false).is_some(),
+            multibot_keys::by_gpui_key("ctrl-d").is_some_and(|spec| spec.wired)
+        );
         assert!(forwarded_shortcut(0x41, false, false, false).is_none());
     }
     #[test]
