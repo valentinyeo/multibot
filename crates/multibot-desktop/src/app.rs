@@ -1106,11 +1106,10 @@ impl MultibotView {
                 active_key.as_deref(),
                 now,
             );
-        if !self.sidebar_state.workspace_store.pinned_section_collapsed
-            && layout
-                .pinned_tiles
-                .iter()
-                .any(|r| r.session_key == session_key)
+        if layout
+            .pinned_tiles
+            .iter()
+            .any(|r| r.session_key == session_key)
         {
             return true;
         }
@@ -1119,11 +1118,7 @@ impl MultibotView {
                 return true;
             }
         }
-        if (self.sidebar_state.active_workspace_id == multibot_core::workspaces::ALL_WORKSPACES_ID
-            || (!self.sidebar_state.recents_collapsed
-                && !self.sidebar_state.workspace_store.recents_section_collapsed))
-            && layout.recents.iter().any(|r| r.session_key == session_key)
-        {
+        if layout.recents.iter().any(|r| r.session_key == session_key) {
             return true;
         }
         false
@@ -11184,7 +11179,7 @@ mod tests {
             );
             assert!(v1.sidebar_state.workspace_store.is_favorite(&key));
 
-            // Toggle Recents collapse in Window 1
+            // Clicking Recents in Window 1 must not collapse it.
             window.click("sidebar-recents-header", cx);
             window.render_frame(cx);
 
@@ -11218,11 +11213,11 @@ mod tests {
         .unwrap();
         cx.run_until_parked();
 
-        // Window 2 MUST see recents_collapsed, unread_only, and waiting_sessions!
+        // Window 2 keeps Recents open and sees unread_only and waiting_sessions.
         cx.update_window(handle2, |_, window, cx| {
             window.render_frame(cx);
             let v2 = view2.read(cx);
-            assert!(v2.sidebar_state.recents_collapsed);
+            assert!(!v2.sidebar_state.recents_collapsed);
             assert!(v2.sidebar_state.unread_only);
             assert!(
                 v2.sidebar_state

@@ -6,7 +6,7 @@ use gpui_kit::{
     Context, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent,
     Modifiers, ModifiersChangedEvent, MouseButton, ParentElement, Role, SharedString,
     StatefulInteractiveElement, Styled, TestSupportExt, Window,
-    component::{Selectable, Sizable, button::Button, h_flex, v_flex},
+    component::{Selectable, Sizable, button::Button, h_flex, label::Label, v_flex},
     div,
     prelude::FluentBuilder,
     px, rgb,
@@ -1027,10 +1027,8 @@ impl MultibotView {
         // Sessions scroll contents: Pinned Grid -> Groups -> Recents
         let mut sessions_content = v_flex().gap_2();
 
-        // 1. Pinned Avatar Tile Grid (suppresses "Pinned" text heading when non-empty)
-        if !self.sidebar_state.workspace_store.pinned_section_collapsed
-            && !layout.pinned_tiles.is_empty()
-        {
+        // 1. Pinned avatar tile grid
+        if !layout.pinned_tiles.is_empty() {
             let mut pin_grid = h_flex()
                 .id("sidebar-pinned-grid")
                 .test_support()
@@ -1163,37 +1161,31 @@ impl MultibotView {
                         ),
                 );
             }
-            sessions_content = sessions_content.child(pin_grid);
+            sessions_content = sessions_content
+                .child(
+                    div()
+                        .id("sidebar-pinned-header")
+                        .test_support()
+                        .px_2()
+                        .py_1()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::text_muted())
+                        .child(Label::new("Pinned")),
+                )
+                .child(pin_grid);
         }
 
         // 2. Collapsible Named Groups (Ctrl+G)
         for (g_idx, gv) in layout.groups.iter().enumerate() {
-            let gid = gv.group.id.clone();
             let collapsed = gv.group.collapsed;
             let dot_color = gv.group.color.as_deref().and_then(parse_hex_color);
             let mut grp_box = v_flex().gap_1().child(
                 div()
                     .id(SharedString::from(format!("sidebar-group-{g_idx}")))
-                    .role(Role::Button)
                     .test_support()
                     .px_2()
                     .py_1()
-                    .rounded(RADIUS_ROW)
-                    .hover(|s| s.bg(theme::bg_hover()))
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            this.sidebar_state
-                                .workspace_store
-                                .toggle_group_collapsed(&gid);
-                            this.sidebar_state.rename = None;
-                            this.cleanup_unmounted_surface_state();
-                            this.persist_workspace_store_if_enabled();
-                            this.sync_workspace_to_shared(cx);
-                            cx.notify();
-                        }),
-                    )
                     .child(
                         h_flex()
                             .items_center()
@@ -1201,16 +1193,9 @@ impl MultibotView {
                             .child(
                                 h_flex()
                                     .items_center()
+                                    .flex_1()
+                                    .min_w_0()
                                     .gap_1p5()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme::text_muted())
-                                            .child(lucide_icon(
-                                                if collapsed { icons::CHEVRON_RIGHT } else { icons::CHEVRON_DOWN },
-                                                12.0,
-                                            )),
-                                    )
                                     .when_some(dot_color, |el, col| {
                                         el.child(
                                             div()
@@ -1224,8 +1209,9 @@ impl MultibotView {
                                         div()
                                             .text_xs()
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme::text_secondary())
-                                            .child(gv.group.name.clone()),
+                                            .text_color(theme::text_muted())
+                                            .truncate()
+                                            .child(Label::new(gv.group.name.clone())),
                                     ),
                             )
                             .child(
@@ -1264,46 +1250,19 @@ impl MultibotView {
                 el.child(
                     div()
                         .id("sidebar-recents-header")
-                        .role(Role::Button)
                         .test_support()
-                        .px_1()
-                        .py_0p5()
-                        .cursor_pointer()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                let currently_collapsed = this.sidebar_state.recents_collapsed
-                                    || this.sidebar_state.workspace_store.recents_section_collapsed;
-                                let next = !currently_collapsed;
-                                this.sidebar_state.recents_collapsed = next;
-                                this.sidebar_state.workspace_store.recents_section_collapsed = next;
-                                this.sidebar_state.rename = None;
-                                this.cleanup_unmounted_surface_state();
-                                this.persist_workspace_store_if_enabled();
-                                this.sync_workspace_to_shared(cx);
-                                cx.notify();
-                            }),
-                        )
-                        .child(div().text_color(theme::text_muted()).child(lucide_icon(
-                            if self.sidebar_state.recents_collapsed
-                                || self.sidebar_state.workspace_store.recents_section_collapsed
-                            {
-                                icons::CHEVRON_RIGHT
-                            } else {
-                                icons::CHEVRON_DOWN
-                            },
-                            12.0,
-                        ))),
+                        .px_2()
+                        .py_1()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::text_muted())
+                        .child(Label::new("Recents")),
                 )
             },
         );
 
-        if self.sidebar_state.active_workspace_id == ALL_WORKSPACES_ID
-            || (!self.sidebar_state.recents_collapsed
-                && !self.sidebar_state.workspace_store.recents_section_collapsed)
-        {
-            if self.sessions.is_empty() {
-                recents_section = recents_section.child(
+        if self.sessions.is_empty() {
+            recents_section = recents_section.child(
                     div()
                         .px_3()
                         .py_3()
@@ -1313,46 +1272,43 @@ impl MultibotView {
                         .text_color(theme::text_muted())
                         .child("Connect to a VPS or local daemon to stream Claude, Antigravity, Codex, Pi & Cursor chats."),
                 );
-            } else if layout.recents.is_empty()
-                && layout.pinned_tiles.is_empty()
-                && layout.groups.is_empty()
-            {
-                recents_section = recents_section.child(
-                    div()
-                        .px_3()
-                        .py_3()
-                        .rounded(RADIUS_ROW)
-                        .bg(theme::bg_surface())
-                        .text_xs()
-                        .text_color(theme::text_muted())
-                        .child(if self.sidebar_state.unread_only {
-                            "No unread sessions in this workspace."
-                        } else if self.sidebar_state.active_workspace_view
-                            == WorkspaceView::Frequent
-                        {
-                            "Open or message a session to see it here."
-                        } else if in_starred {
-                            "Star a session with Alt+S to pin it into Starred."
-                        } else {
-                            "No sessions in this workspace yet."
-                        }),
-                );
-            } else {
-                for (idx, row) in layout.recents.iter().enumerate() {
-                    let badge = if jump_badges {
-                        jump_index_for(&row.session_key)
+        } else if layout.recents.is_empty()
+            && layout.pinned_tiles.is_empty()
+            && layout.groups.is_empty()
+        {
+            recents_section = recents_section.child(
+                div()
+                    .px_3()
+                    .py_3()
+                    .rounded(RADIUS_ROW)
+                    .bg(theme::bg_surface())
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .child(if self.sidebar_state.unread_only {
+                        "No unread sessions in this workspace."
+                    } else if self.sidebar_state.active_workspace_view == WorkspaceView::Frequent {
+                        "Open or message a session to see it here."
+                    } else if in_starred {
+                        "Star a session with Alt+S to pin it into Starred."
                     } else {
-                        None
-                    };
-                    recents_section = recents_section.child(self.render_sidebar_session_row(
-                        SharedString::from(format!("session-{idx}")),
-                        row,
-                        active_key.as_deref() == Some(row.session_key.as_str()),
-                        badge,
-                        in_starred,
-                        cx,
-                    ));
-                }
+                        "No sessions in this workspace yet."
+                    }),
+            );
+        } else {
+            for (idx, row) in layout.recents.iter().enumerate() {
+                let badge = if jump_badges {
+                    jump_index_for(&row.session_key)
+                } else {
+                    None
+                };
+                recents_section = recents_section.child(self.render_sidebar_session_row(
+                    SharedString::from(format!("session-{idx}")),
+                    row,
+                    active_key.as_deref() == Some(row.session_key.as_str()),
+                    badge,
+                    in_starred,
+                    cx,
+                ));
             }
         }
         sessions_content = sessions_content.child(recents_section);
@@ -1704,22 +1660,14 @@ impl MultibotView {
                 .map(|i| i + 1)
         };
 
-        // Flatten visible rail avatars: non-collapsed pinned -> non-collapsed groups -> non-collapsed recents
-        let mut rail_rows: Vec<SidebarRow> = Vec::new();
-        if !self.sidebar_state.workspace_store.pinned_section_collapsed {
-            rail_rows.extend(layout.pinned_tiles);
-        }
+        // Match the open sidebar, including deliberate Ctrl+G group collapse.
+        let mut rail_rows = layout.pinned_tiles;
         for gv in layout.groups {
             if !gv.group.collapsed {
                 rail_rows.extend(gv.items);
             }
         }
-        if self.sidebar_state.active_workspace_view == WorkspaceView::Frequent
-            || (!self.sidebar_state.recents_collapsed
-                && !self.sidebar_state.workspace_store.recents_section_collapsed)
-        {
-            rail_rows.extend(layout.recents);
-        }
+        rail_rows.extend(layout.recents);
 
         let mut ws_rail = v_flex().gap_1().items_center();
         let in_starred = self.sidebar_state.active_workspace_id == STARRED_WORKSPACE_ID;
@@ -2197,7 +2145,7 @@ mod tests {
             assert!(window.try_find("sidebar-group-0").is_some());
             assert!(window.try_find("sidebar-unread-only-pill").is_some());
 
-            // Toggle group collapse and turn off unread-only
+            // Clicking the group header leaves it open; turn off unread-only.
             window.click("sidebar-group-0", cx);
             window.render_frame(cx);
             window.click("sidebar-unread-only-pill", cx);
@@ -2231,6 +2179,218 @@ mod tests {
             window.press("ctrl-shift-b", cx);
             window.render_frame(cx);
             assert!(window.try_find("sidebar-open").is_some());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn section_headers_show_names_and_clicks_keep_sessions_visible(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            for name in ["app.hypertask.ai", "Marketing / Help / Docs", "  "] {
+                view.update(cx, |v, cx| {
+                    v.sidebar_state.workspace_store = WorkspaceStore::new();
+                    v.sessions = sample_sessions();
+                    let pin = v.session_key_for(&v.sessions[0]);
+                    let grouped = v.session_key_for(&v.sessions[1]);
+                    v.sidebar_state.workspace_store.toggle_pin(&pin, false);
+                    let group = v.sidebar_state.workspace_store.create_group(
+                        DEFAULT_WORKSPACE_ID,
+                        name,
+                        None,
+                    );
+                    v.sidebar_state.workspace_store.toggle_group_for_session(
+                        &grouped,
+                        DEFAULT_WORKSPACE_ID,
+                        Some(&group.id),
+                        "",
+                    );
+                    // Simulate an older persisted group without a usable name.
+                    v.sidebar_state.workspace_store.groups[0].name = name.into();
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                for (id, expected) in [
+                    ("sidebar-pinned-header", "Pinned"),
+                    (
+                        "sidebar-group-0",
+                        if name.trim().is_empty() {
+                            "Group"
+                        } else {
+                            name
+                        },
+                    ),
+                    ("sidebar-recents-header", "Recents"),
+                ] {
+                    let path = window.find(id).path().to_vec();
+                    assert!(
+                        gpui_kit::base::test_support::texts(window)
+                            .iter()
+                            .any(|text| {
+                                text.visible()
+                                    && text.path().starts_with(&path)
+                                    && text.text() == expected
+                            }),
+                        "missing visible section name {expected}"
+                    );
+                    window.click(id, cx);
+                    window.render_frame(cx);
+                    assert!(window.find("sidebar-pin-0").visible());
+                    assert!(window.find("sidebar-group-0-item-0").visible());
+                    assert!(window.find("session-0").visible());
+                    view.read_with(cx, |v, _| {
+                        assert!(!v.sidebar_state.workspace_store.groups[0].collapsed)
+                    });
+                }
+            }
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn right_click_scopes_shared_commands_to_pinned_grouped_recent_and_rail_sessions(
+        cx: &mut TestAppContext,
+    ) {
+        use multibot_core::workspaces::PaletteRow;
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            let keys = view.update(cx, |v, cx| {
+                v.sessions = sample_sessions();
+                let keys: Vec<_> = v.sessions.iter().map(|s| v.session_key_for(s)).collect();
+                v.sidebar_state.workspace_store.toggle_pin(&keys[0], false);
+                v.sidebar_state.workspace_store.toggle_group_for_session(&keys[1], DEFAULT_WORKSPACE_ID, None, "Backend");
+                v.select_session(v.sessions[0].clone(), cx);
+                cx.notify();
+                keys
+            });
+            for (mode, ids) in [
+                (SidebarMode::Open, ["sidebar-pin-0", "sidebar-group-0-item-0", "session-0"]),
+                (SidebarMode::Collapsed, ["rail-session-0", "rail-session-1", "rail-session-2"]),
+            ] {
+                view.update(cx, |v, cx| { v.sidebar_state.mode = mode; cx.notify(); });
+                for (id, key) in ids.into_iter().zip(&keys) {
+                    let before = view.read(cx).sidebar_state.workspace_store.favorites.clone();
+                    window.render_frame(cx);
+                    window.right_click(id, cx);
+                    window.render_frame(cx);
+                    assert!(window.find("palette-context-banner").visible());
+                    view.read_with(cx, |v, _| {
+                        assert_eq!(v.active_modal, ActiveModal::Palette);
+                        assert_eq!(v.palette_state.tab_context_session_key.as_ref(), Some(key));
+                        assert_eq!(v.selected_session.as_ref().unwrap().id, "s1");
+                        let commands = v.build_palette_command_catalog(10000);
+                        let rows = v.build_palette_rows("", 10000);
+                        for command in commands.iter().filter(|c| c.tab_context) {
+                            assert!(rows.iter().any(|row| matches!(row, PaletteRow::Command { id, .. } if *id == command.id)), "missing shared command {}", command.id);
+                        }
+                    });
+                    window.click("pal-cmd-favorite", cx);
+                    window.render_frame(cx);
+                    view.read_with(cx, |v, _| {
+                        assert_eq!(v.sidebar_state.workspace_store.is_favorite(key), !before.contains(key));
+                        for other in keys.iter().filter(|other| *other != key) {
+                            assert_eq!(v.sidebar_state.workspace_store.is_favorite(other), before.contains(other));
+                        }
+                    });
+                }
+            }
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn sidebar_group_activity_order_survives_selection_and_palette_pin_round_trip(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            for workspace_id in [DEFAULT_WORKSPACE_ID, STARRED_WORKSPACE_ID] {
+                let keys = view.update(cx, |v, cx| {
+                    v.sidebar_state.workspace_store = WorkspaceStore::new();
+                    v.sidebar_state.active_workspace_id = workspace_id.into();
+                    v.sessions = sample_sessions();
+                    v.sessions[0].title = "Chief of Staff".into();
+                    v.sessions[0].updated_at_ms = 100;
+                    v.sessions[0].last_assistant_ms = Some(100);
+                    v.sessions[1].title = "Supervisor".into();
+                    v.sessions[2].last_assistant_ms = Some(6000);
+                    let keys: Vec<_> = v.sessions.iter().map(|s| v.session_key_for(s)).collect();
+                    let group = v.sidebar_state.workspace_store.create_group(
+                        workspace_id,
+                        "app.hypertask.ai",
+                        None,
+                    );
+                    for key in &keys {
+                        v.sidebar_state
+                            .workspace_store
+                            .favorites
+                            .insert(key.clone());
+                        v.sidebar_state.workspace_store.toggle_group_for_session(
+                            key,
+                            workspace_id,
+                            Some(&group.id),
+                            "",
+                        );
+                    }
+                    cx.notify();
+                    keys
+                });
+                let expected = vec![keys[2].clone(), keys[1].clone(), keys[0].clone()];
+                window.render_frame(cx);
+                for row in ["sidebar-group-0-item-2", "sidebar-group-0-item-1"] {
+                    window.click(row, cx);
+                    window.render_frame(cx);
+                    view.read_with(cx, |v, _| {
+                        let layout = v.sidebar_state.workspace_store.compute_sidebar_layout(
+                            workspace_id,
+                            &v.session_inputs(),
+                            false,
+                            now_unix_ms(),
+                        );
+                        assert_eq!(layout.ctrl_digit_order, expected);
+                    });
+                }
+                window.press("ctrl-3", cx);
+                window.render_frame(cx);
+                view.read_with(cx, |v, _| {
+                    assert_eq!(v.selected_session.as_ref().unwrap().id, "s1")
+                });
+                window.right_click("sidebar-group-0-item-2", cx);
+                window.render_frame(cx);
+                window.input("pin", cx);
+                window.render_frame(cx);
+                window.click("pal-cmd-pin", cx);
+                window.render_frame(cx);
+                assert!(window.find("sidebar-pin-0").visible());
+                view.read_with(cx, |v, _| {
+                    let layout = v.sidebar_state.workspace_store.compute_sidebar_layout(
+                        workspace_id,
+                        &v.session_inputs(),
+                        false,
+                        now_unix_ms(),
+                    );
+                    assert_eq!(layout.pinned_tiles[0].session_key, keys[0]);
+                    assert_eq!(layout.groups[0].items.len(), 2);
+                });
+                window.right_click("sidebar-pin-0", cx);
+                window.render_frame(cx);
+                window.input("pin", cx);
+                window.render_frame(cx);
+                window.click("pal-cmd-pin", cx);
+                window.render_frame(cx);
+                assert!(window.try_find("sidebar-pinned-grid").is_none());
+                assert!(window.find("sidebar-group-0-item-2").visible());
+                view.read_with(cx, |v, _| {
+                    let store = &v.sidebar_state.workspace_store;
+                    assert!(!store.is_pinned(&keys[0], workspace_id == STARRED_WORKSPACE_ID));
+                    let layout = store.compute_sidebar_layout(
+                        workspace_id,
+                        &v.session_inputs(),
+                        false,
+                        now_unix_ms(),
+                    );
+                    assert_eq!(layout.ctrl_digit_order, expected);
+                });
+            }
         })
         .unwrap();
     }
@@ -2380,8 +2540,23 @@ mod tests {
         cx.update_window(handle, |_, window, cx| {
             view.update(cx, |v, cx| {
                 v.sessions = sample_sessions();
-                v.sidebar_state.workspace_store.recents_section_collapsed = true;
-                v.sidebar_state.recents_collapsed = true;
+                let group = v.sidebar_state.workspace_store.create_group(
+                    DEFAULT_WORKSPACE_ID,
+                    "Hidden with Ctrl+G",
+                    None,
+                );
+                for session in &v.sessions {
+                    let key = v.session_key_for(session);
+                    v.sidebar_state.workspace_store.toggle_group_for_session(
+                        &key,
+                        DEFAULT_WORKSPACE_ID,
+                        Some(&group.id),
+                        "",
+                    );
+                }
+                v.sidebar_state
+                    .workspace_store
+                    .toggle_group_collapsed(&group.id);
                 v.select_session(v.sessions[0].clone(), cx);
             });
             window.render_frame(cx);
@@ -2550,9 +2725,7 @@ mod tests {
     fn sidebar_recents_sync_pinned_collapse_and_modal_precedence(cx: &mut TestAppContext) {
         let (handle, view) = open_view(cx);
         cx.update_window(handle, |_, window, cx| {
-            // (a) Persisted recents_section_collapsed = true while recents_collapsed = false:
-            // a SINGLE click on sidebar-recents-header must expand Recents cleanly.
-            // (b) pinned_section_collapsed = true hides Open sidebar's pinned tile grid.
+            // Old fixed-section collapse flags must not strand sessions after header toggles disappear.
             view.update(cx, |v, cx| {
                 v.sessions = sample_sessions();
                 let k1 = v.session_key_for(&v.sessions[0]);
@@ -2564,15 +2737,15 @@ mod tests {
             });
             window.render_frame(cx);
 
-            assert!(window.try_find("sidebar-pinned-grid").is_none());
-            assert!(window.try_find("session-0").is_none());
+            assert!(window.find("sidebar-pinned-grid").visible());
+            assert!(window.find("session-0").visible());
 
-            // Single click on sidebar-recents-header expands Recents on the first click
+            // Clicking Recents is inert even with older collapse flags.
             window.click("sidebar-recents-header", cx);
             window.render_frame(cx);
             view.read_with(cx, |v, _| {
                 assert!(!v.sidebar_state.recents_collapsed);
-                assert!(!v.sidebar_state.workspace_store.recents_section_collapsed);
+                assert!(v.sidebar_state.workspace_store.recents_section_collapsed);
             });
             assert!(window.try_find("session-0").is_some());
 
@@ -2608,10 +2781,7 @@ mod tests {
                     prefer_character_input: false,
                 };
                 v.handle_sidebar_keydown(&ev_x, cx);
-                assert_eq!(
-                    v.sidebar_state.rename.as_ref().unwrap().draft,
-                    orig_draft
-                );
+                assert_eq!(v.sidebar_state.rename.as_ref().unwrap().draft, orig_draft);
             });
 
             let fh = view.read_with(cx, |v, _| v.sidebar_state.focus_handle.clone().unwrap());

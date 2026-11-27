@@ -494,8 +494,12 @@ pub fn merge_zigshel_bundle(
         if meta.color.is_none() {
             meta.color = session.color;
         }
-        meta.pinned |= session.pinned;
-        meta.starred_pinned |= session.starred_pinned;
+        if !meta.pin_overridden {
+            meta.pinned |= session.pinned;
+        }
+        if !meta.starred_pin_overridden {
+            meta.starred_pinned |= session.starred_pinned;
+        }
         meta.muted |= session.muted;
         if session.inbox_excluded {
             store.inbox_excluded.insert(session.session_key.clone());
@@ -1786,6 +1790,40 @@ mod tests {
         assert_eq!(bundle.favorite_keys, vec!["local:claude:s1"]);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repeated_import_respects_local_pin_choices_after_reload() {
+        let key = "h:claude:chief-of-staff-session";
+        let bundle = ZigShellImportBundle {
+            sessions: vec![ImportedSession {
+                session_key: key.into(),
+                pinned: true,
+                starred_pinned: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut store = WorkspaceStore::new();
+        store.record_session_view(key, 100);
+        merge_zigshel_bundle(&mut store, &bundle);
+        assert!(store.is_pinned(key, false));
+        assert!(store.is_pinned(key, true));
+        assert!(!store.toggle_pin(key, false));
+        let mut store: WorkspaceStore =
+            serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
+        merge_zigshel_bundle(&mut store, &bundle);
+        assert!(!store.is_pinned(key, false));
+        assert!(store.is_pinned(key, true));
+        assert!(!store.toggle_pin(key, true));
+        merge_zigshel_bundle(&mut store, &bundle);
+        assert!(!store.is_pinned(key, false));
+        assert!(!store.is_pinned(key, true));
+        assert!(store.toggle_pin(key, false));
+        assert!(store.toggle_pin(key, true));
+        merge_zigshel_bundle(&mut store, &bundle);
+        assert!(store.is_pinned(key, false));
+        assert!(store.is_pinned(key, true));
     }
 
     #[test]

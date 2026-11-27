@@ -314,6 +314,11 @@ pub struct SessionMeta {
     pub pinned: bool,
     #[serde(default)]
     pub starred_pinned: bool,
+    // Local pin choices must survive repeated legacy imports and live-key reconciliation.
+    #[serde(default)]
+    pub pin_overridden: bool,
+    #[serde(default)]
+    pub starred_pin_overridden: bool,
     #[serde(default)]
     pub group_id: Option<String>,
     #[serde(default)]
@@ -345,6 +350,8 @@ impl Default for SessionMeta {
             workspace_id: None,
             pinned: false,
             starred_pinned: false,
+            pin_overridden: false,
+            starred_pin_overridden: false,
             group_id: None,
             starred_group_id: None,
             manual_order: None,
@@ -1013,7 +1020,12 @@ impl WorkspaceStore {
             };
             // View history alone must not compete with an imported workspace assignment.
             let has_metadata = self.session_meta.get(key).is_some_and(|m| {
-                m.workspace_id.is_some() || m.pinned || m.starred_pinned || m.muted
+                m.workspace_id.is_some()
+                    || m.pinned
+                    || m.starred_pinned
+                    || m.pin_overridden
+                    || m.starred_pin_overridden
+                    || m.muted
             }) || self.session_titles.contains_key(key)
                 || self.inbox_excluded.contains(key);
             if sid.len() >= 8 && has_metadata {
@@ -1071,8 +1083,22 @@ impl WorkspaceStore {
                             .workspace_id
                             .clone()
                             .filter(|id| self.workspace_by_id(id).is_some());
-                        meta.pinned |= imported.pinned;
-                        meta.starred_pinned |= imported.starred_pinned;
+                        if !meta.pin_overridden {
+                            meta.pinned = if imported.pin_overridden {
+                                imported.pinned
+                            } else {
+                                meta.pinned || imported.pinned
+                            };
+                            meta.pin_overridden = imported.pin_overridden;
+                        }
+                        if !meta.starred_pin_overridden {
+                            meta.starred_pinned = if imported.starred_pin_overridden {
+                                imported.starred_pinned
+                            } else {
+                                meta.starred_pinned || imported.starred_pinned
+                            };
+                            meta.starred_pin_overridden = imported.starred_pin_overridden;
+                        }
                         meta.muted |= imported.muted;
                     }
                     if meta != before {
@@ -1596,9 +1622,11 @@ impl WorkspaceStore {
             .or_default();
         if in_starred {
             meta.starred_pinned = !meta.starred_pinned;
+            meta.starred_pin_overridden = true;
             meta.starred_pinned
         } else {
             meta.pinned = !meta.pinned;
+            meta.pin_overridden = true;
             meta.pinned
         }
     }
@@ -1896,7 +1924,7 @@ impl WorkspaceStore {
         }
 
         let mut grouped_buckets: HashMap<String, Vec<Candidate>> = HashMap::new();
-        let mut ungrouped_pinned: Vec<Candidate> = Vec::new();
+        let mut pinned_candidates: Vec<Candidate> = Vec::new();
         let mut ungrouped_recents: Vec<Candidate> = Vec::new();
 
         for (orig_pos, input) in sessions.iter().enumerate() {
@@ -1985,6 +2013,7 @@ impl WorkspaceStore {
                 .and_then(|m| m.last_input_ms)
                 .unwrap_or(0)
                 .max(input.summary.updated_at_ms)
+                .max(input.summary.last_assistant_ms.unwrap_or(0))
                 .max(last_frequent_visit_ms);
 
             let ws_name = ws_name_map
@@ -2022,10 +2051,10 @@ impl WorkspaceStore {
 
             if in_all || workspace_view == WorkspaceView::Frequent {
                 ungrouped_recents.push(cand);
+            } else if eff_pinned {
+                pinned_candidates.push(cand);
             } else if let Some(gid) = eff_group {
                 grouped_buckets.entry(gid).or_default().push(cand);
-            } else if eff_pinned {
-                ungrouped_pinned.push(cand);
             } else {
                 ungrouped_recents.push(cand);
             }
@@ -2046,24 +2075,28 @@ impl WorkspaceStore {
                 if self.auto_sort {
                     members.sort_by(|a, b| {
                         b.row
-                            .pinned
-                            .cmp(&a.row.pinned)
-                            .then_with(|| b.row.used_ms.cmp(&a.row.used_ms))
+                            .used_ms
+                            .cmp(&a.row.used_ms)
                             .then_with(|| a.orig_pos.cmp(&b.orig_pos))
                     });
                 } else {
                     members.sort_by_key(|c| (c.manual_order.unwrap_or(usize::MAX), c.orig_pos));
                 }
+                let mut group = group.clone();
+                group.name = match group.name.trim() {
+                    "" => "Group".to_string(),
+                    name => name.to_string(),
+                };
                 groups.push(SidebarGroupView {
-                    group: group.clone(),
+                    group,
                     items: members.into_iter().map(|c| c.row).collect(),
                 });
             }
         }
 
-        // Ungrouped pinned: manual order always preserved
-        ungrouped_pinned.sort_by_key(|c| (c.manual_order.unwrap_or(usize::MAX), c.orig_pos));
-        let pinned_tiles: Vec<SidebarRow> = ungrouped_pinned.into_iter().map(|c| c.row).collect();
+        // Pinned tiles preserve their manual order.
+        pinned_candidates.sort_by_key(|c| (c.manual_order.unwrap_or(usize::MAX), c.orig_pos));
+        let pinned_tiles: Vec<SidebarRow> = pinned_candidates.into_iter().map(|c| c.row).collect();
 
         // Frequent is ranked independently of workspace pins, groups and manual order.
         if workspace_view == WorkspaceView::Frequent {
@@ -2082,10 +2115,9 @@ impl WorkspaceStore {
             });
         } else if self.auto_sort {
             ungrouped_recents.sort_by(|a, b| {
-                a.row
-                    .muted
-                    .cmp(&b.row.muted)
-                    .then_with(|| b.row.used_ms.cmp(&a.row.used_ms))
+                b.row
+                    .used_ms
+                    .cmp(&a.row.used_ms)
                     .then_with(|| a.orig_pos.cmp(&b.orig_pos))
             });
         } else {
@@ -2093,27 +2125,24 @@ impl WorkspaceStore {
         }
         let recents: Vec<SidebarRow> = ungrouped_recents.into_iter().map(|c| c.row).collect();
 
-        // flat_display_order: groups first -> ungrouped pinned -> ungrouped recents
+        // Match the rendered order: Pinned -> named groups -> Recents.
         let mut flat_display_order = Vec::new();
+        for item in &pinned_tiles {
+            flat_display_order.push(item.session_key.clone());
+        }
         for gv in &groups {
             for item in &gv.items {
                 flat_display_order.push(item.session_key.clone());
             }
         }
-        for item in &pinned_tiles {
-            flat_display_order.push(item.session_key.clone());
-        }
         for item in &recents {
             flat_display_order.push(item.session_key.clone());
         }
 
-        // ctrl_digit_order: pinned tiles FIRST -> non-collapsed group members -> recents
-        // (skipping collapsed Pinned/Recents sections and collapsed groups).
+        // Ctrl+digits follow visible rows; Ctrl+G can still hide a named group.
         let mut ctrl_digit_order = Vec::new();
-        if !self.pinned_section_collapsed {
-            for item in &pinned_tiles {
-                ctrl_digit_order.push(item.session_key.clone());
-            }
+        for item in &pinned_tiles {
+            ctrl_digit_order.push(item.session_key.clone());
         }
         for gv in &groups {
             if !gv.group.collapsed {
@@ -2122,10 +2151,8 @@ impl WorkspaceStore {
                 }
             }
         }
-        if in_all || workspace_view == WorkspaceView::Frequent || !self.recents_section_collapsed {
-            for item in &recents {
-                ctrl_digit_order.push(item.session_key.clone());
-            }
+        for item in &recents {
+            ctrl_digit_order.push(item.session_key.clone());
         }
 
         SidebarLayout {
@@ -2177,7 +2204,7 @@ impl WorkspaceStore {
     }
 
     /// `Ctrl+Shift+Up/Down`: reorders `session_key` within its strict partition
-    /// (same group, ungrouped pinned, or ungrouped recents). Never crosses boundaries
+    /// (same group, Pinned, or Recents). Never crosses boundaries
     /// and never mutates `auto_sort` or `manual_order` on invalid/no-op moves.
     pub fn reorder_session(
         &mut self,
@@ -4720,7 +4747,175 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_two_tier_comparator_and_groups_order() {
+    fn sidebar_sections_use_message_activity_and_restore_unpinned_group_members() {
+        for workspace_id in [DEFAULT_WORKSPACE_ID, STARRED_WORKSPACE_ID] {
+            let mut store = WorkspaceStore::new();
+            let sessions = [
+                make_session(
+                    "chief",
+                    AgentKind::Claude,
+                    "Chief of Staff",
+                    100,
+                    false,
+                    false,
+                ),
+                make_session(
+                    "supervisor",
+                    AgentKind::Claude,
+                    "Supervisor",
+                    300,
+                    false,
+                    false,
+                ),
+                SessionSummary {
+                    last_assistant_ms: Some(500),
+                    ..make_session("new", AgentKind::Claude, "Newest reply", 200, false, false)
+                },
+            ];
+            let inputs: Vec<_> = sessions.iter().map(|s| make_input("h", s)).collect();
+            let keys: Vec<_> = inputs.iter().map(|s| s.key.clone()).collect();
+            let group = store.create_group(workspace_id, "Marketing / Help / Docs", None);
+            for key in &keys {
+                store.favorites.insert(key.clone());
+                store.toggle_group_for_session(key, workspace_id, Some(&group.id), "");
+            }
+            store.toggle_session_muted(&keys[2]);
+            let in_starred = workspace_id == STARRED_WORKSPACE_ID;
+            assert!(store.toggle_pin(&keys[0], in_starred));
+            let pinned = store.compute_sidebar_layout(workspace_id, &inputs, false, 1000);
+            assert_eq!(
+                pinned
+                    .pinned_tiles
+                    .iter()
+                    .map(|r| &r.session_key)
+                    .collect::<Vec<_>>(),
+                vec![&keys[0]]
+            );
+            assert_eq!(pinned.groups[0].group.name, "Marketing / Help / Docs");
+            assert_eq!(
+                pinned.groups[0]
+                    .items
+                    .iter()
+                    .map(|r| &r.session_key)
+                    .collect::<Vec<_>>(),
+                vec![&keys[2], &keys[1]]
+            );
+            assert_eq!(
+                pinned.flat_display_order,
+                vec![keys[0].clone(), keys[2].clone(), keys[1].clone()]
+            );
+            assert!(!store.toggle_pin(&keys[0], in_starred));
+            store.record_session_view(&keys[0], 9000);
+            let store: WorkspaceStore =
+                serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
+            assert!(!store.is_pinned(&keys[0], in_starred));
+            let unpinned = store.compute_sidebar_layout(workspace_id, &inputs, false, 10000);
+            assert!(unpinned.pinned_tiles.is_empty());
+            assert_eq!(
+                unpinned.groups[0]
+                    .items
+                    .iter()
+                    .map(|r| &r.session_key)
+                    .collect::<Vec<_>>(),
+                vec![&keys[2], &keys[1], &keys[0]]
+            );
+        }
+    }
+
+    #[test]
+    fn ungrouped_pin_choices_and_activity_order_survive_save_and_reload() {
+        let dir = unique_temp_dir("sidebar-pins");
+        let path = dir.join("workspaces.json");
+        let sessions = [
+            make_session(
+                "chief",
+                AgentKind::Claude,
+                "Chief of Staff",
+                100,
+                false,
+                false,
+            ),
+            make_session("new", AgentKind::Claude, "Newest", 500, false, false),
+            make_session(
+                "supervisor",
+                AgentKind::Claude,
+                "Supervisor",
+                300,
+                false,
+                false,
+            ),
+        ];
+        let inputs: Vec<_> = sessions.iter().map(|s| make_input("h", s)).collect();
+        for workspace_id in [DEFAULT_WORKSPACE_ID, STARRED_WORKSPACE_ID] {
+            let mut store = WorkspaceStore::new();
+            for input in &inputs {
+                store.favorites.insert(input.key.clone());
+            }
+            let in_starred = workspace_id == STARRED_WORKSPACE_ID;
+            for index in [0, 2] {
+                assert!(store.toggle_pin(&inputs[index].key, in_starred));
+                store.save_to(&path).unwrap();
+                store = WorkspaceStore::load_from(&path).unwrap();
+                let pinned = store.compute_sidebar_layout(workspace_id, &inputs, false, 1000);
+                assert_eq!(pinned.pinned_tiles[0].session_key, inputs[index].key);
+                assert!(!store.toggle_pin(&inputs[index].key, in_starred));
+                store.save_to(&path).unwrap();
+                store = WorkspaceStore::load_from(&path).unwrap();
+                let unpinned = store.compute_sidebar_layout(workspace_id, &inputs, false, 1000);
+                assert!(unpinned.pinned_tiles.is_empty());
+                assert_eq!(
+                    unpinned
+                        .recents
+                        .iter()
+                        .map(|r| r.session_id.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["new", "supervisor", "chief"]
+                );
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sidebar_blank_group_names_have_a_visible_fallback() {
+        let mut store = WorkspaceStore::new();
+        let session = make_session("one", AgentKind::Claude, "One", 100, false, false);
+        let inputs = [make_input("h", &session)];
+        let group = store.create_group(DEFAULT_WORKSPACE_ID, "Group", None);
+        store.toggle_group_for_session(&inputs[0].key, DEFAULT_WORKSPACE_ID, Some(&group.id), "");
+        store.groups[0].name = "  \t ".into();
+        let layout = store.compute_sidebar_layout(DEFAULT_WORKSPACE_ID, &inputs, false, 1000);
+        assert_eq!(layout.groups[0].group.name, "Group");
+    }
+
+    #[test]
+    fn reconciliation_cannot_restore_explicitly_unpinned_sessions() {
+        let mut store = WorkspaceStore::new();
+        let sid = "chief-of-staff-session";
+        let imported = format!("legacy:claude:{sid}");
+        let live = format!("local:claude:{sid}");
+        store.session_meta.insert(
+            imported,
+            SessionMeta {
+                pinned: true,
+                starred_pinned: true,
+                ..Default::default()
+            },
+        );
+        store.reconcile_live_session_keys(&[live.clone()]);
+        assert!(store.is_pinned(&live, false));
+        assert!(store.is_pinned(&live, true));
+        assert!(!store.toggle_pin(&live, false));
+        assert!(!store.toggle_pin(&live, true));
+        let mut store: WorkspaceStore =
+            serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
+        store.reconcile_live_session_keys(&[live.clone()]);
+        assert!(!store.is_pinned(&live, false));
+        assert!(!store.is_pinned(&live, true));
+    }
+
+    #[test]
+    fn sidebar_pins_precede_groups_and_recents_follow_message_activity() {
         let mut store = WorkspaceStore::new();
         let s_grp_rec = make_session("grec", AgentKind::Claude, "G Recent", 500, false, false);
         let s_grp_pin = make_session("gpin", AgentKind::Claude, "G Pinned", 100, false, false);
@@ -4745,7 +4940,7 @@ mod tests {
         let grp = store.create_group(DEFAULT_WORKSPACE_ID, "Core", None);
         store.toggle_group_for_session(&k(0), DEFAULT_WORKSPACE_ID, Some(&grp.id), "");
         store.toggle_group_for_session(&k(1), DEFAULT_WORKSPACE_ID, Some(&grp.id), "");
-        store.toggle_pin(&k(1), false); // pinned inside group beats newer recent inside group
+        store.toggle_pin(&k(1), false); // A grouped pin moves to the shared Pinned area.
 
         // Ungrouped pinned in manual order (pin_b=0, pin_a=1)
         store.toggle_pin(&k(2), false);
@@ -4753,7 +4948,7 @@ mod tests {
         store.session_meta.get_mut(&k(3)).unwrap().manual_order = Some(0);
         store.session_meta.get_mut(&k(2)).unwrap().manual_order = Some(1);
 
-        // Muted recent sorts AFTER non-muted recents even though it has newer timestamp
+        // Muting does not override newest-message ordering.
         store.toggle_session_muted(&k(4));
 
         let layout = store.compute_sidebar_layout(DEFAULT_WORKSPACE_ID, &inputs, false, 1000);
@@ -4764,7 +4959,7 @@ mod tests {
                 .iter()
                 .map(|r| r.session_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["gpin", "grec"]
+            vec!["grec"]
         );
         assert_eq!(
             layout
@@ -4772,7 +4967,7 @@ mod tests {
                 .iter()
                 .map(|r| r.session_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["pinb", "pina"]
+            vec!["pinb", "pina", "gpin"]
         );
         assert_eq!(
             layout
@@ -4780,11 +4975,11 @@ mod tests {
                 .iter()
                 .map(|r| r.session_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["rnew", "rold", "rmut"]
+            vec!["rmut", "rnew", "rold"]
         );
         assert_eq!(
             layout.flat_display_order,
-            vec![k(1), k(0), k(3), k(2), k(6), k(5), k(4)]
+            vec![k(3), k(2), k(1), k(0), k(4), k(6), k(5)]
         );
 
         // Starred workspace uses independent starred_pinned & starred_group_id
@@ -5916,7 +6111,7 @@ mod tests {
             .iter()
             .map(|r| r.session_id.as_str())
             .collect();
-        assert_eq!(b_ids, vec!["b_new", "b_old", "b_muted"]);
+        assert_eq!(b_ids, vec!["b_muted", "b_new", "b_old"]);
     }
 
     #[test]
@@ -5997,7 +6192,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_digit_order_skips_collapsed_sections_and_palette_matches_non_alnum_word_boundary() {
+    fn ctrl_digit_order_keeps_fixed_sections_open_and_palette_matches_non_alnum_word_boundary() {
         let mut store = WorkspaceStore::new();
         let s1 = make_session("s1", AgentKind::Claude, "Pinned", 100, false, false);
         let s2 = make_session("s2", AgentKind::Claude, "Recent", 200, false, false);
@@ -6007,12 +6202,18 @@ mod tests {
 
         store.pinned_section_collapsed = true;
         let layout1 = store.compute_sidebar_layout(DEFAULT_WORKSPACE_ID, &inputs, false, 1000);
-        assert_eq!(layout1.ctrl_digit_order, vec![inputs[1].key.clone()]);
+        assert_eq!(
+            layout1.ctrl_digit_order,
+            vec![inputs[0].key.clone(), inputs[1].key.clone()]
+        );
 
         store.pinned_section_collapsed = false;
         store.recents_section_collapsed = true;
         let layout2 = store.compute_sidebar_layout(DEFAULT_WORKSPACE_ID, &inputs, false, 1000);
-        assert_eq!(layout2.ctrl_digit_order, vec![inputs[0].key.clone()]);
+        assert_eq!(
+            layout2.ctrl_digit_order,
+            vec![inputs[0].key.clone(), inputs[1].key.clone()]
+        );
 
         // Word-boundary match for non-alphanumeric prefixes after separator
         assert_eq!(palette_text_match_rank("Chat View: /rename", "/rename"), 2);
