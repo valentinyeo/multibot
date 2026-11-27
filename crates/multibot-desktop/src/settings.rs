@@ -1,6 +1,6 @@
 use crate::app::MultibotView;
 use crate::theme::{self, RADIUS_BUBBLE};
-use gpui_kit::base::FocusTrapElement;
+use gpui_kit::base::{Disableable, FocusTrapElement};
 use gpui_kit::{
     Context, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, TestSupportExt, Window,
@@ -24,6 +24,7 @@ use multibot_proto::SessionSummary;
 pub(crate) enum SettingsTab {
     #[default]
     General,
+    Account,
     Voice,
     Hosts,
     Workspaces,
@@ -33,8 +34,9 @@ pub(crate) enum SettingsTab {
 }
 
 impl SettingsTab {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::General,
+        Self::Account,
         Self::Voice,
         Self::Hosts,
         Self::Workspaces,
@@ -46,6 +48,7 @@ impl SettingsTab {
     fn id(self) -> &'static str {
         match self {
             Self::General => "settings-tab-general",
+            Self::Account => "settings-tab-account",
             Self::Voice => "settings-tab-voice",
             Self::Hosts => "settings-tab-hosts",
             Self::Workspaces => "settings-tab-workspaces",
@@ -58,6 +61,7 @@ impl SettingsTab {
     fn title(self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Account => "Account",
             Self::Voice => "Voice",
             Self::Hosts => "Hosts",
             Self::Workspaces => "Workspaces",
@@ -70,6 +74,7 @@ impl SettingsTab {
     fn subtitle(self) -> &'static str {
         match self {
             Self::General => "Composer preferences and queued message delivery.",
+            Self::Account => "Sign in at account.multiprompt.dev and sync your voice key.",
             Self::Voice => "Deepgram microphone dictation. Your legacy settings stay untouched.",
             Self::Hosts => "Connect locally or over SSH. Your legacy app stays untouched.",
             Self::Workspaces => "Organize sessions and switch your workspace.",
@@ -282,12 +287,41 @@ impl MultibotView {
 
         let mut content = v_flex().gap_5().w_full();
         match self.settings_tab {
+            SettingsTab::Account => {
+                let account = &cx.global::<crate::state::SharedAppStore>().account;
+                let mut card = v_flex().gap_3().p_4().rounded(RADIUS_BUBBLE)
+                    .bg(theme::bg_surface()).border_1().border_color(theme::border_subtle())
+                    .child(div().text_sm().child("Multibot Account"))
+                    .child(div().id("account-status").text_xs()
+                        .text_color(theme::text_secondary()).child(account.status.clone()));
+                if let Some(email) = &account.email {
+                    card = card
+                        .child(div().id("account-email").text_sm().child(format!("Signed in as {email}")))
+                        .child(Button::new("account-sync").label("Sync Deepgram Key Now").disabled(account.busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.start_account_job(crate::account::AccountJob::Sync, cx);
+                            })))
+                        .child(Button::new("account-sign-out").label("Sign out").disabled(account.busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.voice.cancel();
+                                this.start_account_job(crate::account::AccountJob::SignOut, cx);
+                            })));
+                } else {
+                    card = card.child(Button::new("account-sign-in").label("Sign in to Multibot Account")
+                        .disabled(account.busy).on_click(cx.listener(|this, _, _, cx| {
+                            this.start_account_job(crate::account::AccountJob::SignIn, cx);
+                        })));
+                }
+                content = content.child(card);
+            }
             SettingsTab::Voice => {
                 let draft = multibot_core::voice::VoiceSettings {
                     api_key: self.deepgram_key_input.read(cx).value().to_string(),
                     language: self.deepgram_language_input.read(cx).value().to_string(),
                 };
-                let (_, source) = draft.resolved();
+                let (_, source) = draft.resolved(
+                    cx.global::<crate::state::SharedAppStore>().account.deepgram_key.as_deref(),
+                );
                 let source_hint = source.map_or(
                     "No API key detected. Enter an override or set DEEPGRAM_API_KEY.",
                     |source| source.hint(),
@@ -302,7 +336,10 @@ impl MultibotView {
                     .child(div().id("deepgram-key-source").text_xs().text_color(theme::text_secondary()).child(source_hint))
                     .child(div().text_xs().child("Language code"))
                     .child(Input::new(&self.deepgram_language_input).id("deepgram-language"))
+                    .child(div().text_xs().text_color(theme::text_secondary())
+                        .child("Sign in under Account to sync your Deepgram key. Saving a new override also updates your account."))
                     .child(Button::new("save-deepgram-settings").label("Save dictation settings")
+                        .disabled(cx.global::<crate::state::SharedAppStore>().account.busy)
                         .on_click(cx.listener(|this, _, _, cx| {
                             let config = multibot_core::voice::VoiceSettings {
                                 api_key: multibot_core::voice::normalize_api_key(this.deepgram_key_input.read(cx).value().as_str()),
@@ -315,10 +352,19 @@ impl MultibotView {
                                     return;
                                 }
                             }
+                            let key_changed = config.api_key != this.settings.voice.api_key;
+                            if key_changed && !config.api_key.is_empty() {
+                                cx.global_mut::<crate::state::SharedAppStore>().account.deepgram_key = None;
+                            }
                             this.voice.cancel();
                             this.settings.voice = config;
                             this.notice = Some("Dictation settings saved.".into());
                             this.save_general_preferences(cx);
+                            if key_changed && cx.global::<crate::state::SharedAppStore>().account.email.is_some()
+                                && !this.settings.voice.api_key.is_empty()
+                            {
+                                this.start_account_job(crate::account::AccountJob::UploadKey, cx);
+                            }
                         }))));
             }
             SettingsTab::General => {

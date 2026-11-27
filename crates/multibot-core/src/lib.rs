@@ -1,3 +1,4 @@
+pub mod account;
 pub mod cache;
 pub mod chat_scroll;
 pub mod daemon_client;

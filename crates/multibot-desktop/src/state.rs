@@ -217,6 +217,7 @@ pub(crate) struct SharedAppStore {
     pub update_notice_seq: u64,
     /// Optional settings path override used by tests for isolated App-scoped updater persistence.
     pub update_settings_path_override: Option<PathBuf>,
+    pub account: crate::account::AccountUi,
     pub persist_to_disk: bool,
     pub window_count: usize,
     pub revision: u64,
@@ -293,6 +294,7 @@ impl SharedAppStore {
             update_notice: None,
             update_notice_seq: 0,
             update_settings_path_override: None,
+            account: crate::account::AccountUi::default(),
             persist_to_disk: false,
             window_count: 0,
             revision: 0,
@@ -338,6 +340,7 @@ impl SharedAppStore {
             update_notice: None,
             update_notice_seq: 0,
             update_settings_path_override: None,
+            account: crate::account::AccountUi::default(),
             persist_to_disk: true,
             window_count: 0,
             revision: 0,

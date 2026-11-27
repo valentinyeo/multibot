@@ -550,8 +550,14 @@ impl MultibotView {
 
         // Observe SharedAppStore across OS windows (Ctrl+N) without triggering idle redraws.
         let mut reminder_wake_seq = cx.global::<SharedAppStore>().reminder_wake_seq;
+        let mut account_status = cx.global::<SharedAppStore>().account.status.clone();
         let _shared_store_sub = cx.observe_global::<SharedAppStore>(move |this, cx| {
             this.sync_from_shared_store(cx);
+            let next_status = &cx.global::<SharedAppStore>().account.status;
+            if account_status != *next_status {
+                account_status = next_status.clone();
+                cx.notify();
+            }
             let next = cx.global::<SharedAppStore>().reminder_wake_seq;
             if reminder_wake_seq != next {
                 reminder_wake_seq = next;
@@ -664,7 +670,7 @@ impl MultibotView {
 
         SharedAppStore::schedule_reminder_timer(cx);
 
-        Self {
+        let mut view = Self {
             runtime,
             root_focus_handle,
             last_focus_layout_sig: None,
@@ -740,7 +746,9 @@ impl MultibotView {
             host_input,
             palette_input,
             notice: None,
-        }
+        };
+        view.start_account_once(cx);
+        view
     }
 
     /// Enables disk persistence for Tier-2 chat cache and offline outbox (production `main.rs`).
@@ -6731,6 +6739,42 @@ mod tests {
             assert!(window.try_find("update-primary-btn").is_some());
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn account_settings_and_palette_keep_secrets_out_of_saved_voice_settings(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.press("ctrl-,", cx);
+            window.render_frame(cx);
+            window.click("settings-tab-account", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("account-sign-in").is_some());
+            assert!(window.try_find("account-sign-out").is_none());
+            let catalog = view.read(cx).build_palette_command_catalog(now_unix_ms());
+            assert!(catalog.iter().any(|c| c.label == "Account: Sign in to Multibot"));
+            assert!(catalog.iter().any(|c| c.label == "Account: Sign out"));
+            let local_key = view.read(cx).settings.voice.api_key.clone();
+            {
+                let store = cx.global_mut::<SharedAppStore>();
+                store.account.email = Some("user@example.com".into());
+                store.account.deepgram_key = Some("account-test-key".into());
+                store.account.status = "Deepgram key synced from account".into();
+                store.bump_revision();
+            }
+            window.render_frame(cx);
+            assert!(window.try_find("account-email").is_some());
+            assert!(window.try_find("account-sync").is_some());
+            assert!(window.try_find("account-sign-out").is_some());
+            assert!(window.try_find("account-sign-in").is_none());
+            assert_eq!(view.read(cx).settings.voice.api_key, local_key);
+            assert!(!format!("{:?}", cx.global::<SharedAppStore>().account).contains("account-test-key"));
+            view.update(cx, |v, cx| {
+                cx.global_mut::<SharedAppStore>().account.busy = true;
+                v.start_account_job(crate::account::AccountJob::SignOut, cx);
+            });
+            assert!(cx.global::<SharedAppStore>().account.email.is_some());
+        }).unwrap();
     }
 
     #[gpui_kit::test]

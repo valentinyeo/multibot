@@ -44,7 +44,9 @@ impl MultibotView {
         if self.main_surface != crate::state::MainSurface::Chat {
             return;
         }
-        let (config, _) = self.settings.voice.resolved();
+        let (config, _) = self.settings.voice.resolved(
+            cx.global::<crate::state::SharedAppStore>().account.deepgram_key.as_deref(),
+        );
         if let Err(err) = config.validate() {
             self.notice = Some(err.to_string());
             cx.notify();

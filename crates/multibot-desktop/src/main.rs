@@ -3,6 +3,7 @@
     windows_subsystem = "windows"
 )]
 
+mod account;
 mod app;
 mod chat_view;
 mod computer_view;

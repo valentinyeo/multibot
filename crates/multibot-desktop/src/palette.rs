@@ -452,6 +452,26 @@ impl MultibotView {
             },
             // Look and settings
             PaletteCommandSpec {
+                id: "pal-cmd-account-sign-in".into(),
+                label: "Account: Sign in to Multibot".into(),
+                chord: String::new(),
+                category: PaletteCategory::LookAndSettings,
+                destructive: false,
+                aliases: vec!["login".into(), "account".into(), "deepgram".into()],
+                tab_context: false,
+                global: true,
+            },
+            PaletteCommandSpec {
+                id: "pal-cmd-account-sign-out".into(),
+                label: "Account: Sign out".into(),
+                chord: String::new(),
+                category: PaletteCategory::LookAndSettings,
+                destructive: true,
+                aliases: vec!["logout".into(), "account".into()],
+                tab_context: false,
+                global: true,
+            },
+            PaletteCommandSpec {
                 id: "pal-cmd-settings".into(),
                 label: "Open Settings".into(),
                 chord: "Ctrl+,".into(),
@@ -989,6 +1009,17 @@ impl MultibotView {
                 }
 
                 match id.as_str() {
+                    "pal-cmd-account-sign-in" | "pal-cmd-account-sign-out" => {
+                        self.settings_tab = crate::settings::SettingsTab::Account;
+                        self.set_main_surface(MainSurface::Settings);
+                        let job = if id == "pal-cmd-account-sign-in" {
+                            crate::account::AccountJob::SignIn
+                        } else {
+                            self.voice.cancel();
+                            crate::account::AccountJob::SignOut
+                        };
+                        self.start_account_job(job, cx);
+                    }
                     "pal-cmd-inbox" => {
                         self.sidebar_state.rename = None;
                         self.sidebar_state.new_workspace_draft = None;

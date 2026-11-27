@@ -4560,7 +4560,9 @@ name = "multibot-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "dirs 6.0.0",
+ "getrandom 0.3.4",
  "multibot-gpu",
  "multibot-proto",
  "semver",
@@ -4570,6 +4572,7 @@ dependencies = [
  "sysinfo 0.35.2",
  "tokio",
  "ureq",
+ "url",
 ]
 
 [[package]]

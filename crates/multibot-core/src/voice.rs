@@ -62,8 +62,9 @@ impl VoiceSettings {
 
     // Resolve at use time: synced keys can change while Multibot is running.
     // Keep detected keys out of saved settings and the manual-override input.
-    pub fn resolved(&self) -> (Self, Option<VoiceKeySource>) {
+    pub fn resolved(&self, account_key: Option<&str>) -> (Self, Option<VoiceKeySource>) {
         self.resolve_with_sources(
+            account_key,
             || std::env::var("DEEPGRAM_API_KEY").ok(),
             || {
                 #[cfg(target_os = "windows")]
@@ -81,6 +82,7 @@ impl VoiceSettings {
 
     fn resolve_with_sources(
         &self,
+        account_key: Option<&str>,
         process_environment: impl FnOnce() -> Option<String>,
         windows_environment: impl FnOnce() -> Option<String>,
         legacy_config: impl FnOnce() -> Option<String>,
@@ -95,7 +97,8 @@ impl VoiceSettings {
                 .filter(|key| !key.is_empty())
                 .map(|key| (key, source))
         };
-        let detected = candidate(process_environment(), VoiceKeySource::ProcessEnvironment)
+        let detected = candidate(account_key.map(str::to_owned), VoiceKeySource::Account)
+            .or_else(|| candidate(process_environment(), VoiceKeySource::ProcessEnvironment))
             .or_else(|| candidate(windows_environment(), VoiceKeySource::WindowsEnvironment))
             .or_else(|| candidate(legacy_config(), VoiceKeySource::LegacyConfig));
         if let Some((key, source)) = detected {
@@ -109,6 +112,7 @@ impl VoiceSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoiceKeySource {
     Manual,
+    Account,
     ProcessEnvironment,
     WindowsEnvironment,
     LegacyConfig,
@@ -118,6 +122,7 @@ impl VoiceKeySource {
     pub fn hint(self) -> &'static str {
         match self {
             Self::Manual => "Using your Multibot API key override",
+            Self::Account => "Using the Deepgram key synced from your Multibot account",
             Self::ProcessEnvironment => "Using DEEPGRAM_API_KEY from the process environment",
             Self::WindowsEnvironment => "Using synced DEEPGRAM_API_KEY from Windows environment",
             Self::LegacyConfig => "Using the legacy ZigShell API key (read-only)",
@@ -286,6 +291,35 @@ mod tests {
     use std::io::{Read, Write};
 
     #[test]
+    fn account_key_enables_dictation_without_legacy_and_clears_on_signout() {
+        let config = VoiceSettings {
+            language: "de".into(),
+            ..Default::default()
+        };
+        let (synced, source) = config.resolve_with_sources(
+            Some("account-key"),
+            || panic!("account must beat the process environment"),
+            || panic!("account must beat the Windows environment"),
+            || panic!("account must not require legacy settings"),
+        );
+        assert!(synced.validate().is_ok());
+        assert_eq!(source, Some(VoiceKeySource::Account));
+        assert_eq!(synced.language, "de");
+        assert!(config.api_key.is_empty());
+        let (signed_out, source) = config.resolve_with_sources(None, || None, || None, || None);
+        assert!(signed_out.validate().is_err());
+        assert_eq!(source, None);
+        let local = VoiceSettings {
+            api_key: "local-key".into(),
+            ..Default::default()
+        };
+        let (resolved, source) = local.resolved(Some("account-key"));
+        assert_eq!(resolved.api_key, "local-key");
+        assert_eq!(source, Some(VoiceKeySource::Manual));
+        assert!(!format!("{synced:?}").contains("account-key"));
+    }
+
+    #[test]
     fn dictation_lifecycle_and_repeated_stop() {
         let mut phase = DictationPhase::default();
         assert_eq!(phase, DictationPhase::Off);
@@ -428,6 +462,7 @@ mod tests {
             ..Default::default()
         };
         let (resolved, source) = config.resolve_with_sources(
+            None,
             || panic!("manual key must win"),
             || panic!("manual key must win"),
             || panic!("manual key must win"),
@@ -437,6 +472,7 @@ mod tests {
 
         let config = VoiceSettings::default();
         let (resolved, source) = config.resolve_with_sources(
+            None,
             || Some(" \"process-key\"\n".into()),
             || panic!("process environment must win"),
             || panic!("process environment must win"),
@@ -444,6 +480,7 @@ mod tests {
         assert_eq!(resolved.api_key, "process-key");
         assert_eq!(source, Some(VoiceKeySource::ProcessEnvironment));
         let (resolved, source) = config.resolve_with_sources(
+            None,
             || Some(" \"\" ".into()),
             || Some(" 'registry-key' ".into()),
             || panic!("Windows environment must beat legacy config"),
@@ -456,6 +493,7 @@ mod tests {
         );
         assert!(!source.unwrap().hint().contains(&resolved.api_key));
         let (resolved, source) = config.resolve_with_sources(
+            None,
             || None,
             || Some(" \t ".into()),
             || Some("legacy-key".into()),
@@ -468,7 +506,7 @@ mod tests {
                 .unwrap()
                 .contains("legacy-key")
         );
-        let (resolved, source) = config.resolve_with_sources(|| None, || None, || None);
+        let (resolved, source) = config.resolve_with_sources(None, || None, || None, || None);
         assert!(resolved.api_key.is_empty());
         assert_eq!(source, None);
     }
@@ -500,13 +538,13 @@ mod tests {
         std::fs::write(&path, original).unwrap();
         let mut config = VoiceSettings::default();
         let (resolved, source) =
-            config.resolve_with_sources(|| None, || None, || legacy_config_key(&dir));
+            config.resolve_with_sources(None, || None, || None, || legacy_config_key(&dir));
         assert_eq!(resolved.api_key, "legacy-key");
         assert_eq!(source, Some(VoiceKeySource::LegacyConfig));
         assert!(config.api_key.is_empty());
         config.api_key = "own-key".into();
         let (resolved, source) =
-            config.resolve_with_sources(|| None, || None, || legacy_config_key(&dir));
+            config.resolve_with_sources(None, || None, || None, || legacy_config_key(&dir));
         assert_eq!(resolved.api_key, "own-key");
         assert_eq!(source, Some(VoiceKeySource::Manual));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
