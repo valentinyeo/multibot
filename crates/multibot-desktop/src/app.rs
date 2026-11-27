@@ -73,6 +73,7 @@ actions!(
         NewWindow,
         OpenShortcuts,
         CloseOverlay,
+        VoiceDictation,
         NextSession,
         PrevSession,
         JumpSession1,
@@ -371,6 +372,10 @@ pub struct MultibotView {
     pub(crate) remote_search_hits: Vec<SearchHit>,
     pub(crate) remote_search_truncated: bool,
 
+    pub(crate) voice: crate::voice::VoiceState,
+    pub(crate) deepgram_key_input: Entity<InputState>,
+    pub(crate) deepgram_language_input: Entity<InputState>,
+
     // Inputs
     pub(crate) prompt_input: Entity<InputState>,
     pub(crate) host_input: Entity<InputState>,
@@ -480,6 +485,18 @@ impl MultibotView {
             cx.new(|cx| InputState::new(window, cx).placeholder("user@vps-host (or user@host:22)"));
         let palette_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions and commands..."));
+
+        let deepgram_key_input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx).placeholder("Deepgram API key");
+            input.set_value(settings.voice.api_key.clone(), window, cx);
+            input.set_masked(true, window, cx);
+            input
+        });
+        let deepgram_language_input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx).placeholder("en, de, en-US…");
+            input.set_value(settings.voice.language.clone(), window, cx);
+            input
+        });
 
         let root_focus_handle = cx.focus_handle();
         window.focus(&root_focus_handle, cx);
@@ -683,6 +700,9 @@ impl MultibotView {
             remote_search_request_id: None,
             remote_search_hits: Vec::new(),
             remote_search_truncated: false,
+            voice: crate::voice::VoiceState::default(),
+            deepgram_key_input,
+            deepgram_language_input,
             prompt_input,
             host_input,
             palette_input,
@@ -1159,6 +1179,7 @@ impl MultibotView {
         self.sidebar_state.workspace_menu_open = false;
         self.chat_state.composer_menu_open = false;
         if self.main_surface != next {
+            self.voice.cancel();
             self.sidebar_state.rename = None;
             self.sidebar_state.new_workspace_draft = None;
             // Hard Invariant #4: the Computer View pane docks beside the chat, which the
@@ -4043,6 +4064,7 @@ impl MultibotView {
     }
 
     fn clear_active_session_view(&mut self) {
+        self.voice.cancel();
         self.selected_session = None;
         self.selected_session_host = None;
         self.sidebar_state.rename = None;
@@ -4071,6 +4093,7 @@ impl MultibotView {
         session: SessionSummary,
         cx: &mut Context<Self>,
     ) {
+        self.voice.cancel();
         if self.selected_session_host.as_deref().is_some_and(|h| h != host) {
             self.pending_switch_tokens.clear();
             self.pending_older_page_before.clear();
@@ -5192,8 +5215,13 @@ impl Render for MultibotView {
                 this.focus_active_surface_default(window, cx);
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &VoiceDictation, window, cx| {
+                this.toggle_dictation(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &CloseOverlay, window, cx| {
-                if this.table_modal_state.is_open() {
+                if this.voice.phase != multibot_core::voice::DictationPhase::Off {
+                    this.voice.cancel();
+                } else if this.table_modal_state.is_open() {
                     // 1. Topmost overlay: expanded table modal
                     this.table_modal_state.close();
                     this.focus_active_surface_default(window, cx);
@@ -6507,6 +6535,62 @@ mod tests {
             assert!(window.try_find("update-primary-btn").is_some());
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn dictation_shortcut_and_mic_report_missing_key_without_changing_draft(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.settings.voice.api_key.clear();
+                v.prompt_input.update(cx, |input, cx| input.set_value("Unsent draft", window, cx));
+            });
+            window.press("ctrl-shift-space", cx);
+            assert!(view.read(cx).notice.as_deref().unwrap().contains("API key"));
+            assert_eq!(view.read(cx).voice.phase, multibot_core::voice::DictationPhase::Off);
+            view.update(cx, |v, _| v.notice = None);
+            window.render_frame(cx);
+            window.click("composer-voice", cx);
+            assert!(view.read(cx).notice.as_deref().unwrap().contains("API key"));
+            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "Unsent draft");
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn dictation_settings_save_language_and_key_and_escape_stops_listening(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.press("ctrl-,", cx);
+            window.render_frame(cx);
+            window.click("settings-tab-voice", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("deepgram-api-key").is_some());
+            assert!(window.try_find("deepgram-language").is_some());
+            view.update(cx, |v, cx| {
+                v.deepgram_key_input.update(cx, |input, cx| input.set_value("test-key", window, cx));
+                v.deepgram_language_input.update(cx, |input, cx| input.set_value("de", window, cx));
+            });
+            window.click("save-deepgram-settings", cx);
+            assert_eq!(view.read(cx).settings.voice.api_key, "test-key");
+            assert_eq!(view.read(cx).settings.voice.language, "de");
+            assert_eq!(cx.global::<SharedAppStore>().settings.voice.language, "de");
+            window.press("escape", cx);
+            view.update(cx, |v, cx| {
+                v.voice.phase.start();
+                v.prompt_input.update(cx, |input, cx| {
+                    input.set_value("Keep this draft", window, cx);
+                    input.focus(window, cx);
+                });
+            });
+            window.press("escape", cx);
+            assert_eq!(view.read(cx).voice.phase, multibot_core::voice::DictationPhase::Off);
+            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "Keep this draft");
+            view.update(cx, |v, _| {
+                v.voice.phase.start();
+                v.set_main_surface(MainSurface::Inbox);
+                assert_eq!(v.voice.phase, multibot_core::voice::DictationPhase::Off);
+            });
+        }).unwrap();
     }
 
     #[gpui_kit::test]

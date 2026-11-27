@@ -445,6 +445,16 @@ impl MultibotView {
                 tab_context: false,
                 global: true,
             },
+            PaletteCommandSpec {
+                id: "pal-cmd-dictation".into(),
+                label: "Chat View: Toggle Dictation".into(),
+                chord: "Ctrl+Shift+Space".into(),
+                category: PaletteCategory::LookAndSettings,
+                destructive: false,
+                aliases: vec!["voice".into(), "microphone".into(), "deepgram".into()],
+                tab_context: false,
+                global: true,
+            },
             // Terminal (Slice 5)
             PaletteCommandSpec {
                 id: "pal-cmd-toggle-terminal".into(),
@@ -779,6 +789,12 @@ impl MultibotView {
                         if let Some(win) = window {
                             self.focus_inbox(win, cx);
                         }
+                    }
+                    "pal-cmd-dictation" => {
+                        if let Some(win) = window {
+                            self.toggle_dictation(win, cx);
+                        }
+                        return;
                     }
                     "pal-cmd-toggle-terminal" => {
                         self.toggle_terminal_pane(cx);

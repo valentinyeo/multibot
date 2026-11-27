@@ -121,6 +121,7 @@ pub(crate) struct PaletteEntry {
 /// sibling window redraws (`cx.notify()`).
 pub(crate) fn settings_visible_eq(a: &MultibotSettings, b: &MultibotSettings) -> bool {
     let MultibotSettings {
+        voice: a_voice,
         gpu: a_gpu,
         ssh_hosts: a_hosts,
         selected_host: a_sel,
@@ -134,6 +135,7 @@ pub(crate) fn settings_visible_eq(a: &MultibotSettings, b: &MultibotSettings) ->
         auto_check_updates: a_auto,
     } = a;
     let MultibotSettings {
+        voice: b_voice,
         gpu: b_gpu,
         ssh_hosts: b_hosts,
         selected_host: b_sel,
@@ -146,7 +148,8 @@ pub(crate) fn settings_visible_eq(a: &MultibotSettings, b: &MultibotSettings) ->
         last_update_etag: _,
         auto_check_updates: b_auto,
     } = b;
-    a_gpu == b_gpu
+    a_voice == b_voice
+        && a_gpu == b_gpu
         && a_hosts == b_hosts
         && a_sel == b_sel
         && a_sb == b_sb

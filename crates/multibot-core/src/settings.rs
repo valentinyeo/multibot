@@ -106,6 +106,8 @@ impl SshHostConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MultibotSettings {
     #[serde(default)]
+    pub voice: crate::voice::VoiceSettings,
+    #[serde(default)]
     pub gpu: GpuPreference,
     #[serde(default)]
     pub ssh_hosts: Vec<SshHostConfig>,
@@ -132,6 +134,7 @@ pub struct MultibotSettings {
 impl Default for MultibotSettings {
     fn default() -> Self {
         Self {
+            voice: crate::voice::VoiceSettings::default(),
             gpu: GpuPreference::default(),
             ssh_hosts: Vec::new(),
             selected_host: None,
@@ -196,7 +199,9 @@ impl MultibotSettings {
     }
 
     pub fn load() -> Self {
-        Self::load_from(&Self::settings_path()).unwrap_or_default()
+        let mut settings = Self::load_from(&Self::settings_path()).unwrap_or_default();
+        settings.voice.import_legacy_readonly(&crate::zigshel_import::legacy_zigshel_dir());
+        settings
     }
 
     pub fn load_from(path: &Path) -> Result<Self> {

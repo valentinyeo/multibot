@@ -597,7 +597,7 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         gpui_key: "ctrl-shift-space",
         category: ShortcutCategory::Chat,
         description: "Start / stop voice dictation",
-        wired: false,
+        wired: true,
     },
     ShortcutSpec {
         id: "chat.dictation_inline",
@@ -1316,12 +1316,13 @@ mod tests {
             "chat.find",
             "chat.commands",
             "view.chat_terminal_toggle",
+            "chat.dictation",
         ];
         for &id in wired_slice34_ids {
             let spec = by_id(id).unwrap_or_else(|| panic!("missing shortcut {id}"));
             assert!(spec.wired, "expected {id} ({}) to be wired: true", spec.gpui_key);
         }
-        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 59);
+        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 60);
         assert!(!by_id("browser.close_tab").unwrap().wired);
         assert!(!by_id("chat.steer").unwrap().wired);
         assert!(by_gpui_key("ctrl-shift-j").is_none());

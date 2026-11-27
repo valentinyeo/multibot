@@ -24,6 +24,7 @@ use multibot_proto::SessionSummary;
 pub(crate) enum SettingsTab {
     #[default]
     General,
+    Voice,
     Hosts,
     Workspaces,
     Gpu,
@@ -32,8 +33,9 @@ pub(crate) enum SettingsTab {
 }
 
 impl SettingsTab {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::General,
+        Self::Voice,
         Self::Hosts,
         Self::Workspaces,
         Self::Gpu,
@@ -44,6 +46,7 @@ impl SettingsTab {
     fn id(self) -> &'static str {
         match self {
             Self::General => "settings-tab-general",
+            Self::Voice => "settings-tab-voice",
             Self::Hosts => "settings-tab-hosts",
             Self::Workspaces => "settings-tab-workspaces",
             Self::Gpu => "settings-tab-gpu",
@@ -55,6 +58,7 @@ impl SettingsTab {
     fn title(self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Voice => "Voice",
             Self::Hosts => "Hosts",
             Self::Workspaces => "Workspaces",
             Self::Gpu => "GPU & Performance",
@@ -66,6 +70,7 @@ impl SettingsTab {
     fn subtitle(self) -> &'static str {
         match self {
             Self::General => "Composer preferences and queued message delivery.",
+            Self::Voice => "Deepgram microphone dictation. Your legacy settings stay untouched.",
             Self::Hosts => "Connect locally or over SSH. Your legacy app stays untouched.",
             Self::Workspaces => "Organize sessions and switch your workspace.",
             Self::Gpu => "Keep rendering efficient. Auto never selects NVIDIA.",
@@ -277,6 +282,35 @@ impl MultibotView {
 
         let mut content = v_flex().gap_5().w_full();
         match self.settings_tab {
+            SettingsTab::Voice => {
+                content = content.child(v_flex().gap_3().p_4().rounded(RADIUS_BUBBLE)
+                    .bg(theme::bg_surface()).border_1().border_color(theme::border_subtle())
+                    .child(div().text_sm().child("Voice dictation · Deepgram"))
+                    .child(div().text_xs().text_color(theme::text_secondary())
+                        .child("Dictation sends audio to Deepgram. Ctrl+Shift+Space toggles the mic; Esc stops and cancels pending text."))
+                    .child(div().text_xs().child("API key (stored in Multibot settings)"))
+                    .child(Input::new(&self.deepgram_key_input).mask_toggle().id("deepgram-api-key"))
+                    .child(div().text_xs().child("Language code"))
+                    .child(Input::new(&self.deepgram_language_input).id("deepgram-language"))
+                    .child(Button::new("save-deepgram-settings").label("Save dictation settings")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let config = multibot_core::voice::VoiceSettings {
+                                api_key: this.deepgram_key_input.read(cx).value().trim().to_owned(),
+                                language: this.deepgram_language_input.read(cx).value().trim().to_owned(),
+                            };
+                            if !config.api_key.is_empty() {
+                                if let Err(err) = config.validate() {
+                                    this.notice = Some(err.to_string());
+                                    cx.notify();
+                                    return;
+                                }
+                            }
+                            this.voice.cancel();
+                            this.settings.voice = config;
+                            this.notice = Some("Dictation settings saved.".into());
+                            this.save_general_preferences(cx);
+                        }))));
+            }
             SettingsTab::General => {
                 content = content.child(v_flex().gap_3().p_4().rounded(RADIUS_BUBBLE)
                     .bg(theme::bg_surface()).border_1().border_color(theme::border_subtle())

@@ -16,6 +16,7 @@ mod table_modal;
 mod terminal_pane;
 mod theme;
 mod update_ui;
+mod voice;
 
 use app::{
     ArchiveSession, BrowseCommands, CloseOverlay, CopyLatestCodeBlock, DeleteSession, FindInChat,
@@ -27,7 +28,7 @@ use app::{
     NewSession, NewWindow, NextSession, NextWorkspace, OpenInbox, OpenPalette, OpenShortcuts,
     PrevSession, PrevWorkspace, ReconnectSession, RenameActiveSession, ReopenClosedSession,
     SnoozeWorkspace, ToggleFavorite, ToggleGroup, ToggleInbox, ToggleSettings, ToggleSidebar,
-    ToggleTerminal,
+    ToggleTerminal, VoiceDictation,
     ToggleUnreadOnly, UndoWaiting, WorkspaceViewAll, WorkspaceViewFavorites, WorkspaceViewFrequent,
 };
 use gpui_kit::{
@@ -85,6 +86,7 @@ pub fn bind_multibot_keys(cx: &mut App) {
         KeyBinding::new("ctrl-n", NewWindow, None),
         KeyBinding::new("f1", OpenShortcuts, None),
         KeyBinding::new("escape", CloseOverlay, None),
+        KeyBinding::new("ctrl-shift-space", VoiceDictation, None),
         KeyBinding::new("ctrl-tab", NextSession, None),
         KeyBinding::new("ctrl-shift-tab", PrevSession, None),
         KeyBinding::new("ctrl-1", JumpSession1, None),

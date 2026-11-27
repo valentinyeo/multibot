@@ -2375,6 +2375,18 @@ impl MultibotView {
     }
 
     pub(crate) fn send_current_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.voice.phase {
+            multibot_core::voice::DictationPhase::Listening => {
+                self.voice.submit_after_finish = true;
+                self.toggle_dictation(window, cx);
+                return;
+            }
+            multibot_core::voice::DictationPhase::Finishing => {
+                self.voice.submit_after_finish = true;
+                return;
+            }
+            multibot_core::voice::DictationPhase::Off => {}
+        }
         let raw = self.prompt_input.read(cx).value().to_string();
         let trimmed = raw.trim().to_string();
         if trimmed.is_empty() {
@@ -5126,11 +5138,17 @@ impl MultibotView {
                         )
                         .child(Button::new("composer-voice").small()
                             .icon(gpui_kit::component::Icon::default().data(theme::MIC_ICON))
-                            .accessibility_label("Voice dictation").tooltip("Voice dictation · coming in Slice 6")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.notice = Some("Voice dictation is planned for Slice 6. Type or paste your message for now.".into());
-                                cx.notify();
+                            .text_color(if self.voice.phase == multibot_core::voice::DictationPhase::Listening {
+                                gpui_kit::rgb(0xEF4444).into()
+                            } else { theme::text_secondary() })
+                            .accessibility_label("Voice dictation").tooltip("Start / stop dictation · Ctrl+Shift+Space · Esc cancels")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_dictation(window, cx);
                             })))
+                        .when(self.voice.phase != multibot_core::voice::DictationPhase::Off, |el| el.child(
+                            div().id("dictation-status").test_support().text_xs()
+                                .text_color(theme::accent_amber()).child(self.voice.phase.label())
+                        ))
                         .child(
                             Button::new("send-prompt")
                                 .small()
