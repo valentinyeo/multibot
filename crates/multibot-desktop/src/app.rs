@@ -9,6 +9,7 @@ use crate::state::{
     settings_visible_eq, update_footprint_if_changed,
 };
 use crate::table_modal::TableModalState;
+use crate::computer_view::ComputerViewState;
 use crate::terminal_pane::TerminalPaneState;
 use crate::theme::{self, RADIUS_CHIP};
 use crate::update_ui::{UpdateUiAction, UpdateUiState};
@@ -307,6 +308,11 @@ pub struct MultibotView {
     pub(crate) table_modal_state: TableModalState,
     /// Built-in native GPU terminal pane (`Alt+C`). Owns no PTY while closed.
     pub(crate) terminal: TerminalPaneState,
+    /// Lazy-loaded Computer View pane (MBRU-7). Owns no webview while closed.
+    pub(crate) computer: ComputerViewState,
+    /// Last Computer View URL this window connected to, offered again on reopen. A
+    /// remembered address never starts a browser on its own.
+    pub(crate) last_computer_url: Option<crate::computer_view::SafeUrl>,
 
     // Daemon & chat state
     pub(crate) connected_host: Option<String>,
@@ -625,6 +631,8 @@ impl MultibotView {
             slash_picker_state: SlashPickerState::default(),
             table_modal_state: TableModalState::default(),
             terminal: TerminalPaneState::default(),
+            computer: ComputerViewState::default(),
+            last_computer_url: None,
             connected_host,
             connection_status,
             daemon_tx,
@@ -1149,6 +1157,12 @@ impl MultibotView {
         if self.main_surface != next {
             self.sidebar_state.rename = None;
             self.sidebar_state.new_workspace_draft = None;
+            // Hard Invariant #4: the Computer View pane docks beside the chat, which the
+            // Inbox does not render, so its backend and its browser processes must go with
+            // the unmount.
+            if next == MainSurface::Inbox && self.computer.is_open() {
+                self.teardown_computer_view();
+            }
             // Hard Invariant #4: the Inbox surface does not render the terminal pane, so
             // its PTY, child process and reader thread must go with the unmount.
             if next == MainSurface::Inbox && self.terminal.is_open() {
@@ -5852,7 +5866,11 @@ impl Render for MultibotView {
                         MainSurface::Chat => self.render_chat_panel(cx).into_any_element(),
                         MainSurface::Inbox => self.render_inbox_panel(cx).into_any_element(),
                         MainSurface::Settings => self.render_chat_panel(cx).into_any_element(),
-                    }),
+                    })
+                    // Slice 5 — Computer View docks as a right-hand split beside the chat.
+                    // Mounted only while open, so a closed pane adds no layout node, no
+                    // webview and no browser process.
+                    .when_some(self.render_computer_view(cx), |el, pane| el.child(pane)),
             )
             .when(self.main_surface == MainSurface::Settings, |el| {
                 el.child(self.render_settings_panel(cx))
@@ -6951,6 +6969,242 @@ mod tests {
             });
             window.render_frame(cx);
             assert_eq!(view.read(cx).terminal.live_process_count(), 0);
+        })
+        .unwrap();
+    }
+
+    // =====================================================================
+    // Slice 5 — lazy Computer View pane (MBRU-7)
+    // =====================================================================
+
+    /// Ids the pane mounts while it is open, and which must be absent when it closes.
+    const COMPUTER_VIEW_IDS: [&str; 5] = [
+        "computer-pane",
+        "computer-header",
+        "computer-status",
+        "computer-url-input",
+        "computer-close",
+    ];
+
+    fn assert_computer_view_unmounted(window: &mut gpui_kit::Window) {
+        for id in COMPUTER_VIEW_IDS {
+            assert!(
+                window.try_find(id).is_none(),
+                "closed Computer View must not mount {id}"
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn computer_view_starts_closed_and_owns_no_backend(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            // Hard Invariant #4: a closed pane owns no backend, no webview and no layout.
+            let computer = &view.read(cx).computer;
+            assert!(!computer.is_open());
+            assert_eq!(computer.backend_handle_count(), 0);
+            assert!(computer.backend().is_none());
+            assert_computer_view_unmounted(window);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_k_offers_toggle_computer_view_and_opens_the_pane(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-k", cx);
+            window.render_frame(cx);
+
+            let catalog = view.read(cx).build_palette_command_catalog(now_unix_ms());
+            let entry = catalog
+                .iter()
+                .find(|c| c.id == "pal-cmd-toggle-computer-view")
+                .expect("Ctrl+K must offer 'Toggle Computer View'");
+            assert_eq!(entry.label, "Toggle Computer View");
+            // No new chord: the palette row is the entry point, by design.
+            assert!(entry.chord.is_empty());
+            assert!(entry.aliases.iter().any(|alias| alias == "vnc"));
+
+            view.update(cx, |v, cx| {
+                v.execute_palette_row(
+                    PaletteRow::Command {
+                        id: "pal-cmd-toggle-computer-view".into(),
+                        label: "Toggle Computer View".into(),
+                        chord: String::new(),
+                        category: PaletteCategory::LookAndSettings,
+                        destructive: false,
+                        match_rank: 0,
+                        frecency: 0,
+                    },
+                    now_unix_ms(),
+                    Some(window),
+                    cx,
+                );
+            });
+            window.render_frame(cx);
+
+            let computer = &view.read(cx).computer;
+            assert!(computer.is_open());
+            // The pane opens on the connect prompt, so it holds no backend yet.
+            assert_eq!(computer.backend_handle_count(), 0);
+            assert!(window.try_find("computer-pane").is_some());
+            assert!(window.try_find("computer-header").is_some());
+            assert!(window.try_find("computer-url-input").is_some());
+            assert!(window.try_find("computer-connect-prompt").is_some());
+            for control in ["computer-reload", "computer-external", "computer-close"] {
+                assert!(window.try_find(control).is_some(), "missing {control}");
+            }
+            assert_eq!(
+                window.find("computer-status").value(),
+                Some("Enter a URL to start")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn closing_computer_view_destroys_the_backend_and_restores_the_chat(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            view.update(cx, |v, cx| {
+                v.open_computer_view(window, cx);
+            });
+            window.render_frame(cx);
+            assert!(view.read(cx).computer.is_open());
+            // The pane takes real horizontal space, so the centred header pill sits left
+            // of where it sits without the pane.
+            let pill_x_open = window.find("header-title-pill").bounds().origin.x;
+
+            view.update(cx, |v, cx| {
+                v.computer.open().unwrap().url_input.update(cx, |state, cx| {
+                    state.set_value("http://localhost:6080", window, cx);
+                });
+                v.connect_computer_view_with_window(window, cx);
+            });
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).computer.backend_handle_count(), 1);
+            assert_eq!(
+                view.read(cx).computer.open().map(|open| open.status.clone()),
+                Some(crate::computer_view::ComputerStatus::Loaded)
+            );
+
+            window.click("computer-close", cx);
+            window.render_frame(cx);
+            assert!(!view.read(cx).computer.is_open());
+            assert_eq!(view.read(cx).computer.backend_handle_count(), 0);
+            assert_computer_view_unmounted(window);
+            // The chat column gets its full width back.
+            let pill_x_closed = window.find("header-title-pill").bounds().origin.x;
+            assert!(
+                pill_x_closed > pill_x_open,
+                "closing the pane must widen the chat (pill x {pill_x_closed:?} vs {pill_x_open:?})"
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn computer_view_rejects_a_dangerous_url_without_starting_a_backend(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            view.update(cx, |v, cx| {
+                v.open_computer_view(window, cx);
+            });
+            window.render_frame(cx);
+            for bad in [
+                "javascript:alert(1)",
+                "file:///c:/windows/system32/calc.exe",
+                "data:text/html,x",
+            ] {
+                view.update(cx, |v, cx| {
+                    v.computer.open().unwrap().url_input.update(cx, |state, cx| {
+                        state.set_value(bad, window, cx);
+                    });
+                    v.connect_computer_view_with_window(window, cx);
+                });
+                window.render_frame(cx);
+                let computer = &view.read(cx).computer;
+                assert_eq!(
+                    computer.backend_handle_count(),
+                    0,
+                    "{bad} must not start a backend"
+                );
+                assert!(matches!(
+                    computer.open().map(|open| open.status.clone()),
+                    Some(crate::computer_view::ComputerStatus::Failed(_))
+                ));
+            }
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn reopening_computer_view_offers_the_last_url_without_starting_a_backend(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            view.update(cx, |v, cx| {
+                v.open_computer_view(window, cx);
+                v.computer.open().unwrap().url_input.update(cx, |state, cx| {
+                    state.set_value("https://vnc.example.com:6080", window, cx);
+                });
+                v.connect_computer_view_with_window(window, cx);
+            });
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).computer.backend_handle_count(), 1);
+            view.update(cx, |v, cx| {
+                v.close_computer_view(cx);
+            });
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).computer.backend_handle_count(), 0);
+
+            // Reopening offers the same address but starts nothing: remembering an
+            // address is not permission to launch a browser.
+            view.update(cx, |v, cx| {
+                v.open_computer_view(window, cx);
+            });
+            window.render_frame(cx);
+            let computer = &view.read(cx).computer;
+            assert_eq!(computer.backend_handle_count(), 0);
+            assert_eq!(
+                computer
+                    .open()
+                    .map(|open| open.url_input.read(cx).value().to_string()),
+                Some("https://vnc.example.com:6080".to_string())
+            );
+            assert!(matches!(
+                computer.open().map(|open| open.status.clone()),
+                Some(crate::computer_view::ComputerStatus::NeedsUrl)
+            ));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn computer_view_closes_when_the_inbox_replaces_the_chat(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            view.update(cx, |v, cx| {
+                v.open_computer_view(window, cx);
+            });
+            window.render_frame(cx);
+            assert!(view.read(cx).computer.is_open());
+
+            window.press("alt-i", cx);
+            window.render_frame(cx);
+            // The Inbox does not render the chat column, so the pane and its backend go.
+            assert!(!view.read(cx).computer.is_open());
+            assert_eq!(view.read(cx).computer.backend_handle_count(), 0);
         })
         .unwrap();
     }
