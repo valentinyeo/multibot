@@ -43,6 +43,16 @@ multibot-core = { path = "crates/multibot-core" }
 [patch.crates-io]
 gpui-pre-windows = { path = "patches/gpui-pre-windows" }
 
+# Keep resident code, not just history buffers, within the daemon's debug RSS budget.
+[profile.dev.package.multibotd]
+opt-level = "s"
+
+[profile.dev.package.regex-automata]
+opt-level = "s"
+
+[profile.dev.package.regex-syntax]
+opt-level = "s"
+
 [profile.dev.package.sha2]
 opt-level = 3
 

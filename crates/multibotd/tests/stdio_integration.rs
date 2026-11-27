@@ -633,6 +633,7 @@ async fn multibotd_stdio_huge_base64_and_20mib_non_base64_stay_under_10mb_vmhwm(
     #[cfg(target_os = "linux")]
     {
         let vm_hwm_kib = read_proc_vm_hwm_kib(child_pid).expect("read /proc/<pid>/status VmHWM");
+        eprintln!("multibotd VmHWM after history/watch/search: {vm_hwm_kib} KiB");
         assert!(
             vm_hwm_kib < 10 * 1024,
             "multibotd VmHWM exceeded 10 MB budget: {vm_hwm_kib} KiB ({:.2} MiB)",
