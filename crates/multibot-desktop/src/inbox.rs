@@ -21,6 +21,8 @@ pub(crate) struct InboxState {
     pub selected_row: usize,
     pub filter_query: String,
     pub filter_focused: bool,
+    /// The Inbox search bar starts hidden and opens on `Ctrl+F` / `/`.
+    pub inbox_search_open: bool,
     pub last_g_press_ms: Option<i64>,
     pub step_order: Vec<String>,
     pub step_index: Option<usize>,
@@ -44,6 +46,31 @@ pub(crate) enum InboxKeyOutcome {
 }
 
 impl InboxState {
+    /// `true` when the Inbox search bar is open, focused, or holding a query.
+    pub(crate) fn is_search_visible(&self) -> bool {
+        self.inbox_search_open || self.filter_focused || !self.filter_query.is_empty()
+    }
+
+    /// Opens the Inbox search bar and focuses it (`Ctrl+F` / `/`).
+    pub(crate) fn open_search(&mut self) {
+        self.inbox_search_open = true;
+        self.filter_focused = true;
+        self.last_g_press_ms = None;
+    }
+
+    /// Hides the Inbox search bar, clears the query and restores the full Inbox list.
+    /// Returns `true` when the search bar was open or holding a query.
+    pub(crate) fn close_search(&mut self) -> bool {
+        let was_visible = self.is_search_visible();
+        self.inbox_search_open = false;
+        self.filter_focused = false;
+        if !self.filter_query.is_empty() {
+            self.filter_query.clear();
+            self.selected_row = 0;
+        }
+        was_visible
+    }
+
     /// Clamps `active_split` onto the visible (non-empty) split bar.
     ///
     /// A split that dropped to `0` sessions is hidden from the bar, so the Inbox would sit on
@@ -104,11 +131,8 @@ impl InboxState {
         if self.filter_focused {
             self.last_g_press_ms = None;
             if key_low == "escape" {
-                if !self.filter_query.is_empty() {
-                    self.filter_query.clear();
-                    self.selected_row = 0;
-                }
-                self.filter_focused = false;
+                // Esc closes the search bar and restores the full Inbox list; Inbox stays open
+                self.close_search();
                 return InboxKeyOutcome::Handled;
             }
             if key_low == "enter" {
@@ -174,11 +198,11 @@ impl InboxState {
             return InboxKeyOutcome::ToggleUnreadOnly;
         }
 
-        // Ctrl+F or `/` -> focus live filter
+        // Ctrl+F or `/` -> open and focus the search bar
         if (modifiers.control && !modifiers.shift && !modifiers.alt && key_low == "f")
             || (no_mods && (key == "/" || key_char == Some("/")))
         {
-            self.filter_focused = true;
+            self.open_search();
             return InboxKeyOutcome::Handled;
         }
 
@@ -300,6 +324,12 @@ impl InboxState {
                 self.step_index = Some(idx);
                 return InboxKeyOutcome::OpenSession(visible_session_keys[idx].clone());
             }
+            return InboxKeyOutcome::Handled;
+        }
+
+        // `Esc` closes the search bar first when it is open; then it closes Inbox
+        if no_mods && key_low == "escape" && self.is_search_visible() {
+            self.close_search();
             return InboxKeyOutcome::Handled;
         }
 
@@ -663,61 +693,62 @@ impl MultibotView {
             );
         }
 
-        // 2. Filter Bar (workspace splits + search stay; provider pills and Unread Only are gone)
-        let mut filter_bar = h_flex()
-            .flex_wrap()
-            .gap_2()
-            .items_center()
-            .justify_between();
-        filter_bar = filter_bar.child(
-            div()
-                .id("inbox-filter-input")
-                .role(Role::Button)
-                .test_support()
-                .flex_1()
-                .min_w(px(180.0))
-                .px_3()
-                .py_1p5()
-                .rounded(RADIUS_CHIP)
-                .bg(theme::bg_surface())
-                .border_1()
-                .border_color(if self.inbox_state.filter_focused {
-                    theme::accent_blue()
-                } else {
-                    theme::border_subtle()
-                })
-                .text_xs()
-                .text_color(if self.inbox_state.filter_query.is_empty() {
-                    theme::text_muted()
-                } else {
-                    theme::text_primary()
-                })
-                .cursor_pointer()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| {
-                        this.inbox_state.filter_focused = !this.inbox_state.filter_focused;
-                        this.inbox_state.rename = None;
-                        this.sidebar_state.rename = None;
-                        this.sidebar_state.new_workspace_draft = None;
-                        this.focus_inbox(window, cx);
-                        cx.notify();
-                    }),
-                )
-                .child(if self.inbox_state.filter_query.is_empty() {
-                    if self.inbox_state.filter_focused {
-                        "/ |".to_string()
-                    } else {
-                        "Filter with / or Ctrl+F...".to_string()
-                    }
-                } else if self.inbox_state.filter_focused {
-                    format!("/ {}|", self.inbox_state.filter_query)
-                } else {
-                    format!("/ {}", self.inbox_state.filter_query)
-                }),
-        );
-
+        // 2. Filter Bar (workspace splits stay; the search bar only mounts on demand)
         let unread_only = self.sidebar_state.unread_only;
+        let filter_bar = self.inbox_state.is_search_visible().then(|| {
+            h_flex()
+                .flex_wrap()
+                .gap_2()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .id("inbox-filter-input")
+                        .role(Role::Button)
+                        .test_support()
+                        .flex_1()
+                        .min_w(px(180.0))
+                        .px_3()
+                        .py_1p5()
+                        .rounded(RADIUS_CHIP)
+                        .bg(theme::bg_surface())
+                        .border_1()
+                        .border_color(if self.inbox_state.filter_focused {
+                            theme::accent_blue()
+                        } else {
+                            theme::border_subtle()
+                        })
+                        .text_xs()
+                        .text_color(if self.inbox_state.filter_query.is_empty() {
+                            theme::text_muted()
+                        } else {
+                            theme::text_primary()
+                        })
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.inbox_state.open_search();
+                                this.inbox_state.rename = None;
+                                this.sidebar_state.rename = None;
+                                this.sidebar_state.new_workspace_draft = None;
+                                this.focus_inbox(window, cx);
+                                cx.notify();
+                            }),
+                        )
+                        .child(if self.inbox_state.filter_query.is_empty() {
+                            if self.inbox_state.filter_focused {
+                                "/ |".to_string()
+                            } else {
+                                "Filter with / or Ctrl+F...".to_string()
+                            }
+                        } else if self.inbox_state.filter_focused {
+                            format!("/ {}|", self.inbox_state.filter_query)
+                        } else {
+                            format!("/ {}", self.inbox_state.filter_query)
+                        }),
+                )
+        });
 
         // 3. Session Rows
         let mut rows_el = v_flex().gap_1p5();
@@ -955,14 +986,10 @@ impl MultibotView {
                     if this.inbox_state.rename.is_some() {
                         this.inbox_state.rename = None;
                     }
-                    if this.inbox_state.filter_focused || !this.inbox_state.filter_query.is_empty()
-                    {
-                        this.inbox_state.filter_query.clear();
-                        this.inbox_state.filter_focused = false;
-                        this.inbox_state.selected_row = 0;
-                        cx.notify();
-                    } else {
+                    if !this.inbox_state.close_search() {
                         cx.propagate();
+                    } else {
+                        cx.notify();
                     }
                 }
             }))
@@ -982,7 +1009,7 @@ impl MultibotView {
                             .p_5()
                             .gap_3()
                             .child(split_row)
-                            .child(filter_bar)
+                            .when_some(filter_bar, |el, bar| el.child(bar))
                             .child(rows_el),
                     ),
             )
@@ -1147,9 +1174,11 @@ mod tests {
             InboxKeyOutcome::StartRename("local:codex:s2".into())
         );
 
-        // `/` focuses filter, typing appends, Esc clears/blurs first, second Esc closes Inbox
+        // `/` opens and focuses the search bar, typing appends, Esc closes/clears, second Esc closes Inbox
+        assert!(!st.inbox_search_open, "Inbox search starts hidden");
         st.handle_key("/", Some("/"), none, 1000, &splits, &keys);
         assert!(st.filter_focused);
+        assert!(st.inbox_search_open);
         st.handle_key("a", Some("a"), none, 1000, &splits, &keys);
         assert_eq!(st.filter_query, "a");
         assert_eq!(
@@ -1157,11 +1186,62 @@ mod tests {
             InboxKeyOutcome::Handled
         );
         assert!(!st.filter_focused);
+        assert!(!st.inbox_search_open);
         assert!(st.filter_query.is_empty());
         assert_eq!(
             st.handle_key("escape", None, none, 1000, &splits, &keys),
             InboxKeyOutcome::CloseInbox
         );
+    }
+
+    #[test]
+    fn inbox_ctrl_f_opens_search_and_esc_closes_even_with_empty_query() {
+        let mut st = InboxState::default();
+        let splits = sample_splits();
+        let keys = sample_keys();
+        let none = Modifiers::default();
+
+        assert!(!st.inbox_search_open);
+
+        // Ctrl+F opens and focuses the search bar
+        assert_eq!(
+            st.handle_key(
+                "f",
+                Some("f"),
+                Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+                1000,
+                &splits,
+                &keys
+            ),
+            InboxKeyOutcome::Handled
+        );
+        assert!(st.inbox_search_open);
+        assert!(st.filter_focused);
+
+        // Esc with an EMPTY query still closes the bar and keeps Inbox open
+        assert_eq!(
+            st.handle_key("escape", None, none, 1000, &splits, &keys),
+            InboxKeyOutcome::Handled
+        );
+        assert!(!st.inbox_search_open);
+        assert!(!st.filter_focused);
+        assert!(st.filter_query.is_empty());
+
+        // Esc again closes Inbox
+        assert_eq!(
+            st.handle_key("escape", None, none, 1000, &splits, &keys),
+            InboxKeyOutcome::CloseInbox
+        );
+
+        // A query typed then blurred (state left from a filter) still counts as visible
+        st.filter_query = "multi".into();
+        assert!(st.is_search_visible());
+        assert!(st.close_search());
+        assert!(st.filter_query.is_empty());
+        assert!(!st.is_search_visible());
     }
 
     #[gpui_kit::test]
@@ -1221,7 +1301,7 @@ mod tests {
             });
             window.render_frame(cx);
 
-            // Minimal Inbox: workspace splits and the search bar stay, nothing else
+            // Minimal Inbox: workspace splits stay, nothing else; the search bar is on demand
             window.click("inbox-split-frequent", cx);
             window.render_frame(cx);
             window.click("inbox-split-favorites", cx);
@@ -1229,8 +1309,14 @@ mod tests {
             window.click("inbox-tab-all", cx);
             window.render_frame(cx);
             assert!(
+                window.try_find("inbox-filter-input").is_none(),
+                "Inbox must start with the search bar hidden"
+            );
+            window.press("ctrl-f", cx);
+            window.render_frame(cx);
+            assert!(
                 window.try_find("inbox-filter-input").is_some(),
-                "Inbox must keep the search bar"
+                "Ctrl+F must mount the Inbox search bar"
             );
             for removed in [
                 "inbox-tab-claude",
@@ -1310,6 +1396,45 @@ mod tests {
             assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
             assert_eq!(view.read(cx).inbox_state.active_split, InboxSplit::All);
             assert_eq!(view.read(cx).inbox_state.selected_row, 0);
+
+            // The search bar starts hidden; Ctrl+F opens and focuses it
+            assert!(!view.read(cx).inbox_state.inbox_search_open);
+            assert!(
+                window.try_find("inbox-filter-input").is_none(),
+                "Inbox must open with the search bar hidden"
+            );
+            window.press("ctrl-f", cx);
+            window.render_frame(cx);
+            assert!(view.read(cx).inbox_state.inbox_search_open);
+            assert!(view.read(cx).inbox_state.filter_focused);
+            assert!(
+                window.try_find("inbox-filter-input").is_some(),
+                "Ctrl+F must mount the Inbox search bar"
+            );
+
+            // Multi-word query "two k" matches "Keyboard Two" via token matching, not "Keyboard One"
+            for ch in ["t", "w", "o"] {
+                window.press(ch, cx);
+            }
+            window.press("space", cx);
+            window.press("k", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).inbox_state.filter_query, "two k");
+            let rows = view.read(cx).compute_inbox_rows(now_unix_ms());
+            assert_eq!(
+                rows.iter().map(|r| r.session_id.as_str()).collect::<Vec<_>>(),
+                vec!["kb-2"],
+                "multi-word query must match `Keyboard Two` only"
+            );
+
+            // 1st Esc clears the query and hides the bar but keeps Inbox open
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
+            assert!(!view.read(cx).inbox_state.inbox_search_open);
+            assert!(!view.read(cx).inbox_state.filter_focused);
+            assert!(view.read(cx).inbox_state.filter_query.is_empty());
+            assert!(window.try_find("inbox-filter-input").is_none());
 
             // J / K move the selection and clamp at both ends
             window.press("j", cx);

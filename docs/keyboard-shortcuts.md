@@ -159,17 +159,19 @@ The Inbox is keyboard-first and minimal. While it is open, the sidebar and the f
 
 The split bar shows only splits that hold at least one session, so no wall of `Frequent 0`, `★ Favorites 0` or `0`-count workspace pills. ALL always stays visible, even with no sessions at all. Tab, Shift+Tab, h and l cycle only across the visible splits. A split that empties out drops from the bar and the Inbox falls back to ALL. Empty workspaces still appear in the sidebar workspace switcher and in Settings -> Workspaces.
 
+The search bar stays hidden so the Inbox opens clean. Ctrl+F or / opens and focuses it; Esc closes it, clears the query and restores the full list while the Inbox stays open, and a second Esc closes the Inbox. Closing the Inbox or opening a session resets the search bar for the next visit. Search splits the query into words, and a row matches only when every word appears somewhere in its title, path, last message, workspace, host, agent or session id.
+
 | Keys | Action |
 | --- | --- |
 | Sidebar inbox button | Click to open; Ctrl+Shift+I toggles; Alt+I opens / selects All |
-| Ctrl+F or / | Reduce Inbox to matching sessions |
+| Ctrl+F or / | Open the Inbox search bar; every word must match (so `multi rust` finds `Multi Bot Rust`) |
 | j/k or Alt+J/K  gg/G or Alt+G Alt+G / Alt+Shift+G  1-9 | Move / top / bottom / jump row |
 | Tab / Shift+Tab / h / l | Switch workspace split (visible non-empty splits only) |
 | e or Alt+E / z or Alt+Z / u | Archive / undo archive / toggle read-unread |
 | Ctrl+K -&gt; Copy chat ID | Copy the chosen chat identity |
 | Ctrl+Shift+U | Toggle unread-only filter (global) |
 | Alt+I (inside) | Jump back to ALL split |
-| q / Esc | Close Inbox |
+| q / Esc | Esc closes the search bar first (clearing the query and keeping Inbox open), then closes Inbox |
 
 ### View
 

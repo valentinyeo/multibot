@@ -1120,6 +1120,8 @@ impl MultibotView {
     pub(crate) fn cleanup_unmounted_surface_state(&mut self) {
         if self.main_surface != MainSurface::Inbox {
             self.inbox_state.filter_focused = false;
+            self.inbox_state.inbox_search_open = false;
+            self.inbox_state.filter_query.clear();
         }
         if !self.is_inbox_rename_mounted() {
             self.inbox_state.rename = None;
@@ -1140,6 +1142,10 @@ impl MultibotView {
         if self.main_surface != next {
             self.sidebar_state.rename = None;
             self.sidebar_state.new_workspace_draft = None;
+        }
+        if next == MainSurface::Inbox && self.main_surface != MainSurface::Inbox {
+            // Every fresh Inbox open starts clean: search bar hidden, no query.
+            self.inbox_state.close_search();
         }
         if next == MainSurface::Inbox {
             // Never open the Inbox on a split that is hidden because it holds 0 sessions
@@ -5172,13 +5178,10 @@ impl Render for MultibotView {
                     // 10. Inline Inbox rename (Inbox surface only)
                     this.inbox_state.rename = None;
                 } else if this.main_surface == MainSurface::Inbox
-                    && (this.inbox_state.filter_focused
-                        || !this.inbox_state.filter_query.is_empty())
+                    && this.inbox_state.is_search_visible()
                 {
-                    // 11. Inbox filter bar
-                    this.inbox_state.filter_query.clear();
-                    this.inbox_state.filter_focused = false;
-                    this.inbox_state.selected_row = 0;
+                    // 11. Inbox search bar: close + clear + keep Inbox open
+                    this.inbox_state.close_search();
                 } else if this.main_surface != MainSurface::Chat {
                     // 12. Return from Inbox / Settings surface to Chat
                     this.set_main_surface(MainSurface::Chat);
@@ -5731,7 +5734,7 @@ impl Render for MultibotView {
                     this.inbox_state.rename = None;
                     this.sidebar_state.rename = None;
                     this.sidebar_state.new_workspace_draft = None;
-                    this.inbox_state.filter_focused = true;
+                    this.inbox_state.open_search();
                     this.focus_inbox(window, cx);
                     cx.notify();
                 } else if this.main_surface == MainSurface::Chat {
