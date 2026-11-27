@@ -1,0 +1,3 @@
+{"type":"multiprompt_history","row":{"role":"user","id":"agy-u1","timestamp":"2026-11-26T10:05:00Z","text":"Build release zip for Windows"}}
+{"type":"multiprompt_history","row":{"role":"tool","id":"agy-tool-1","timestamp":"2026-11-26T10:05:02Z","text":"Ran cargo build --release","status":"ok","detail":"Finished release target(s) in 4.2s"}}
+{"type":"multiprompt_history","row":{"role":"assistant","id":"agy-a1","timestamp":"2026-11-26T10:05:05Z","text":"Release zip multibot-windows-x64.zip built and checksummed."}}

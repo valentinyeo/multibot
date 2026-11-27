@@ -14,14 +14,15 @@ multibot-core.workspace = true
 multibot-gpu.workspace = true
 multibot-keys.workspace = true
 multibot-proto.workspace = true
+multibot-updater.workspace = true
 sysinfo.workspace = true
 tokio.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-gpui-kit = { version = "0.11.0", default-features = false, features = ["component"] }
+gpui-kit = { version = "0.11.0", default-features = false, features = ["component", "syntect"] }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
-gpui-kit = { version = "0.11.0", default-features = false, features = ["component", "x11"] }
+gpui-kit = { version = "0.11.0", default-features = false, features = ["component", "syntect", "x11"] }
 
 [dev-dependencies]
-gpui-kit = { version = "0.11.0", default-features = false, features = ["component", "test-support"] }
+gpui-kit = { version = "0.11.0", default-features = false, features = ["component", "syntect", "test-support"] }

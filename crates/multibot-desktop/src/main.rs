@@ -4,18 +4,37 @@
 )]
 
 mod app;
+mod chat_view;
+mod inbox;
+mod palette;
+mod settings;
+mod sidebar;
+mod slash_picker;
+mod state;
+mod table_modal;
 mod theme;
+mod update_ui;
 
 use app::{
-    CloseOverlay, JumpSession1, JumpSession2, JumpSession3, JumpSession4, JumpSession5,
-    JumpSession6, JumpSession7, JumpSession8, JumpSession9, MultibotView, NewWindow, NextSession,
-    OpenInbox, OpenPalette, OpenShortcuts, PrevSession, ToggleInbox, ToggleSettings, ToggleSidebar,
+    ArchiveSession, BrowseCommands, CloseOverlay, CopyLatestCodeBlock, DeleteSession, FindInChat,
+    FontZoomIn, FontZoomOut, FontZoomReset, InboxNext, InboxNextSplit, InboxPrev, InboxPrevSplit,
+    JumpSession1, JumpSession2, JumpSession3, JumpSession4, JumpSession5, JumpSession6,
+    JumpSession7, JumpSession8, JumpSession9, JumpWorkspace1, JumpWorkspace2, JumpWorkspace3,
+    JumpWorkspace4, JumpWorkspace5, JumpWorkspace6, JumpWorkspace7, JumpWorkspace8, JumpWorkspace9,
+    MarkSessionUnread, MoveSessionDown, MoveSessionUp, MoveSessionWaiting, MultibotView,
+    NewSession, NewWindow, NextSession, NextWorkspace, OpenInbox, OpenPalette, OpenShortcuts,
+    PrevSession, PrevWorkspace, ReconnectSession, RenameActiveSession, ReopenClosedSession,
+    SnoozeWorkspace, ToggleFavorite, ToggleGroup, ToggleInbox, ToggleSettings, ToggleSidebar,
+    ToggleUnreadOnly, UndoWaiting, WorkspaceViewAll, WorkspaceViewFavorites, WorkspaceViewFrequent,
 };
 use gpui_kit::{
     App, AppContext, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px, size,
 };
 use multibot_core::MultibotSettings;
 use multibot_gpu::{ENV_GPU_LUID, ENV_GPU_MODE, ENV_GPU_REPORT_PATH, GpuPreference};
+use multibot_updater::{
+    UPDATE_READY_ARG, cleanup_old_update_artifacts, filter_preserved_cli_args, signal_update_ready,
+};
 
 fn parse_cli_gpu_override() -> Option<GpuPreference> {
     let mut args = std::env::args().skip(1);
@@ -51,6 +70,7 @@ fn configure_gpu_env_before_gpui(settings: &MultibotSettings) {
 
 pub fn bind_multibot_keys(cx: &mut App) {
     cx.bind_keys([
+        // Slice 1 (20 bindings)
         KeyBinding::new("ctrl-k", OpenPalette, None),
         KeyBinding::new("ctrl-shift-k", OpenPalette, None),
         KeyBinding::new("alt-i", OpenInbox, None),
@@ -71,10 +91,79 @@ pub fn bind_multibot_keys(cx: &mut App) {
         KeyBinding::new("ctrl-7", JumpSession7, None),
         KeyBinding::new("ctrl-8", JumpSession8, None),
         KeyBinding::new("ctrl-9", JumpSession9, None),
+        // Slice 3 — Session lifecycle & sidebar structure (9 bindings)
+        KeyBinding::new("ctrl-t", NewSession, None),
+        KeyBinding::new("alt-t", NewSession, None),
+        KeyBinding::new("ctrl-shift-w", DeleteSession, None),
+        KeyBinding::new("ctrl-shift-e", ArchiveSession, None),
+        KeyBinding::new("ctrl-shift-t", ReopenClosedSession, None),
+        KeyBinding::new("ctrl-shift-r", ReconnectSession, None),
+        KeyBinding::new("ctrl-shift-up", MoveSessionUp, None),
+        KeyBinding::new("ctrl-shift-down", MoveSessionDown, None),
+        KeyBinding::new("ctrl-g", ToggleGroup, None),
+        // Slice 3 — Inbox & session triage (6 bindings)
+        KeyBinding::new("alt-j", InboxNext, None),
+        KeyBinding::new("alt-k", InboxPrev, None),
+        KeyBinding::new("ctrl-shift-u", ToggleUnreadOnly, None),
+        KeyBinding::new("alt-u", MarkSessionUnread, None),
+        KeyBinding::new("alt-e", MoveSessionWaiting, None),
+        KeyBinding::new("alt-z", UndoWaiting, None),
+        // Slice 3 — Workspaces & views (16 bindings)
+        KeyBinding::new("alt-s", ToggleFavorite, None),
+        KeyBinding::new("ctrl-shift-y", SnoozeWorkspace, None),
+        KeyBinding::new("alt-1", JumpWorkspace1, None),
+        KeyBinding::new("alt-2", JumpWorkspace2, None),
+        KeyBinding::new("alt-3", JumpWorkspace3, None),
+        KeyBinding::new("alt-4", JumpWorkspace4, None),
+        KeyBinding::new("alt-5", JumpWorkspace5, None),
+        KeyBinding::new("alt-6", JumpWorkspace6, None),
+        KeyBinding::new("alt-7", JumpWorkspace7, None),
+        KeyBinding::new("alt-8", JumpWorkspace8, None),
+        KeyBinding::new("alt-9", JumpWorkspace9, None),
+        KeyBinding::new("alt-left", PrevWorkspace, None),
+        KeyBinding::new("alt-right", NextWorkspace, None),
+        KeyBinding::new("alt-shift-1", WorkspaceViewAll, None),
+        KeyBinding::new("alt-shift-2", WorkspaceViewFrequent, None),
+        KeyBinding::new("alt-shift-3", WorkspaceViewFavorites, None),
+        // Slice 3 — System inline rename (1 binding)
+        KeyBinding::new("f2", RenameActiveSession, None),
+        // Slice 4 — Rich Chat View & font zoom (7 bindings)
+        KeyBinding::new("ctrl-shift-d", CopyLatestCodeBlock, None),
+        KeyBinding::new("ctrl-f", FindInChat, None),
+        KeyBinding::new("ctrl-/", BrowseCommands, None),
+        KeyBinding::new("ctrl-=", FontZoomIn, None),
+        KeyBinding::new("ctrl-+", FontZoomIn, None),
+        KeyBinding::new("ctrl--", FontZoomOut, None),
+        KeyBinding::new("ctrl-0", FontZoomReset, None),
+        // Inbox split cycling (scoped to "Inbox" context to override gpui_base::Root Tab/TabPrev)
+        KeyBinding::new("tab", InboxNextSplit, Some("Inbox")),
+        KeyBinding::new("shift-tab", InboxPrevSplit, Some("Inbox")),
     ]);
 }
 
 fn main() {
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    if raw_args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("multibot {}", multibot_proto::build_version());
+        return;
+    }
+
+    let is_update_ready_launch = raw_args
+        .iter()
+        .any(|a| a == UPDATE_READY_ARG || a.starts_with("--update-ready="));
+    let preserved_cli_args = filter_preserved_cli_args(&raw_args);
+
+    // Normal startup: silently remove stale `.old`/`.previous`/`.failed`/`.tmp` binaries
+    // and leftover `staging-*` directories while preserving `rejected.txt`.
+    // On `--update-ready` launches, defer cleanup until AFTER window creation + readiness signal
+    // so the previous updating process can observe `.multibot-update-ready` and exit first.
+    if !is_update_ready_launch
+        && let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+    {
+        let _ = cleanup_old_update_artifacts(exe_dir, &MultibotSettings::updates_dir());
+    }
+
     let settings = MultibotSettings::load();
     configure_gpu_env_before_gpui(&settings);
 
@@ -90,6 +179,7 @@ fn main() {
         gpui_kit::init(cx);
         theme::apply_multibot_dark_theme(cx);
         bind_multibot_keys(cx);
+        state::SharedAppStore::init_persisted_with_args(cx, settings.clone(), preserved_cli_args);
 
         let bounds = Bounds::centered(None, size(px(1260.0), px(800.0)), cx);
         let options = WindowOptions {
@@ -102,9 +192,33 @@ fn main() {
         };
 
         let rt = runtime.clone();
-        gpui_kit::open_window(options, cx, move |window, cx| {
+        let (_handle, view) = gpui_kit::open_window(options, cx, move |window, cx| {
             cx.new(|cx| MultibotView::new(rt, window, cx))
         })
         .expect("failed to open Multibot window");
+
+        view.update(cx, |v, cx| {
+            v.load_persisted_workspace_state(cx);
+            v.sync_workspace_to_shared(cx);
+            v.enable_disk_persistence();
+            v.start_update_runtime(cx);
+        });
+
+        // Signal update readiness ONLY AFTER GPUI/DXGI window creation succeeded!
+        if is_update_ready_launch
+            && let Ok(exe) = std::env::current_exe()
+        {
+            let _ = signal_update_ready(&exe);
+            if let Some(exe_dir) = exe.parent().map(std::path::Path::to_path_buf) {
+                let updates_dir = MultibotSettings::updates_dir();
+                runtime.spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = cleanup_old_update_artifacts(&exe_dir, &updates_dir);
+                    })
+                    .await;
+                });
+            }
+        }
     });
 }

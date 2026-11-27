@@ -1,47 +1,108 @@
+mod commands;
+mod process;
 mod providers;
+mod search;
+mod watcher;
 
 use anyhow::Result;
-use multibot_proto::{
-    AgentKind, ClientRequest, PROTOCOL_VERSION, ServerEvent, decode_line, encode_line,
+use multibot_proto::{ClientRequest, PROTOCOL_VERSION, ServerEvent, build_version, decode_line};
+use process::ProcessManager;
+use providers::{
+    ArchiveStore, DiscoveryContext, MetadataStore, discover_all_sessions_with_ctx, now_ms,
+    read_history_page,
 };
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
-use providers::{discover_all_sessions, read_messages_from_file};
+use search::{SearchError, search_history};
+use sha2::{Digest, Sha256};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
-use std::process::Stdio;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use std::sync::Arc;
 use tokio::sync::mpsc;
+use watcher::{DiskJob, WatchManager};
 
-struct ActiveWatch {
-    _watcher: RecommendedWatcher,
-    stop_tx: mpsc::Sender<()>,
+fn main() -> Result<()> {
+    if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
+        println!("multibotd {}", build_version());
+        return Ok(());
+    }
+
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let stdout_handle = std::thread::Builder::new()
+        .name("stdout-writer".into())
+        .spawn(move || {
+            let stdout = std::io::stdout();
+            let mut writer = BufWriter::with_capacity(16 * 1024, stdout.lock());
+            while let Some(ev) = out_rx.blocking_recv() {
+                if serde_json::to_writer(&mut writer, &ev).is_err() {
+                    break;
+                }
+                if writer.write_all(b"\n").is_err() {
+                    break;
+                }
+                if writer.flush().is_err() {
+                    break;
+                }
+            }
+        })?;
+
+    let (disk_tx, disk_rx) = std::sync::mpsc::channel::<DiskJob>();
+    let disk_handle = std::thread::Builder::new()
+        .name("disk-worker".into())
+        .spawn(move || {
+            while let Ok(job) = disk_rx.recv() {
+                job();
+            }
+        })?;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let res = rt.block_on(async_main(out_tx, disk_tx));
+    // Dropping `rt` cancels any detached background tasks so every clone of `disk_tx` and
+    // `out_tx` is released; both worker threads then drain all pending responses and exit cleanly.
+    drop(rt);
+    let _ = disk_handle.join();
+    let _ = stdout_handle.join();
+    res
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+async fn async_main(
+    out_tx: mpsc::UnboundedSender<ServerEvent>,
+    disk_tx: std::sync::mpsc::Sender<DiskJob>,
+) -> Result<()> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let binary_hash = compute_binary_hash();
+    let hostname = read_hostname();
 
-    let writer_task = tokio::spawn(async move {
-        let mut stdout = tokio::io::stdout();
-        while let Some(ev) = out_rx.recv().await {
-            let Ok(line) = encode_line(&ev) else {
-                continue;
-            };
-            if stdout.write_all(line.as_bytes()).await.is_err() {
-                break;
+    let (in_tx, mut in_rx) = mpsc::unbounded_channel::<String>();
+    let stdin_handle = std::thread::Builder::new()
+        .name("stdin-reader".into())
+        .spawn(move || {
+            let stdin = std::io::stdin();
+            let mut reader = BufReader::with_capacity(8 * 1024, stdin.lock());
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if in_tx.send(std::mem::take(&mut line)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
             }
-            if stdout.flush().await.is_err() {
-                break;
-            }
-        }
-    });
+        })?;
 
-    let mut active_watch: Option<ActiveWatch> = None;
-    let mut stdin_lines = BufReader::new(tokio::io::stdin()).lines();
+    let process_mgr = ProcessManager::new(home.clone(), out_tx.clone());
+    let mut watch_mgr = WatchManager::with_disk_worker(
+        home.clone(),
+        out_tx.clone(),
+        Arc::clone(&process_mgr),
+        disk_tx.clone(),
+    );
 
-    while let Ok(Some(line)) = stdin_lines.next_line().await {
+    while let Some(line) = in_rx.recv().await {
         if line.trim().is_empty() {
             continue;
         }
@@ -60,9 +121,10 @@ async fn main() -> Result<()> {
             ClientRequest::Hello { .. } => {
                 let _ = out_tx.send(ServerEvent::HelloAck {
                     protocol_version: PROTOCOL_VERSION,
-                    daemon_version: env!("CARGO_PKG_VERSION").to_string(),
-                    hostname: read_hostname(),
+                    daemon_version: build_version().to_string(),
+                    hostname: hostname.clone(),
                     pid: std::process::id(),
+                    binary_hash: binary_hash.clone(),
                 });
             }
             ClientRequest::Ping { nonce } => {
@@ -72,82 +134,95 @@ async fn main() -> Result<()> {
                 });
             }
             ClientRequest::ListSessions { limit } => {
-                let sessions = discover_all_sessions(&home, limit.unwrap_or(50));
-                let _ = out_tx.send(ServerEvent::Sessions { sessions });
+                let home_c = home.clone();
+                let active_ids = process_mgr.active_session_ids();
+                let tx = out_tx.clone();
+                let lim = limit.unwrap_or(50);
+                let _ = disk_tx.send(Box::new(move || {
+                    let metadata = MetadataStore::load(&home_c);
+                    let archive = ArchiveStore::load(&home_c);
+                    let ctx = DiscoveryContext {
+                        active_session_ids: &active_ids,
+                        metadata: &metadata,
+                        archive: &archive,
+                    };
+                    let sessions = discover_all_sessions_with_ctx(&home_c, lim, &ctx);
+                    let _ = tx.send(ServerEvent::Sessions { sessions });
+                }));
             }
             ClientRequest::ReadHistory {
                 session_id,
                 source_path,
                 agent,
                 tail,
-            } => match read_messages_from_file(agent, PathBuf::from(&source_path).as_path(), 0, tail)
-            {
-                Ok((messages, _)) => {
-                    let _ = out_tx.send(ServerEvent::History {
-                        session_id,
-                        messages,
-                    });
-                }
-                Err(err) => {
-                    let _ = out_tx.send(ServerEvent::Error {
-                        code: "read_history_failed".into(),
-                        message: format!("Failed to read {source_path}: {err}"),
-                    });
-                }
-            },
+                before_offset,
+                max_bytes,
+                known_probe,
+            } => {
+                let tx = out_tx.clone();
+                let _ = disk_tx.send(Box::new(move || {
+                    let path = PathBuf::from(&source_path);
+                    match read_history_page(
+                        agent,
+                        &path,
+                        before_offset,
+                        max_bytes,
+                        tail,
+                        known_probe.as_deref(),
+                    ) {
+                        Ok(page) => {
+                            let _ = tx.send(ServerEvent::History {
+                                session_id,
+                                messages: page.messages,
+                                oldest_offset: Some(page.oldest_offset),
+                                latest_offset: Some(page.latest_offset),
+                                has_more: page.has_more,
+                                file_size: Some(page.file_size),
+                                file_mtime_ms: Some(page.file_mtime_ms),
+                                probe_sha256: Some(page.probe_sha256),
+                                todos: page.todos,
+                            });
+                        }
+                        Err(err) => {
+                            let _ = tx.send(ServerEvent::Error {
+                                code: "read_history_failed".into(),
+                                message: format!("Failed to read {source_path}: {err}"),
+                            });
+                        }
+                    }
+                }));
+            }
             ClientRequest::WatchSession {
                 session_id,
                 source_path,
                 agent,
             } => {
-                if let Some(prev) = active_watch.take() {
-                    let _ = prev.stop_tx.try_send(());
-                }
                 let path = PathBuf::from(&source_path);
-                let initial_offset = match read_messages_from_file(agent, &path, 0, Some(200)) {
-                    Ok((messages, offset)) => {
-                        let _ = out_tx.send(ServerEvent::History {
-                            session_id: session_id.clone(),
-                            messages,
-                        });
-                        offset
-                    }
-                    Err(err) => {
-                        let _ = out_tx.send(ServerEvent::Error {
-                            code: "watch_failed".into(),
-                            message: format!("Failed to open {source_path}: {err}"),
-                        });
-                        continue;
-                    }
-                };
-
-                match start_inotify_watch(
-                    session_id,
-                    path,
-                    agent,
-                    initial_offset,
-                    out_tx.clone(),
-                ) {
-                    Ok(watch) => active_watch = Some(watch),
-                    Err(err) => {
-                        let _ = out_tx.send(ServerEvent::Error {
-                            code: "watch_init_failed".into(),
-                            message: format!("Failed to watch {source_path}: {err}"),
-                        });
-                    }
+                if let Err(err) = watch_mgr.watch_session(session_id, path, agent).await {
+                    let _ = out_tx.send(ServerEvent::Error {
+                        code: "watch_failed".into(),
+                        message: format!("Failed to watch {source_path}: {err}"),
+                    });
                 }
             }
-            ClientRequest::UnwatchSession => {
-                if let Some(prev) = active_watch.take() {
-                    let _ = prev.stop_tx.try_send(());
-                }
+            ClientRequest::UnwatchSession { session_id } => {
+                watch_mgr.unwatch_session(session_id.as_deref());
+            }
+            ClientRequest::WatchDirectory => {
+                watch_mgr.watch_directory();
+            }
+            ClientRequest::UnwatchDirectory => {
+                watch_mgr.unwatch_directory();
             }
             ClientRequest::SendPrompt {
                 session_id,
                 agent,
                 cwd,
                 text,
-            } => match dispatch_prompt(&session_id, agent, cwd.as_deref(), &text).await {
+            } => match process_mgr
+                .send_prompt(&session_id, agent, cwd.as_deref(), &text)
+                .await
+            {
                 Ok(detail) => {
                     let _ = out_tx.send(ServerEvent::SendAccepted { session_id, detail });
                 }
@@ -158,116 +233,136 @@ async fn main() -> Result<()> {
                     });
                 }
             },
-        }
-    }
-
-    drop(out_tx);
-    let _ = writer_task.await;
-    Ok(())
-}
-
-fn start_inotify_watch(
-    session_id: String,
-    path: PathBuf,
-    agent: AgentKind,
-    mut offset: u64,
-    out_tx: mpsc::UnboundedSender<ServerEvent>,
-) -> Result<ActiveWatch> {
-    let (fs_tx, mut fs_rx) = mpsc::unbounded_channel::<()>();
-    let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
-    let target_name = path.file_name().map(|s| s.to_os_string());
-
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-        if let Ok(event) = res {
-            let matches = target_name.as_ref().is_none_or(|name| {
-                event
-                    .paths
-                    .iter()
-                    .any(|p| p.file_name().is_some_and(|n| n == name))
-            });
-            if matches {
-                let _ = fs_tx.send(());
+            ClientRequest::InterruptSession { session_id, agent } => {
+                process_mgr.interrupt_session(session_id, agent).await;
             }
-        }
-    })?;
-
-    let watch_target = path.parent().unwrap_or(&path);
-    watcher.watch(watch_target, RecursiveMode::NonRecursive)?;
-
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = stop_rx.recv() => break,
-                maybe = fs_rx.recv() => {
-                    if maybe.is_none() {
-                        break;
-                    }
-                    // Drain bursts so rapid writes collapse into one delta read.
-                    while fs_rx.try_recv().is_ok() {}
-                    if let Ok((messages, new_offset)) = read_messages_from_file(agent, &path, offset, None) {
-                        offset = new_offset;
-                        if !messages.is_empty() {
-                            let _ = out_tx.send(ServerEvent::HistoryAppend {
-                                session_id: session_id.clone(),
-                                messages,
+            ClientRequest::SteerSession {
+                session_id,
+                agent,
+                cwd,
+                text,
+            } => {
+                process_mgr
+                    .steer_session(session_id, agent, cwd, text)
+                    .await;
+            }
+            ClientRequest::CancelQueuedPrompt {
+                session_id,
+                message_id,
+            } => {
+                process_mgr.cancel_queued_prompt(session_id, message_id);
+            }
+            ClientRequest::SpawnSession {
+                agent,
+                cwd,
+                title,
+                initial_prompt,
+            } => {
+                process_mgr
+                    .spawn_session(agent, cwd, title, initial_prompt)
+                    .await;
+            }
+            ClientRequest::RenameSession {
+                session_id,
+                agent,
+                source_path,
+                title,
+            } => {
+                process_mgr.rename_session(session_id, agent, source_path, title);
+            }
+            ClientRequest::ArchiveSession {
+                session_id,
+                agent,
+                source_path,
+                kill_process,
+            } => {
+                process_mgr
+                    .archive_session(session_id, agent, source_path, kill_process)
+                    .await;
+            }
+            ClientRequest::UnarchiveSession { session_id } => {
+                process_mgr.unarchive_session(session_id);
+            }
+            ClientRequest::SearchHistory {
+                request_id,
+                session_id,
+                source_path,
+                agent,
+                query,
+            } => {
+                let tx = out_tx.clone();
+                let _ = disk_tx.send(Box::new(move || {
+                    let path = PathBuf::from(&source_path);
+                    match search_history(request_id, session_id, &path, agent, &query) {
+                        Ok(ev) => {
+                            let _ = tx.send(ev);
+                        }
+                        Err(SearchError::InvalidQuery(msg)) => {
+                            let _ = tx.send(ServerEvent::Error {
+                                code: "invalid_query".into(),
+                                message: msg,
+                            });
+                        }
+                        Err(SearchError::Io(err)) => {
+                            let _ = tx.send(ServerEvent::Error {
+                                code: "search_failed".into(),
+                                message: format!("Failed to search {source_path}: {err}"),
                             });
                         }
                     }
-                }
+                }));
+            }
+            ClientRequest::ListCommands { agent, cwd } => {
+                let home_c = home.clone();
+                let tx = out_tx.clone();
+                let _ = disk_tx.send(Box::new(move || {
+                    let cwd_path = cwd.as_deref().map(PathBuf::from);
+                    let items = commands::list_commands(&home_c, agent, cwd_path.as_deref());
+                    let _ = tx.send(ServerEvent::Commands { agent, cwd, items });
+                }));
             }
         }
-    });
+    }
 
-    Ok(ActiveWatch {
-        _watcher: watcher,
-        stop_tx,
-    })
+    // Clean shutdown: stop and await all watchers, drop senders, and join stdin reader.
+    watch_mgr.shutdown().await;
+    drop(watch_mgr);
+    drop(process_mgr);
+    drop(disk_tx);
+    drop(out_tx);
+    let _ = stdin_handle.join();
+    Ok(())
 }
 
-async fn dispatch_prompt(
-    session_id: &str,
-    agent: AgentKind,
-    cwd: Option<&str>,
-    text: &str,
-) -> Result<String> {
-    let (bin, args): (&str, Vec<String>) = match agent {
-        AgentKind::Claude => (
-            "claude",
-            vec![
-                "--resume".into(),
-                session_id.into(),
-                "-p".into(),
-                text.into(),
-            ],
-        ),
-        AgentKind::Codex => (
-            "codex",
-            vec![
-                "exec".into(),
-                "resume".into(),
-                session_id.into(),
-                text.into(),
-            ],
-        ),
-        AgentKind::Antigravity => (
-            "agy",
-            vec!["--resume".into(), session_id.into(), text.into()],
-        ),
-    };
-
-    let mut cmd = Command::new(bin);
-    cmd.args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if let Some(dir) = cwd
-        && !dir.trim().is_empty()
+/// Computes the 12-char lowercase hex SHA-256 prefix of the running daemon binary
+/// (matching `multibot_core::daemon_deploy::sha256_prefix_12`), streaming in 64 KiB chunks.
+fn compute_binary_hash() -> String {
+    if let Some(baked) = option_env!("MULTIBOT_BINARY_HASH")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
     {
-        cmd.current_dir(dir);
+        return baked.chars().take(12).collect();
     }
-    let child = cmd.spawn()?;
-    let pid = child.id().unwrap_or(0);
-    Ok(format!("dispatched {bin} (pid {pid})"))
+    let Ok(exe_path) = std::env::current_exe() else {
+        return String::new();
+    };
+    let Ok(mut file) = std::fs::File::open(exe_path) else {
+        return String::new();
+    };
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(_) => return String::new(),
+        }
+    }
+    let digest = hasher.finalize();
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5]
+    )
 }
 
 fn read_hostname() -> String {
@@ -280,9 +375,14 @@ fn read_hostname() -> String {
         .unwrap_or_else(|| "unknown-host".to_string())
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_binary_hash_returns_12_lowercase_hex_chars() {
+        let h = compute_binary_hash();
+        assert_eq!(h.len(), 12);
+        assert!(h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+    }
 }

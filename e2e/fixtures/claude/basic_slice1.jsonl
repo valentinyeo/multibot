@@ -1,0 +1,4 @@
+{"type":"user","uuid":"u-basic-1","cwd":"/tmp/proj/basic","timestamp":"2026-11-26T10:00:00Z","message":{"content":"List the Rust crates in this workspace."}}
+{"type":"assistant","uuid":"a-basic-1","cwd":"/tmp/proj/basic","timestamp":"2026-11-26T10:00:02Z","message":{"model":"claude-opus-4-6","content":[{"type":"text","text":"The workspace contains multibot-proto, multibot-gpu, multibot-keys, multibot-core, multibotd, and multibot-desktop."}]}}
+{"type":"user","uuid":"u-basic-2","cwd":"/tmp/proj/basic","timestamp":"2026-11-26T10:01:00Z","message":{"content":"Check GPU safety invariant."}}
+{"type":"assistant","uuid":"a-basic-2","cwd":"/tmp/proj/basic","timestamp":"2026-11-26T10:01:03Z","message":{"model":"claude-opus-4-6","content":[{"type":"text","text":"DXGI skips NVIDIA 0x10DE by default and falls back to WARP software rendering."}]}}

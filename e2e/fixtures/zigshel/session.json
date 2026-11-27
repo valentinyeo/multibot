@@ -1,0 +1,85 @@
+{
+  "single_window": true,
+  "active_workspace": 0,
+  "workspace_count": 2,
+  "servers": [
+    {
+      "name": "prod-vps",
+      "hostname": "10.0.0.10",
+      "user": "valentin",
+      "port": 22
+    },
+    {
+      "name": "staging-vps",
+      "hostname": "10.0.0.20",
+      "user": "deploy",
+      "port": 2222
+    },
+    {
+      "name": "PROD-VPS-DUP",
+      "hostname": "10.0.0.10",
+      "user": "valentin",
+      "port": 22
+    }
+  ],
+  "workspaces": [
+    {
+      "name": "Core",
+      "color": 2,
+      "wid": "ws-core",
+      "snoozed": false,
+      "last_shell": 10
+    },
+    {
+      "name": "Ops",
+      "color": 4,
+      "wid": "ws-ops",
+      "snoozed": true,
+      "last_shell": 20
+    }
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "name": "Daemons",
+      "collapsed": false,
+      "color": 3,
+      "color_set": true
+    }
+  ],
+  "tabs": [
+    {
+      "kind": "chat",
+      "name": "Core Daemon",
+      "tmux_session": "claude-basic-001",
+      "tmux_host": "prod-vps",
+      "shell_id": 10,
+      "workspace": 0,
+      "favorite": true,
+      "pinned_top": true,
+      "starred_group_id": 1
+    },
+    {
+      "kind": "chat",
+      "name": "Ops Deploy",
+      "tmux_session": "codex-rich-001",
+      "tmux_host": "staging-vps",
+      "shell_id": 20,
+      "workspace": 1,
+      "favorite": true,
+      "pinned_top": false,
+      "starred_group_id": 0
+    },
+    {
+      "kind": "chat",
+      "name": "Scratch Tab",
+      "tmux_session": "agy-brain-001",
+      "tmux_host": "prod-vps",
+      "shell_id": 30,
+      "workspace": 0,
+      "favorite": false,
+      "pinned_top": false,
+      "starred_group_id": 0
+    }
+  ]
+}

@@ -1,17 +1,103 @@
-name: CI & Build
+name: CI & Releases
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare:
+    name: Compute Release Version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+      should_release: ${{ steps.version.outputs.should_release }}
+    steps:
+      - name: Resolve version and release flags
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          GITHUB_REF_FULL: ${{ github.ref }}
+          RUN_NUMBER: ${{ github.run_number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          SEMVER_RE = re.compile(
+              r"\A(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+              r"(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)"
+              r"(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?\Z",
+              re.ASCII,
+          )
+
+          event_name = os.environ.get("EVENT_NAME", "")
+          ref_name = os.environ.get("REF_NAME", "")
+          ref_type = os.environ.get("REF_TYPE", "")
+          ref_full = os.environ.get("GITHUB_REF_FULL", "")
+          run_number = os.environ.get("RUN_NUMBER", "0")
+          pr_number = os.environ.get("PR_NUMBER", "")
+
+          if not (run_number.isascii() and run_number.isdigit()):
+              sys.exit(f"Invalid RUN_NUMBER: {run_number!r}")
+
+          if ref_type == "tag" and ref_name.startswith("v"):
+              version = ref_name[1:]
+              if not SEMVER_RE.match(version):
+                  sys.exit(f"Invalid SemVer release tag: {ref_name!r}")
+              tag = f"v{version}"
+              is_prerelease = "true" if "-" in version else "false"
+              should_release = "true"
+          elif event_name == "push" and ref_full == "refs/heads/main":
+              version = f"0.1.{run_number}"
+              tag = f"v{version}"
+              is_prerelease = "false"
+              should_release = "true"
+          elif event_name == "workflow_dispatch" and ref_full == "refs/heads/main":
+              version = f"0.1.{run_number}"
+              tag = f"v{version}"
+              is_prerelease = "false"
+              should_release = "true"
+          else:
+              pr = pr_number if (pr_number.isascii() and pr_number.isdigit()) else "0"
+              version = f"0.1.{run_number}-pr.{pr}"
+              tag = f"v{version}"
+              is_prerelease = "true"
+              should_release = "false"
+
+          if not SEMVER_RE.match(version):
+              sys.exit(f"Computed version failed SemVer check: {version!r}")
+
+          print(f"version={version} tag={tag} prerelease={is_prerelease} release={should_release}")
+          out_path = os.environ["GITHUB_OUTPUT"]
+          with open(out_path, "a", encoding="utf-8") as f:
+              f.write(f"version={version}\n")
+              f.write(f"tag={tag}\n")
+              f.write(f"is_prerelease={is_prerelease}\n")
+              f.write(f"should_release={should_release}\n")
+          PY
+
   linux:
     name: Linux Test & Build multibotd
+    needs: prepare
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
@@ -29,22 +115,37 @@ jobs:
         run: cargo test --workspace
 
       - name: Build release multibotd (Linux x86_64)
+        env:
+          MULTIBOT_BUILD_VERSION: ${{ needs.prepare.outputs.version }}
         run: cargo build --release -p multibotd
 
-      - name: Stage multibotd binary
+      - name: Stage and verify multibotd binary
+        env:
+          MULTIBOT_BUILD_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
+          set -euo pipefail
           mkdir -p dist
           cp target/release/multibotd dist/multibotd-linux-x86_64
+          chmod +x dist/multibotd-linux-x86_64
+          test -s dist/multibotd-linux-x86_64
+          actual="$(./dist/multibotd-linux-x86_64 --version)"
+          expected="multibotd ${MULTIBOT_BUILD_VERSION}"
+          if [ "$actual" != "$expected" ]; then
+            echo "Version mismatch: expected '$expected', got '$actual'" >&2
+            exit 1
+          fi
           ls -lh dist/multibotd-linux-x86_64
 
       - uses: actions/upload-artifact@v7
         with:
           name: multibotd-linux-x86_64
           path: dist/multibotd-linux-x86_64
+          retention-days: 1
+          if-no-files-found: error
 
   windows:
     name: Windows Fast Test & Build multibot.exe
-    needs: linux
+    needs: prepare
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -60,24 +161,415 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run fast non-GPUI tests on Windows
-        run: cargo test -p multibot-proto -p multibot-gpu -p multibot-keys -p multibot-core -p multibotd
+        run: cargo test -p multibot-proto -p multibot-gpu -p multibot-keys -p multibot-updater -p multibot-core
 
       - name: Build release multibot.exe (single GPUI compile, iGPU-locked DXGI patch)
+        env:
+          MULTIBOT_BUILD_VERSION: ${{ needs.prepare.outputs.version }}
         run: cargo build --release -p multibot-desktop
 
-      - name: Download multibotd-linux-x86_64 for auto-deploy bundle
-        uses: actions/download-artifact@v8
-        with:
-          name: multibotd-linux-x86_64
-          path: dist
-
-      - name: Stage Windows portable bundle
+      - name: Stage and verify multibot.exe binary
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target/release/multibot.exe dist/multibot.exe
+          if (-not (Test-Path dist/multibot.exe)) {
+            throw "dist/multibot.exe was not created"
+          }
+          if ((Get-Item dist/multibot.exe).Length -le 0) {
+            throw "dist/multibot.exe is empty"
+          }
           Get-ChildItem dist
 
       - uses: actions/upload-artifact@v7
         with:
+          name: multibot-windows-exe
+          path: dist/multibot.exe
+          retention-days: 1
+          if-no-files-found: error
+
+  package:
+    name: Package & Verify Release Assets
+    needs: [prepare, linux, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download multibotd-linux-x86_64
+        uses: actions/download-artifact@v8
+        with:
+          name: multibotd-linux-x86_64
+          path: bundle
+
+      - name: Download multibot.exe
+        uses: actions/download-artifact@v8
+        with:
+          name: multibot-windows-exe
+          path: bundle
+
+      - name: Build zip, SHA256SUMS.txt, and update-manifest.json (fail-closed)
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import datetime
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import sys
+          import zipfile
+
+          MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
+          HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+          NOISE_PREFIX_RE = re.compile(
+              r"^(?:merge\s+|revert\s+|wip\b|fixup!|squash!|\[(?:ci|infra)\]|"
+              r"release\s+gate:|multiprompt\s+verify:|"
+              r"(?:chore|ci|test|tests|docs?|style|refactor|build|deps|bump|release|infra)"
+              r"(?:\([^)]*\))?!?:)",
+              re.IGNORECASE,
+          )
+          NOISE_WORD_RE = re.compile(
+              r"\b(?:ci|infra|tests?|proofs?|pipelines?|workflows?|clippy|rustfmt|lockfile)\b",
+              re.IGNORECASE,
+          )
+          EXACT_FILLER_NOTES = {
+              "various improvements",
+              "bug fixes",
+              "general improvements and bug fixes",
+              "maintenance",
+              "improvements",
+              "fixes",
+              "minor fixes",
+              "misc",
+              "updates",
+          }
+          REJECTED_SUBSTRINGS = (
+              "behind the scenes",
+              "latest improvements",
+              "checks and fixes, no visible change",
+              "full changelog:",
+          )
+          USER_PREFIX_RE = re.compile(
+              r"^(?:feat|fix|perf|ui|ux|updater)(?:\([^)]*\))?!?:\s*",
+              re.IGNORECASE,
+          )
+          FORBIDDEN_DURATION_RE = re.compile(
+              r"(?i)\b(?:seconds?|secs?|minutes?|mins?|a\s+few|takes?|eta|\d+\s*(?:s|sec|secs|m|min|mins))\b|~\s*\d+\s*[sm]\b"
+          )
+
+          def has_forbidden_control_or_bidi(s: str) -> bool:
+              for ch in s:
+                  code = ord(ch)
+                  if (
+                      code < 0x20
+                      or 0x7F <= code <= 0x9F
+                      or code in (0x2028, 0x2029)
+                      or 0x202A <= code <= 0x202E
+                      or 0x2066 <= code <= 0x2069
+                  ):
+                      return True
+              return False
+
+          def strip_leading_bullets(s: str) -> str:
+              while True:
+                  for prefix in ("- ", "* ", "• "):
+                      if s.startswith(prefix):
+                          s = s[len(prefix):].strip()
+                          break
+                  else:
+                      return s
+
+          def sha256_file(path: pathlib.Path) -> str:
+              h = hashlib.sha256()
+              with path.open("rb") as f:
+                  for chunk in iter(lambda: f.read(65536), b""):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          def collect_release_notes(current_tag: str) -> list[str]:
+              try:
+                  tags_res = subprocess.run(
+                      ["git", "tag", "--list", "v*", "--merged", "HEAD", "--sort=-v:refname"],
+                      capture_output=True,
+                      text=True,
+                      check=False,
+                  )
+                  prev_tag = None
+                  if tags_res.returncode == 0:
+                      for line in tags_res.stdout.splitlines():
+                          candidate = line.strip()
+                          if candidate and candidate != current_tag:
+                              prev_tag = candidate
+                              break
+                  log_cmd = (
+                      ["git", "log", "--no-merges", "--pretty=format:%s", f"{prev_tag}..HEAD"]
+                      if prev_tag
+                      else ["git", "log", "--no-merges", "--pretty=format:%s", "-n", "20", "HEAD"]
+                  )
+                  log_res = subprocess.run(log_cmd, capture_output=True, check=False)
+                  subjects = (
+                      log_res.stdout.decode("utf-8", errors="replace").split("\n")
+                      if log_res.returncode == 0 and log_res.stdout
+                      else []
+                  )
+              except OSError:
+                  subjects = []
+
+              notes: list[str] = []
+              seen: set[str] = set()
+              for raw in subjects:
+                  if has_forbidden_control_or_bidi(raw) or "```" in raw:
+                      continue
+                  line = strip_leading_bullets(raw.strip())
+                  if not line or line.startswith("#") or NOISE_PREFIX_RE.match(line):
+                      continue
+                  line = strip_leading_bullets(USER_PREFIX_RE.sub("", line).strip())
+                  if not line or line.startswith("#") or "```" in line or has_forbidden_control_or_bidi(line):
+                      continue
+                  if NOISE_PREFIX_RE.match(line) or NOISE_WORD_RE.search(line):
+                      continue
+                  lower = line.lower()
+                  if lower in EXACT_FILLER_NOTES or any(sub in lower for sub in REJECTED_SUBSTRINGS):
+                      continue
+                  if FORBIDDEN_DURATION_RE.search(line):
+                      continue
+                  line = line[0].upper() + line[1:]
+                  if len(line) > 120:
+                      line = line[:119].rstrip() + "…"
+                  key = line.lower()
+                  if key not in seen:
+                      seen.add(key)
+                      notes.append(line)
+                  if len(notes) >= 10:
+                      break
+
+              if not notes:
+                  notes = ["Performance and stability improvements"]
+              return notes
+
+          version = os.environ["RELEASE_VERSION"].strip()
+          tag = os.environ["RELEASE_TAG"].strip()
+          repo = os.environ["GITHUB_REPOSITORY"].strip()
+          if not version or not tag or not repo:
+              sys.exit("Missing required RELEASE_VERSION, RELEASE_TAG, or GITHUB_REPOSITORY")
+
+          bundle_dir = pathlib.Path("bundle")
+          release_dir = pathlib.Path("release")
+          release_dir.mkdir(parents=True, exist_ok=True)
+
+          exe_path = bundle_dir / "multibot.exe"
+          daemon_path = bundle_dir / "multibotd-linux-x86_64"
+
+          def validate_pe64_amd64(path: pathlib.Path) -> None:
+              if not path.is_file():
+                  sys.exit(f"Missing required binary: {path}")
+              size = path.stat().st_size
+              if size < 64 or size >= MAX_ARCHIVE_BYTES:
+                  sys.exit(f"Invalid PE binary size {size} for {path}")
+              with path.open("rb") as f:
+                  dos_hdr = f.read(64)
+                  if dos_hdr[:2] != b"MZ":
+                      sys.exit(f"{path} failed PE MZ magic check: got {dos_hdr[:2]!r}")
+                  e_lfanew = int.from_bytes(dos_hdr[0x3C:0x40], "little")
+                  if e_lfanew < 64 or e_lfanew + 26 > size:
+                      sys.exit(f"{path} has invalid PE header offset {e_lfanew} (size={size})")
+                  f.seek(e_lfanew)
+                  pe_hdr = f.read(26)
+              if len(pe_hdr) != 26 or pe_hdr[:4] != b"PE\x00\x00":
+                  sys.exit(f"{path} failed PE signature check: got {pe_hdr[:4]!r}")
+              machine = int.from_bytes(pe_hdr[4:6], "little")
+              if machine != 0x8664:
+                  sys.exit(f"{path} failed PE AMD64 machine check: got 0x{machine:04x}")
+              opt_magic = int.from_bytes(pe_hdr[24:26], "little")
+              if opt_magic != 0x020B:
+                  sys.exit(f"{path} failed PE32+ optional header magic check: got 0x{opt_magic:04x}")
+
+          def validate_elf64_x86_64(path: pathlib.Path) -> None:
+              if not path.is_file():
+                  sys.exit(f"Missing required binary: {path}")
+              size = path.stat().st_size
+              if size < 64 or size >= MAX_ARCHIVE_BYTES:
+                  sys.exit(f"Invalid ELF binary size {size} for {path}")
+              with path.open("rb") as f:
+                  hdr = f.read(64)
+              if hdr[:4] != b"\x7fELF":
+                  sys.exit(f"{path} failed ELF magic check: got {hdr[:4]!r}")
+              if hdr[4] != 2:
+                  sys.exit(f"{path} failed ELFCLASS64 check: got {hdr[4]}")
+              if hdr[5] != 1:
+                  sys.exit(f"{path} failed ELFDATA2LSB check: got {hdr[5]}")
+              machine = int.from_bytes(hdr[18:20], "little")
+              if machine != 0x3E:
+                  sys.exit(f"{path} failed ELF EM_X86_64 check: got 0x{machine:04x}")
+
+          validate_pe64_amd64(exe_path)
+          validate_elf64_x86_64(daemon_path)
+
+          exe_sha = sha256_file(exe_path)
+          daemon_sha = sha256_file(daemon_path)
+
+          zip_name = "multibot-windows-x64.zip"
+          zip_path = release_dir / zip_name
+          fixed_dt = (2026, 1, 1, 0, 0, 0)
+          with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+              for src, arcname, mode in [
+                  (exe_path, "multibot.exe", 0o100644),
+                  (daemon_path, "multibotd-linux-x86_64", 0o100755),
+              ]:
+                  zi = zipfile.ZipInfo(filename=arcname, date_time=fixed_dt)
+                  zi.compress_type = zipfile.ZIP_DEFLATED
+                  zi.create_system = 3
+                  zi.external_attr = mode << 16
+                  zf.writestr(zi, src.read_bytes())
+
+          zip_size = zip_path.stat().st_size
+          if zip_size <= 0 or zip_size > MAX_ARCHIVE_BYTES:
+              sys.exit(f"Invalid archive size: {zip_size}")
+
+          # Fail-closed zip roundtrip verification
+          with zipfile.ZipFile(zip_path, "r") as zf:
+              bad = zf.testzip()
+              if bad is not None:
+                  sys.exit(f"Corrupted zip entry: {bad}")
+              names = set(zf.namelist())
+              expected_names = {"multibot.exe", "multibotd-linux-x86_64"}
+              if names != expected_names:
+                  sys.exit(f"Unexpected zip entries: {names!r}")
+              if hashlib.sha256(zf.read("multibot.exe")).hexdigest() != exe_sha:
+                  sys.exit("Extracted multibot.exe SHA-256 mismatch")
+              if hashlib.sha256(zf.read("multibotd-linux-x86_64")).hexdigest() != daemon_sha:
+                  sys.exit("Extracted multibotd-linux-x86_64 SHA-256 mismatch")
+
+          zip_sha = sha256_file(zip_path)
+
+          sums_text = (
+              f"{zip_sha}  {zip_name}\n"
+              f"{exe_sha}  multibot.exe\n"
+              f"{daemon_sha}  multibotd-linux-x86_64\n"
+          )
+          (release_dir / "SHA256SUMS.txt").write_text(sums_text, encoding="utf-8")
+
+          notes = collect_release_notes(tag)
+          published_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+          manifest = {
+              "schema_version": 1,
+              "version": version,
+              "tag": tag,
+              "published_at": published_at,
+              "notes": notes,
+              "windows_x64": {
+                  "asset_name": zip_name,
+                  "url": f"https://github.com/{repo}/releases/download/{tag}/{zip_name}",
+                  "sha256": zip_sha,
+                  "size_bytes": zip_size,
+                  "multibot_exe_sha256": exe_sha,
+                  "multibotd_linux_x86_64_sha256": daemon_sha,
+              },
+          }
+          manifest_path = release_dir / "update-manifest.json"
+          manifest_text = json.dumps(manifest, indent=2) + "\n"
+          manifest_path.write_text(manifest_text, encoding="utf-8")
+
+          # Re-parse and strictly validate manifest
+          parsed = json.loads(manifest_path.read_text(encoding="utf-8"))
+          assert parsed["schema_version"] == 1
+          assert parsed["version"] == version
+          assert parsed["tag"] == tag
+          win = parsed["windows_x64"]
+          assert win["asset_name"] == zip_name
+          assert win["url"].startswith("https://github.com/")
+          assert isinstance(win["size_bytes"], int) and win["size_bytes"] > 0
+          for k in ("sha256", "multibot_exe_sha256", "multibotd_linux_x86_64_sha256"):
+              assert HEX64_RE.match(win[k]), f"invalid sha256 for {k}"
+          for n in parsed["notes"]:
+              assert not has_forbidden_control_or_bidi(n) and "```" not in n
+              assert not FORBIDDEN_DURATION_RE.search(n), f"forbidden duration wording in note: {n!r}"
+
+          notes_md = "\n".join(f"- {n}" for n in notes)
+          release_notes_md = (
+              f"## What's Changed\n\n{notes_md}\n\n"
+              f"### Checksums (`SHA256SUMS.txt`)\n\n```text\n{sums_text}```\n"
+          )
+          (release_dir / "release-notes.md").write_text(release_notes_md, encoding="utf-8")
+          print(f"Packaged {zip_name} ({zip_size} bytes, sha256={zip_sha[:12]}...)")
+          PY
+
+      - uses: actions/upload-artifact@v7
+        with:
           name: multibot-windows-x64
-          path: dist/
+          path: bundle/
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: release/
+          retention-days: 1
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [prepare, linux, windows, package]
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: release
+
+      - name: Publish GitHub Release (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
+          TARGET_SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for f in \
+            release/multibot-windows-x64.zip \
+            release/SHA256SUMS.txt \
+            release/update-manifest.json \
+            release/release-notes.md; do
+            test -s "$f"
+          done
+
+          if gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" \
+              release/multibot-windows-x64.zip \
+              release/SHA256SUMS.txt \
+              release/update-manifest.json \
+              --repo "$REPO" --clobber
+            gh release edit "$RELEASE_TAG" \
+              --repo "$REPO" \
+              --title "Multibot $RELEASE_TAG" \
+              --notes-file release/release-notes.md
+          else
+            extra_flags=()
+            if [ "$IS_PRERELEASE" = "true" ]; then
+              extra_flags+=(--prerelease)
+            else
+              extra_flags+=(--latest)
+            fi
+            gh release create "$RELEASE_TAG" \
+              release/multibot-windows-x64.zip \
+              release/SHA256SUMS.txt \
+              release/update-manifest.json \
+              --repo "$REPO" \
+              --target "$TARGET_SHA" \
+              --title "Multibot $RELEASE_TAG" \
+              --notes-file release/release-notes.md \
+              "${extra_flags[@]}"
+          fi

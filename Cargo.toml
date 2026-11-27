@@ -4,6 +4,7 @@ members = [
     "crates/multibot-proto",
     "crates/multibot-gpu",
     "crates/multibot-keys",
+    "crates/multibot-updater",
     "crates/multibot-core",
     "crates/multibotd",
     "crates/multibot-desktop",
@@ -19,20 +20,31 @@ license = "Apache-2.0"
 anyhow = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 dirs = "6.0"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 notify = "8.0"
+regex = "1.13"
+semver = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 sysinfo = { version = "0.35", default-features = false, features = ["system"] }
 tokio = { version = "1.44", features = ["rt-multi-thread", "macros", "io-util", "io-std", "process", "sync", "time", "fs"] }
+ureq = { version = "3.5", default-features = false, features = ["rustls", "gzip", "json"] }
+url = "2.5"
 walkdir = "2.5"
+zip = { version = "2.6", default-features = false, features = ["deflate"] }
 
 multibot-proto = { path = "crates/multibot-proto" }
 multibot-gpu = { path = "crates/multibot-gpu" }
 multibot-keys = { path = "crates/multibot-keys" }
+multibot-updater = { path = "crates/multibot-updater" }
 multibot-core = { path = "crates/multibot-core" }
 
 [patch.crates-io]
 gpui-pre-windows = { path = "patches/gpui-pre-windows" }
+
+[profile.dev.package.sha2]
+opt-level = 3
 
 [profile.release]
 lto = "thin"

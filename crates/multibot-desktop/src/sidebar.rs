@@ -1,0 +1,2388 @@
+use crate::app::{CloseOverlay, MultibotView};
+use crate::state::{ActiveModal, MainSurface};
+use crate::theme::{self, RADIUS_CHIP, RADIUS_ROW};
+use gpui_kit::{
+    Context, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent,
+    Modifiers, ModifiersChangedEvent, MouseButton, ParentElement, Role, SharedString,
+    StatefulInteractiveElement, Styled, TestSupportExt, Window,
+    component::{Sizable, button::Button, h_flex, v_flex},
+    div,
+    prelude::FluentBuilder,
+    px, rgb,
+};
+use multibot_core::workspaces::{
+    DEFAULT_WORKSPACE_ID, MAX_SESSION_TITLE_CHARS, ReorderDirection, STARRED_WORKSPACE_ID,
+    SessionInput, SidebarRow, WorkspaceStore, WorkspaceView, canonical_session_key, now_unix_ms,
+};
+use multibot_core::{DaemonTarget, SidebarMode};
+use multibot_proto::{ClientRequest, SessionSummary};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InlineRenameState {
+    pub session_key: String,
+    pub session_id: String,
+    pub original: String,
+    pub draft: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RenameKeyOutcome {
+    Consumed,
+    Commit,
+    Cancel,
+    Ignored,
+}
+
+impl InlineRenameState {
+    pub(crate) fn new(session_key: String, session_id: String, original: String) -> Self {
+        Self {
+            session_key,
+            session_id,
+            draft: original.clone(),
+            original,
+        }
+    }
+
+    pub(crate) fn handle_key(
+        &mut self,
+        key: &str,
+        key_char: Option<&str>,
+        modifiers: Modifiers,
+    ) -> RenameKeyOutcome {
+        if key.eq_ignore_ascii_case("enter") {
+            return RenameKeyOutcome::Commit;
+        }
+        if key.eq_ignore_ascii_case("escape") {
+            return RenameKeyOutcome::Cancel;
+        }
+        if key.eq_ignore_ascii_case("backspace") {
+            self.draft.pop();
+            return RenameKeyOutcome::Consumed;
+        }
+        if modifiers.control || modifiers.alt || modifiers.platform {
+            return RenameKeyOutcome::Ignored;
+        }
+        if let Some(ch_str) = key_char {
+            let mut saw_printable = false;
+            for ch in ch_str.chars() {
+                if !ch.is_control() {
+                    saw_printable = true;
+                    if self.draft.chars().count() < MAX_SESSION_TITLE_CHARS {
+                        self.draft.push(ch);
+                    }
+                }
+            }
+            if saw_printable {
+                return RenameKeyOutcome::Consumed;
+            }
+        } else if key.chars().count() == 1 {
+            let ch = key.chars().next().unwrap();
+            if !ch.is_control() {
+                if self.draft.chars().count() < MAX_SESSION_TITLE_CHARS {
+                    let to_push = if modifiers.shift {
+                        ch.to_ascii_uppercase()
+                    } else {
+                        ch
+                    };
+                    self.draft.push(to_push);
+                }
+                return RenameKeyOutcome::Consumed;
+            }
+        }
+        RenameKeyOutcome::Ignored
+    }
+}
+
+/// AltGr-safe check: show `1..9` jump badges ONLY when `Ctrl` is held without `Alt`, `Shift`,
+/// or `Platform` (never fires on European AltGr chords).
+pub(crate) fn should_show_jump_badges(modifiers: Modifiers) -> bool {
+    modifiers.control && !modifiers.alt && !modifiers.shift && !modifiers.platform
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SidebarState {
+    pub mode: SidebarMode,
+    pub workspace_store: WorkspaceStore,
+    pub active_workspace_id: String,
+    pub active_workspace_view: WorkspaceView,
+    pub unread_only: bool,
+    pub recents_collapsed: bool,
+    pub hosts_collapsed: bool,
+    pub show_jump_badges: bool,
+    pub previous_session_key: Option<String>,
+    pub rename: Option<InlineRenameState>,
+    pub new_workspace_draft: Option<String>,
+    pub persist_to_disk: bool,
+    pub focus_handle: Option<FocusHandle>,
+}
+
+impl Default for SidebarState {
+    fn default() -> Self {
+        Self {
+            mode: SidebarMode::Open,
+            workspace_store: WorkspaceStore::new(),
+            active_workspace_id: DEFAULT_WORKSPACE_ID.to_string(),
+            active_workspace_view: WorkspaceView::All,
+            unread_only: false,
+            recents_collapsed: false,
+            hosts_collapsed: false,
+            show_jump_badges: false,
+            previous_session_key: None,
+            rename: None,
+            new_workspace_draft: None,
+            persist_to_disk: false,
+            focus_handle: None,
+        }
+    }
+}
+
+impl SidebarState {
+    pub(crate) fn is_shown(&self) -> bool {
+        !matches!(self.mode, SidebarMode::Hidden)
+    }
+
+    pub(crate) fn cycle(&mut self) {
+        self.mode = self.mode.cycle();
+    }
+
+    pub(crate) fn set_mode(&mut self, mode: SidebarMode) {
+        self.mode = mode;
+    }
+
+    pub(crate) fn toggle_button_label(&self) -> &'static str {
+        match self.mode {
+            SidebarMode::Open => "Sidebar",
+            SidebarMode::Collapsed => "Rail",
+            SidebarMode::Hidden => "Show Sidebar",
+        }
+    }
+}
+
+fn parse_hex_color(hex: &str) -> Option<Hsla> {
+    let trimmed = hex.trim().trim_start_matches('#');
+    if trimmed.len() != 6 {
+        return None;
+    }
+    let val = u32::from_str_radix(trimmed, 16).ok()?;
+    Some(rgb(val).into())
+}
+
+impl MultibotView {
+    pub(crate) fn current_host_label(&self) -> &str {
+        self.connected_host.as_deref().unwrap_or("local")
+    }
+
+    pub(crate) fn session_key_for(&self, session: &SessionSummary) -> String {
+        canonical_session_key(self.current_host_label(), session.agent, &session.id)
+    }
+
+    pub(crate) fn session_inputs(&self) -> Vec<SessionInput<'_>> {
+        let host = self.current_host_label();
+        self.sessions
+            .iter()
+            .map(|summary| SessionInput {
+                key: canonical_session_key(host, summary.agent, &summary.id),
+                host,
+                summary,
+            })
+            .collect()
+    }
+
+    pub(crate) fn find_session_by_key(&self, key: &str) -> Option<SessionSummary> {
+        self.sessions
+            .iter()
+            .find(|s| self.session_key_for(s) == key || s.id == key)
+            .cloned()
+    }
+
+    /// Loads persisted `workspaces.json` and `palette-stats.json` (called by M6 startup wiring).
+    pub(crate) fn load_persisted_workspace_state(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_state.workspace_store = WorkspaceStore::load();
+        self.sidebar_state.recents_collapsed =
+            self.sidebar_state.workspace_store.recents_section_collapsed;
+        self.sidebar_state.persist_to_disk = true;
+        self.sidebar_state.active_workspace_id =
+            self.sidebar_state.workspace_store.default_workspace_id();
+        self.palette_state.stats = multibot_core::workspaces::PaletteStats::load();
+        self.palette_state.persist_to_disk = true;
+        cx.notify();
+    }
+
+    pub(crate) fn persist_workspace_store_if_enabled(&self) {
+        if self.sidebar_state.persist_to_disk {
+            let _ = self.sidebar_state.workspace_store.save();
+        }
+    }
+
+    pub(crate) fn open_session_with_tracking(
+        &mut self,
+        session: SessionSummary,
+        from_inbox: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let next_key = self.session_key_for(&session);
+        if let Some(ref current) = self.selected_session {
+            let cur_key = self.session_key_for(current);
+            if cur_key != next_key {
+                self.sidebar_state.previous_session_key = Some(cur_key);
+            }
+        }
+
+        let now = now_unix_ms();
+        self.sidebar_state
+            .workspace_store
+            .record_session_view(&next_key, now);
+        self.sidebar_state
+            .workspace_store
+            .mark_session_read(&next_key, &session);
+        self.sidebar_state
+            .workspace_store
+            .auto_unarchive_waiting_if_active(&next_key, &session);
+
+        if !from_inbox {
+            self.inbox_state.step_index = None;
+            self.inbox_state.step_order.clear();
+        }
+        self.persist_workspace_store_if_enabled();
+        self.sync_workspace_to_shared(cx);
+        self.select_session(session, cx);
+    }
+
+    pub(crate) fn commit_session_rename(
+        &mut self,
+        session_key: &str,
+        draft: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(clean) = self
+            .sidebar_state
+            .workspace_store
+            .apply_session_rename(session_key, draft)
+        else {
+            self.sidebar_state.rename = None;
+            self.inbox_state.rename = None;
+            cx.notify();
+            return false;
+        };
+
+        let host = self.current_host_label().to_string();
+        let mut rename_req: Option<ClientRequest> = None;
+        for sess in &mut self.sessions {
+            let key = canonical_session_key(&host, sess.agent, &sess.id);
+            if key == session_key || sess.id == session_key {
+                sess.title = clean.clone();
+                rename_req = Some(ClientRequest::RenameSession {
+                    session_id: sess.id.clone(),
+                    agent: sess.agent,
+                    source_path: sess.source_path.clone(),
+                    title: clean.clone(),
+                });
+            }
+        }
+        if let Some(ref mut sel) = self.selected_session {
+            let key = canonical_session_key(&host, sel.agent, &sel.id);
+            if key == session_key || sel.id == session_key {
+                sel.title = clean.clone();
+            }
+        }
+        if let (Some(tx), Some(req)) = (&self.daemon_tx, rename_req) {
+            let _ = tx.send(req);
+        }
+
+        self.sidebar_state.rename = None;
+        self.inbox_state.rename = None;
+        self.persist_workspace_store_if_enabled();
+        self.sync_workspace_to_shared(cx);
+        self.sync_sessions_to_shared(cx);
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn ensure_sidebar_focus_handle(&mut self, cx: &mut Context<Self>) -> FocusHandle {
+        if let Some(ref fh) = self.sidebar_state.focus_handle {
+            return fh.clone();
+        }
+        let fh = cx.focus_handle();
+        self.sidebar_state.focus_handle = Some(fh.clone());
+        fh
+    }
+
+    pub(crate) fn focus_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let fh = self.ensure_sidebar_focus_handle(cx);
+        window.focus(&fh, cx);
+    }
+
+    pub(crate) fn start_sidebar_rename(&mut self, session_key: String, cx: &mut Context<Self>) {
+        if !self.can_mount_sidebar_rename(&session_key) {
+            return;
+        }
+        if let Some(sess) = self.find_session_by_key(&session_key) {
+            let current = self
+                .sidebar_state
+                .workspace_store
+                .effective_title(&session_key, &sess.title)
+                .to_string();
+            let _ = self.ensure_sidebar_focus_handle(cx);
+            self.inbox_state.rename = None;
+            self.sidebar_state.rename =
+                Some(InlineRenameState::new(session_key, sess.id, current));
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn dismiss_conflicting_chat_overlays_for_rename(&mut self) {
+        self.slash_picker_state.close();
+        self.chat_state.close_find();
+        self.chat_state.reply_quote = None;
+        self.chat_state.focused_message_idx = None;
+        self.chat_state.message_action_menu_open = false;
+    }
+
+    pub(crate) fn start_sidebar_rename_with_window(
+        &mut self,
+        session_key: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_sidebar_rename(session_key, cx);
+        if self.sidebar_state.rename.is_some() {
+            if self.sidebar_state.mode == SidebarMode::Open {
+                self.focus_sidebar(window, cx);
+            } else {
+                window.focus(&self.root_focus_handle, cx);
+            }
+        }
+    }
+
+    pub(crate) fn toggle_active_favorite(&mut self, cx: &mut Context<Self>) {
+        if let Some(sess) = self.selected_session.clone() {
+            let key = self.session_key_for(&sess);
+            self.sidebar_state.workspace_store.toggle_favorite(&key);
+            self.cleanup_unmounted_surface_state();
+            self.persist_workspace_store_if_enabled();
+            self.sync_workspace_to_shared(cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn toggle_unread_only(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_state.unread_only = !self.sidebar_state.unread_only;
+        self.sidebar_state.rename = None;
+        self.inbox_state.rename = None;
+        self.sync_workspace_to_shared(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn switch_workspace_digit(&mut self, digit: u8, cx: &mut Context<Self>) {
+        let now = now_unix_ms();
+        let woke = !self
+            .sidebar_state
+            .workspace_store
+            .wake_due_workspaces(now)
+            .is_empty();
+        if woke {
+            self.persist_workspace_store_if_enabled();
+            self.sync_workspace_to_shared(cx);
+        }
+        if let Some(ws_id) = self
+            .sidebar_state
+            .workspace_store
+            .resolve_alt_digit(digit, now)
+        {
+            self.sidebar_state.active_workspace_id = ws_id;
+            self.sidebar_state.rename = None;
+            self.cleanup_unmounted_surface_state();
+            cx.notify();
+        } else if woke {
+            self.cleanup_unmounted_surface_state();
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn cycle_workspace(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let now = now_unix_ms();
+        if !self
+            .sidebar_state
+            .workspace_store
+            .wake_due_workspaces(now)
+            .is_empty()
+        {
+            self.persist_workspace_store_if_enabled();
+            self.sync_workspace_to_shared(cx);
+        }
+        let next = self.sidebar_state.workspace_store.cycle_workspace_id(
+            &self.sidebar_state.active_workspace_id,
+            delta,
+            now,
+        );
+        self.sidebar_state.active_workspace_id = next;
+        self.sidebar_state.rename = None;
+        self.cleanup_unmounted_surface_state();
+        cx.notify();
+    }
+
+    pub(crate) fn set_workspace_view(&mut self, view: WorkspaceView, cx: &mut Context<Self>) {
+        self.sidebar_state.active_workspace_view = view;
+        self.sidebar_state.rename = None;
+        self.cleanup_unmounted_surface_state();
+        cx.notify();
+    }
+
+    pub(crate) fn reorder_active_session(
+        &mut self,
+        direction: ReorderDirection,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(sel) = self.selected_session.clone() else {
+            return false;
+        };
+        let key = self.session_key_for(&sel);
+        let ws_id = self.sidebar_state.active_workspace_id.clone();
+        let now = now_unix_ms();
+        let host = self.current_host_label().to_string();
+        let sessions_clone = self.sessions.clone();
+        let inputs: Vec<SessionInput<'_>> = sessions_clone
+            .iter()
+            .map(|summary| SessionInput {
+                key: canonical_session_key(&host, summary.agent, &summary.id),
+                host: &host,
+                summary,
+            })
+            .collect();
+        let moved = self
+            .sidebar_state
+            .workspace_store
+            .reorder_session(&ws_id, &key, direction, &inputs, now);
+        if moved {
+            self.persist_workspace_store_if_enabled();
+            self.sync_workspace_to_shared(cx);
+            cx.notify();
+        }
+        moved
+    }
+
+    /// `Ctrl+G`: collapses or expands the active session's group (no-op if ungrouped).
+    pub(crate) fn toggle_active_group(&mut self, cx: &mut Context<Self>) {
+        let Some(sel) = self.selected_session.clone() else {
+            return;
+        };
+        let key = self.session_key_for(&sel);
+        let ws_id = self.sidebar_state.active_workspace_id.clone();
+        if self
+            .sidebar_state
+            .workspace_store
+            .toggle_session_group_collapsed(&key, &ws_id)
+            .is_some()
+        {
+            self.sidebar_state.rename = None;
+            self.cleanup_unmounted_surface_state();
+            self.persist_workspace_store_if_enabled();
+            self.sync_workspace_to_shared(cx);
+            cx.notify();
+        }
+    }
+
+    /// Updates AltGr-safe `1..9` jump badge visibility on modifier changes (also exposed for M6 root forwarding).
+    pub(crate) fn handle_modifiers_changed(
+        &mut self,
+        ev: &ModifiersChangedEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let next = should_show_jump_badges(ev.modifiers);
+        if self.sidebar_state.show_jump_badges != next {
+            self.sidebar_state.show_jump_badges = next;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn snooze_active_workspace_for_ms(
+        &mut self,
+        duration_ms: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let ws_id = self.sidebar_state.active_workspace_id.clone();
+        let now = now_unix_ms();
+        if ws_id == STARRED_WORKSPACE_ID
+            || !self
+                .sidebar_state
+                .workspace_store
+                .can_snooze_workspace(&ws_id, now)
+        {
+            return;
+        }
+        if let Ok(next_ws) = self.sidebar_state.workspace_store.snooze_workspace(
+            &ws_id,
+            now.saturating_add(duration_ms),
+            now,
+        ) {
+            if let Some(next_id) = next_ws {
+                self.sidebar_state.active_workspace_id = next_id;
+            }
+            self.sidebar_state.rename = None;
+            self.cleanup_unmounted_surface_state();
+            self.persist_workspace_store_if_enabled();
+            self.sync_workspace_to_shared(cx);
+            cx.notify();
+        }
+    }
+
+    fn handle_sidebar_keydown(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        if self.active_modal != ActiveModal::None
+            || self.table_modal_state.is_open()
+            || self.has_mounted_chat_overlay()
+        {
+            return;
+        }
+        let key = ev.keystroke.key.as_str();
+        let key_char = ev.keystroke.key_char.as_deref();
+        let mods = ev.keystroke.modifiers;
+
+        if self.sidebar_state.rename.is_some() {
+            if !self.is_sidebar_rename_mounted() {
+                self.sidebar_state.rename = None;
+            } else if let Some(ref mut rename) = self.sidebar_state.rename {
+                let outcome = rename.handle_key(key, key_char, mods);
+                match outcome {
+                    RenameKeyOutcome::Consumed => {
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                    RenameKeyOutcome::Commit => {
+                        let key_str = rename.session_key.clone();
+                        let draft = rename.draft.clone();
+                        self.commit_session_rename(&key_str, &draft, cx);
+                        cx.stop_propagation();
+                    }
+                    RenameKeyOutcome::Cancel => {
+                        self.sidebar_state.rename = None;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                    RenameKeyOutcome::Ignored => {}
+                }
+                return;
+            }
+        }
+
+        if let Some(ref mut draft) = self.sidebar_state.new_workspace_draft {
+            if key.eq_ignore_ascii_case("enter") {
+                let name = draft.clone();
+                self.sidebar_state.new_workspace_draft = None;
+                if let Ok(ws) = self
+                    .sidebar_state
+                    .workspace_store
+                    .create_workspace(&name, None)
+                {
+                    self.sidebar_state.active_workspace_id = ws.id;
+                    self.sidebar_state.rename = None;
+                    self.cleanup_unmounted_surface_state();
+                    self.persist_workspace_store_if_enabled();
+                    self.sync_workspace_to_shared(cx);
+                }
+                cx.stop_propagation();
+                cx.notify();
+            } else if key.eq_ignore_ascii_case("escape") {
+                self.sidebar_state.new_workspace_draft = None;
+                cx.stop_propagation();
+                cx.notify();
+            } else if key.eq_ignore_ascii_case("backspace") {
+                draft.pop();
+                cx.stop_propagation();
+                cx.notify();
+            } else if !mods.control && !mods.alt && !mods.platform {
+                if let Some(cs) = key_char {
+                    for ch in cs.chars() {
+                        if !ch.is_control() && draft.chars().count() < MAX_SESSION_TITLE_CHARS {
+                            draft.push(ch);
+                        }
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let now = now_unix_ms();
+        let inputs = self.session_inputs();
+        let active_key = self
+            .selected_session
+            .as_ref()
+            .map(|s| self.session_key_for(s));
+        let layout = self
+            .sidebar_state
+            .workspace_store
+            .compute_sidebar_layout_with_options(
+                &self.sidebar_state.active_workspace_id,
+                self.sidebar_state.active_workspace_view,
+                &inputs,
+                self.sidebar_state.unread_only,
+                active_key.as_deref(),
+                now,
+            );
+        let unread_count = self
+            .sidebar_state
+            .workspace_store
+            .inbox_unread_count_at(&inputs, now);
+        let jump_badges = self.sidebar_state.show_jump_badges;
+        let jump_index_for = |session_key: &str| -> Option<usize> {
+            layout
+                .ctrl_digit_order
+                .iter()
+                .position(|k| k == session_key)
+                .filter(|&i| i < 9)
+                .map(|i| i + 1)
+        };
+
+        if matches!(self.sidebar_state.mode, SidebarMode::Collapsed) {
+            return self
+                .render_collapsed_sidebar(layout, unread_count, jump_badges, now, cx)
+                .into_any_element();
+        }
+
+        let (gpu_label, gpu_safe) = self.active_gpu_summary();
+        let in_starred = self.sidebar_state.active_workspace_id == STARRED_WORKSPACE_ID;
+
+        // Workspace strip pills
+        let mut ws_strip = h_flex().flex_wrap().gap_1().items_center();
+        ws_strip = ws_strip.child(
+            div()
+                .id("ws-pill-starred")
+                .role(Role::Button)
+                .test_support()
+                .px_2()
+                .py_0p5()
+                .rounded(RADIUS_CHIP)
+                .bg(if in_starred {
+                    theme::bg_active_row()
+                } else {
+                    theme::bg_surface()
+                })
+                .border_1()
+                .border_color(if in_starred {
+                    theme::accent_amber()
+                } else {
+                    theme::border_subtle()
+                })
+                .text_xs()
+                .text_color(theme::accent_amber())
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.sidebar_state.active_workspace_id = STARRED_WORKSPACE_ID.to_string();
+                        this.sidebar_state.rename = None;
+                        this.cleanup_unmounted_surface_state();
+                        cx.notify();
+                    }),
+                )
+                .child("★"),
+        );
+
+        for (idx, ws) in self
+            .sidebar_state
+            .workspace_store
+            .visible_workspaces(now)
+            .into_iter()
+            .enumerate()
+        {
+            let active = self.sidebar_state.active_workspace_id == ws.id;
+            let ws_id = ws.id.clone();
+            let dot_color = ws.color.as_deref().and_then(parse_hex_color);
+            ws_strip = ws_strip.child(
+                div()
+                    .id(SharedString::from(format!("ws-pill-{idx}")))
+                    .role(Role::Button)
+                    .test_support()
+                    .px_2()
+                    .py_0p5()
+                    .rounded(RADIUS_CHIP)
+                    .bg(if active {
+                        theme::bg_active_row()
+                    } else {
+                        theme::bg_surface()
+                    })
+                    .border_1()
+                    .border_color(if active {
+                        theme::text_secondary()
+                    } else {
+                        theme::border_subtle()
+                    })
+                    .text_xs()
+                    .text_color(if active {
+                        theme::text_primary()
+                    } else {
+                        theme::text_secondary()
+                    })
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.sidebar_state.active_workspace_id = ws_id.clone();
+                            this.sidebar_state.rename = None;
+                            this.cleanup_unmounted_surface_state();
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .when_some(dot_color, |el, col| {
+                                el.child(
+                                    div()
+                                        .w(px(6.0))
+                                        .h(px(6.0))
+                                        .rounded(RADIUS_CHIP)
+                                        .bg(col),
+                                )
+                            })
+                            .child(ws.name.clone()),
+                    ),
+            );
+        }
+
+        ws_strip = ws_strip.child(
+            div()
+                .id("ws-pill-new")
+                .role(Role::Button)
+                .test_support()
+                .px_2()
+                .py_0p5()
+                .rounded(RADIUS_CHIP)
+                .bg(theme::bg_surface())
+                .border_1()
+                .border_color(theme::border_subtle())
+                .hover(|s| s.bg(theme::bg_hover()))
+                .text_xs()
+                .text_color(theme::text_muted())
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        let next_num = this.sidebar_state.workspace_store.workspaces.len() + 1;
+                        if let Ok(ws) = this
+                            .sidebar_state
+                            .workspace_store
+                            .create_workspace(&format!("Workspace {next_num}"), None)
+                        {
+                            this.sidebar_state.active_workspace_id = ws.id;
+                            this.sidebar_state.rename = None;
+                            this.cleanup_unmounted_surface_state();
+                            this.persist_workspace_store_if_enabled();
+                            this.sync_workspace_to_shared(cx);
+                        }
+                        cx.notify();
+                    }),
+                )
+                .child("+"),
+        );
+
+        // Hosts list (preserved Slice 1 IDs)
+        let mut host_list = v_flex().gap_1();
+        for (idx, host) in self.settings.ssh_hosts.iter().enumerate() {
+            let host_clone = host.clone();
+            let active = self.connected_host.as_deref() == Some(host.name.as_str());
+            host_list = host_list.child(
+                div()
+                    .id(SharedString::from(format!("host-{idx}")))
+                    .px_3()
+                    .py_2()
+                    .rounded(RADIUS_ROW)
+                    .bg(if active {
+                        theme::bg_active_row()
+                    } else {
+                        theme::bg_surface()
+                    })
+                    .border_1()
+                    .border_color(theme::border_subtle())
+                    .hover(|s| s.bg(theme::bg_hover()))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            let target = DaemonTarget::RemoteSsh {
+                                host: host_clone.clone(),
+                                bundled_linux_binary: Self::find_bundled_linux_daemon(),
+                            };
+                            this.connect_to_target(host_clone.name.clone(), target, cx);
+                        }),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_primary())
+                                    .child(host.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .child(host.ssh_target()),
+                            ),
+                    ),
+            );
+        }
+
+        // Sessions scroll contents: Pinned Grid -> Groups -> Recents
+        let mut sessions_content = v_flex().gap_2();
+
+        // 1. Pinned Avatar Tile Grid (suppresses "Pinned" text heading when non-empty)
+        if !self.sidebar_state.workspace_store.pinned_section_collapsed
+            && !layout.pinned_tiles.is_empty()
+        {
+            let mut pin_grid = h_flex()
+                .id("sidebar-pinned-grid")
+                .test_support()
+                .flex_wrap()
+                .justify_center()
+                .gap(px(4.0));
+            for (idx, row) in layout.pinned_tiles.iter().enumerate() {
+                let is_selected = active_key.as_deref() == Some(row.session_key.as_str());
+                let badge = if jump_badges {
+                    jump_index_for(&row.session_key)
+                } else {
+                    None
+                };
+                let is_renaming = self
+                    .sidebar_state
+                    .rename
+                    .as_ref()
+                    .is_some_and(|r| r.session_key == row.session_key);
+                let rename_draft = if is_renaming {
+                    self.sidebar_state
+                        .rename
+                        .as_ref()
+                        .map(|r| format!("{}|", r.draft))
+                } else {
+                    None
+                };
+                let key_left = row.session_key.clone();
+                let key_right = row.session_key.clone();
+
+                pin_grid = pin_grid.child(
+                    div()
+                        .id(SharedString::from(format!("sidebar-pin-{idx}")))
+                        .role(Role::Button)
+                        .test_support()
+                        .w(px(80.0))
+                        .h(px(84.0))
+                        .p_1p5()
+                        .rounded(RADIUS_ROW)
+                        .bg(if is_selected {
+                            theme::bg_active_row()
+                        } else {
+                            theme::bg_surface()
+                        })
+                        .border_1()
+                        .border_color(if is_selected {
+                            theme::text_secondary()
+                        } else {
+                            theme::border_subtle()
+                        })
+                        .hover(|s| s.bg(theme::bg_hover()))
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                if let Some(sess) = this.find_session_by_key(&key_left) {
+                                    this.open_session_with_tracking(sess, false, cx);
+                                }
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, _, window, cx| {
+                                this.open_palette_tab_context(key_right.clone(), window, cx);
+                            }),
+                        )
+                        .child(
+                            v_flex()
+                                .size_full()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    h_flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .w(px(34.0))
+                                                .h(px(34.0))
+                                                .rounded(RADIUS_CHIP)
+                                                .bg(Self::agent_color(row.agent))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .text_xs()
+                                                .text_color(theme::bg_canvas())
+                                                .child(row.agent.glyph()),
+                                        )
+                                        .when_some(badge, |el, n| {
+                                            el.child(
+                                                div()
+                                                    .px_1()
+                                                    .rounded(RADIUS_CHIP)
+                                                    .bg(theme::bg_canvas())
+                                                    .text_xs()
+                                                    .text_color(theme::accent_blue())
+                                                    .child(n.to_string()),
+                                            )
+                                        }),
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .items_center()
+                                        .when(row.favorite, |el| {
+                                            el.child(
+                                                div()
+                                                    .w(px(5.0))
+                                                    .h(px(5.0))
+                                                    .rounded(RADIUS_CHIP)
+                                                    .bg(theme::accent_amber()),
+                                            )
+                                        })
+                                        .when(row.working, |el| {
+                                            el.child(
+                                                div()
+                                                    .w(px(5.0))
+                                                    .h(px(5.0))
+                                                    .rounded(RADIUS_CHIP)
+                                                    .bg(theme::accent_green()),
+                                            )
+                                        })
+                                        .when(row.unread, |el| {
+                                            el.child(
+                                                div()
+                                                    .w(px(5.0))
+                                                    .h(px(5.0))
+                                                    .rounded(RADIUS_CHIP)
+                                                    .bg(theme::accent_blue()),
+                                            )
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .text_xs()
+                                        .font_weight(if row.unread {
+                                            FontWeight::SEMIBOLD
+                                        } else {
+                                            FontWeight::NORMAL
+                                        })
+                                        .text_color(theme::text_primary())
+                                        .truncate()
+                                        .child(rename_draft.unwrap_or_else(|| row.title.clone())),
+                                ),
+                        ),
+                );
+            }
+            sessions_content = sessions_content.child(pin_grid);
+        }
+
+        // 2. Collapsible Named Groups (Ctrl+G)
+        for (g_idx, gv) in layout.groups.iter().enumerate() {
+            let gid = gv.group.id.clone();
+            let collapsed = gv.group.collapsed;
+            let dot_color = gv.group.color.as_deref().and_then(parse_hex_color);
+            let mut grp_box = v_flex().gap_1().child(
+                div()
+                    .id(SharedString::from(format!("sidebar-group-{g_idx}")))
+                    .role(Role::Button)
+                    .test_support()
+                    .px_2()
+                    .py_1()
+                    .rounded(RADIUS_ROW)
+                    .hover(|s| s.bg(theme::bg_hover()))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.sidebar_state
+                                .workspace_store
+                                .toggle_group_collapsed(&gid);
+                            this.sidebar_state.rename = None;
+                            this.cleanup_unmounted_surface_state();
+                            this.persist_workspace_store_if_enabled();
+                            this.sync_workspace_to_shared(cx);
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .child(if collapsed { "▸" } else { "▾" }),
+                                    )
+                                    .when_some(dot_color, |el, col| {
+                                        el.child(
+                                            div()
+                                                .w(px(6.0))
+                                                .h(px(6.0))
+                                                .rounded(RADIUS_CHIP)
+                                                .bg(col),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme::text_secondary())
+                                            .child(gv.group.name.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .child(gv.items.len().to_string()),
+                            ),
+                    ),
+            );
+
+            if !collapsed {
+                for (m_idx, row) in gv.items.iter().enumerate() {
+                    let badge = if jump_badges {
+                        jump_index_for(&row.session_key)
+                    } else {
+                        None
+                    };
+                    grp_box = grp_box.child(self.render_sidebar_session_row(
+                        SharedString::from(format!("sidebar-group-{g_idx}-item-{m_idx}")),
+                        row,
+                        active_key.as_deref() == Some(row.session_key.as_str()),
+                        badge,
+                        in_starred,
+                        cx,
+                    ));
+                }
+            }
+            sessions_content = sessions_content.child(grp_box);
+        }
+
+        // 3. Recents Section
+        let mut recents_section = v_flex().gap_1().child(
+            div()
+                .id("sidebar-recents-header")
+                .role(Role::Button)
+                .test_support()
+                .px_1()
+                .py_0p5()
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        let currently_collapsed = this.sidebar_state.recents_collapsed
+                            || this.sidebar_state.workspace_store.recents_section_collapsed;
+                        let next = !currently_collapsed;
+                        this.sidebar_state.recents_collapsed = next;
+                        this.sidebar_state.workspace_store.recents_section_collapsed = next;
+                        this.sidebar_state.rename = None;
+                        this.cleanup_unmounted_surface_state();
+                        this.persist_workspace_store_if_enabled();
+                        this.sync_workspace_to_shared(cx);
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::text_muted())
+                                .child(format!("RECENTS ({})", layout.recents.len())),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::text_muted())
+                                .child(
+                                    if self.sidebar_state.recents_collapsed
+                                        || self.sidebar_state.workspace_store.recents_section_collapsed
+                                    {
+                                        "▸"
+                                    } else {
+                                        "▾"
+                                    },
+                                ),
+                        ),
+                ),
+        );
+
+        if !self.sidebar_state.recents_collapsed
+            && !self.sidebar_state.workspace_store.recents_section_collapsed
+        {
+            if self.sessions.is_empty() {
+                recents_section = recents_section.child(
+                    div()
+                        .px_3()
+                        .py_3()
+                        .rounded(RADIUS_ROW)
+                        .bg(theme::bg_surface())
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child("Connect to a VPS or local daemon to stream Claude, Antigravity & Codex chats."),
+                );
+            } else if layout.recents.is_empty()
+                && layout.pinned_tiles.is_empty()
+                && layout.groups.is_empty()
+            {
+                recents_section = recents_section.child(
+                    div()
+                        .px_3()
+                        .py_3()
+                        .rounded(RADIUS_ROW)
+                        .bg(theme::bg_surface())
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(if self.sidebar_state.unread_only {
+                            "No unread sessions in this workspace."
+                        } else if in_starred {
+                            "Star a session with Alt+S to pin it into Starred."
+                        } else {
+                            "No sessions in this workspace yet."
+                        }),
+                );
+            } else {
+                for (idx, row) in layout.recents.iter().enumerate() {
+                    let badge = if jump_badges {
+                        jump_index_for(&row.session_key)
+                    } else {
+                        None
+                    };
+                    recents_section = recents_section.child(self.render_sidebar_session_row(
+                        SharedString::from(format!("session-{idx}")),
+                        row,
+                        active_key.as_deref() == Some(row.session_key.as_str()),
+                        badge,
+                        in_starred,
+                        cx,
+                    ));
+                }
+            }
+        }
+        sessions_content = sessions_content.child(recents_section);
+
+        v_flex()
+            .id("sidebar-open")
+            .test_support()
+            .w(px(280.0))
+            .h_full()
+            .bg(theme::bg_sidebar())
+            .border_r_1()
+            .border_color(theme::border_subtle())
+            .p_3()
+            .gap_2p5()
+            .when_some(self.sidebar_state.focus_handle.as_ref(), |el, fh| {
+                el.track_focus(fh)
+            })
+            .on_action(cx.listener(|this, _: &CloseOverlay, window, cx| {
+                if this.table_modal_state.is_open()
+                    || this.active_modal != ActiveModal::None
+                    || this.has_mounted_chat_overlay()
+                {
+                    cx.propagate();
+                    return;
+                }
+                if this.is_sidebar_rename_mounted() {
+                    this.sidebar_state.rename = None;
+                    this.focus_active_surface_default(window, cx);
+                    cx.notify();
+                } else if this.is_sidebar_workspace_draft_mounted() {
+                    this.sidebar_state.new_workspace_draft = None;
+                    this.focus_active_surface_default(window, cx);
+                    cx.notify();
+                } else {
+                    if this.sidebar_state.rename.is_some() {
+                        this.sidebar_state.rename = None;
+                    }
+                    cx.propagate();
+                }
+            }))
+            .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, _, cx| {
+                this.handle_modifiers_changed(ev, cx);
+            }))
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                let had_rename = this.sidebar_state.rename.is_some();
+                let had_draft = this.sidebar_state.new_workspace_draft.is_some();
+                this.handle_sidebar_keydown(ev, cx);
+                let ended = (had_rename && this.sidebar_state.rename.is_none())
+                    || (had_draft && this.sidebar_state.new_workspace_draft.is_none());
+                if ended {
+                    this.focus_active_surface_default(window, cx);
+                }
+            }))
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .child(
+                        div()
+                            .px_3()
+                            .py_1p5()
+                            .rounded(RADIUS_CHIP)
+                            .bg(theme::bg_surface())
+                            .border_1()
+                            .border_color(theme::border_subtle())
+                            .text_sm()
+                            .text_color(theme::text_primary())
+                            .child("Multibot"),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("open-palette-btn")
+                                    .xsmall()
+                                    .label("⌘K")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_palette(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("new-window")
+                                    .xsmall()
+                                    .label("+")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.open_extra_window(cx);
+                                    })),
+                            )
+                            .when(self.main_surface != MainSurface::Inbox, |el| {
+                                el.child(
+                                    div()
+                                        .id("sidebar-inbox-btn")
+                                        .role(Role::Button)
+                                        .test_support()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded(RADIUS_CHIP)
+                                        .bg(theme::bg_surface())
+                                        .border_1()
+                                        .border_color(if unread_count > 0 {
+                                            theme::accent_blue()
+                                        } else {
+                                            theme::border_subtle()
+                                        })
+                                        .hover(|s| s.bg(theme::bg_hover()))
+                                        .text_xs()
+                                        .text_color(if unread_count > 0 {
+                                            theme::accent_blue()
+                                        } else {
+                                            theme::text_secondary()
+                                        })
+                                        .cursor_pointer()
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                if this.table_modal_state.is_open() {
+                                                    this.table_modal_state.close();
+                                                }
+                                                this.active_modal = ActiveModal::None;
+                                                this.set_main_surface(MainSurface::Inbox);
+                                                this.focus_inbox(window, cx);
+                                                cx.notify();
+                                            }),
+                                        )
+                                        .child(if unread_count > 0 {
+                                            format!("Inbox {unread_count}")
+                                        } else {
+                                            "Inbox".to_string()
+                                        }),
+                                )
+                            }),
+                    ),
+            )
+            .child(ws_strip)
+            .when(self.sidebar_state.unread_only, |el| {
+                el.child(
+                    div()
+                        .id("sidebar-unread-only-pill")
+                        .role(Role::Button)
+                        .test_support()
+                        .px_2p5()
+                        .py_1()
+                        .rounded(RADIUS_CHIP)
+                        .bg(theme::bg_surface())
+                        .border_1()
+                        .border_color(theme::accent_blue())
+                        .text_xs()
+                        .text_color(theme::accent_blue())
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.toggle_unread_only(cx);
+                            }),
+                        )
+                        .child("UNREAD ONLY · ×"),
+                )
+            })
+            .child(
+                v_flex()
+                    .gap_1p5()
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .id("sidebar-hosts-header")
+                                    .role(Role::Button)
+                                    .test_support()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .cursor_pointer()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.sidebar_state.hosts_collapsed =
+                                                !this.sidebar_state.hosts_collapsed;
+                                            cx.notify();
+                                        }),
+                                    )
+                                    .child(if self.sidebar_state.hosts_collapsed {
+                                        "HOSTS ▸"
+                                    } else {
+                                        "HOSTS ▾"
+                                    }),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .child(
+                                        Button::new("connect-local")
+                                            .xsmall()
+                                            .label("Local")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                if let Some(bin) = Self::find_local_daemon() {
+                                                    this.connect_to_target(
+                                                        "localhost".into(),
+                                                        DaemonTarget::LocalBinary(bin),
+                                                        cx,
+                                                    );
+                                                } else {
+                                                    this.notice = Some(
+                                                        "No local multibotd beside multibot.exe — connect a VPS host in Settings (Ctrl+,)."
+                                                            .into(),
+                                                    );
+                                                    cx.notify();
+                                                }
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("import-zigshel-sidebar")
+                                            .xsmall()
+                                            .label("Import")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.import_from_zigshel(cx);
+                                            })),
+                                    ),
+                            ),
+                    )
+                    .when(!self.sidebar_state.hosts_collapsed, |el| el.child(host_list)),
+            )
+            .child(
+                div()
+                    .id("sessions-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(sessions_content),
+            )
+            .when_some(self.render_update_card(cx), |el, card| el.child(card))
+            .child(
+                div()
+                    .id("gpu-status-card")
+                    .role(Role::Button)
+                    .test_support()
+                    .px_3()
+                    .py_2()
+                    .rounded(RADIUS_ROW)
+                    .border_1()
+                    .border_color(if gpu_safe {
+                        theme::accent_green()
+                    } else {
+                        theme::accent_amber()
+                    })
+                    .bg(theme::bg_surface())
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            if this.table_modal_state.is_open() {
+                                this.table_modal_state.close();
+                            }
+                            this.set_main_surface(MainSurface::Settings);
+                            this.active_modal = ActiveModal::None;
+                            window.focus(&this.root_focus_handle, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(if gpu_safe {
+                                        theme::accent_green()
+                                    } else {
+                                        theme::accent_amber()
+                                    })
+                                    .child(format!("GPU: {gpu_label}")),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .child(format!(
+                                        "v{} · {} · {}",
+                                        multibot_proto::build_version(),
+                                        self.footprint_label,
+                                        self.connection_status
+                                    )),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_sidebar_session_row(
+        &self,
+        id: SharedString,
+        row: &SidebarRow,
+        is_selected: bool,
+        jump_digit: Option<usize>,
+        in_starred: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let key_left = row.session_key.clone();
+        let key_right = row.session_key.clone();
+        let is_renaming = self
+            .sidebar_state
+            .rename
+            .as_ref()
+            .is_some_and(|r| r.session_key == row.session_key);
+        let rename_draft = if is_renaming {
+            self.sidebar_state
+                .rename
+                .as_ref()
+                .map(|r| format!("{}|", r.draft))
+        } else {
+            None
+        };
+        let subtitle = if in_starred {
+            Some(row.workspace_name.clone())
+        } else {
+            row.cwd.clone()
+        };
+
+        div()
+            .id(id)
+            .role(Role::Button)
+            .test_support()
+            .px_2p5()
+            .py_2()
+            .rounded(RADIUS_ROW)
+            .bg(if is_selected {
+                theme::bg_active_row()
+            } else {
+                theme::bg_sidebar()
+            })
+            .hover(|s| s.bg(theme::bg_hover()))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    if let Some(sess) = this.find_session_by_key(&key_left) {
+                        this.open_session_with_tracking(sess, false, cx);
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _, window, cx| {
+                    this.open_palette_tab_context(key_right.clone(), window, cx);
+                }),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2p5()
+                    .child(
+                        div()
+                            .w(px(26.0))
+                            .h(px(26.0))
+                            .rounded(RADIUS_CHIP)
+                            .bg(Self::agent_color(row.agent))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .text_color(theme::bg_canvas())
+                            .child(row.agent.glyph()),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(if let Some(draft_text) = rename_draft {
+                                div()
+                                    .id("sidebar-rename-input")
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded(px(6.0))
+                                    .bg(theme::bg_surface())
+                                    .border_1()
+                                    .border_color(theme::accent_blue())
+                                    .text_sm()
+                                    .text_color(theme::text_primary())
+                                    .truncate()
+                                    .child(draft_text)
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .text_sm()
+                                    .font_weight(if row.unread {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .text_color(if row.muted {
+                                        theme::text_muted()
+                                    } else {
+                                        theme::text_primary()
+                                    })
+                                    .truncate()
+                                    .child(row.title.clone())
+                                    .into_any_element()
+                            })
+                            .when_some(subtitle, |el, sub| {
+                                el.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .truncate()
+                                        .child(sub),
+                                )
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .when(row.favorite, |el| {
+                                el.child(
+                                    div()
+                                        .w(px(6.0))
+                                        .h(px(6.0))
+                                        .rounded(RADIUS_CHIP)
+                                        .bg(theme::accent_amber()),
+                                )
+                            })
+                            .when(row.working, |el| {
+                                el.child(
+                                    div()
+                                        .w(px(7.0))
+                                        .h(px(7.0))
+                                        .rounded(RADIUS_CHIP)
+                                        .bg(theme::accent_green()),
+                                )
+                            })
+                            .when(row.unread, |el| {
+                                el.child(
+                                    div()
+                                        .w(px(7.0))
+                                        .h(px(7.0))
+                                        .rounded(RADIUS_CHIP)
+                                        .bg(theme::accent_blue()),
+                                )
+                            })
+                            .when_some(jump_digit, |el, digit| {
+                                el.child(
+                                    div()
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded(RADIUS_CHIP)
+                                        .bg(theme::bg_surface())
+                                        .text_xs()
+                                        .text_color(theme::accent_blue())
+                                        .child(digit.to_string()),
+                                )
+                            }),
+                    ),
+            )
+    }
+
+    fn render_collapsed_sidebar(
+        &self,
+        layout: multibot_core::workspaces::SidebarLayout,
+        unread_count: usize,
+        jump_badges: bool,
+        now: i64,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (_, gpu_safe) = self.active_gpu_summary();
+        let active_key = self
+            .selected_session
+            .as_ref()
+            .map(|s| self.session_key_for(s));
+
+        // Derive 1..9 jump badges from layout.ctrl_digit_order (matching Open sidebar & Ctrl+1..9)
+        let ctrl_digit_order = layout.ctrl_digit_order;
+        let jump_index_for = |session_key: &str| -> Option<usize> {
+            ctrl_digit_order
+                .iter()
+                .position(|k| k == session_key)
+                .filter(|&i| i < 9)
+                .map(|i| i + 1)
+        };
+
+        // Flatten visible rail avatars: non-collapsed pinned -> non-collapsed groups -> non-collapsed recents
+        let mut rail_rows: Vec<SidebarRow> = Vec::new();
+        if !self.sidebar_state.workspace_store.pinned_section_collapsed {
+            rail_rows.extend(layout.pinned_tiles);
+        }
+        for gv in layout.groups {
+            if !gv.group.collapsed {
+                rail_rows.extend(gv.items);
+            }
+        }
+        if !self.sidebar_state.recents_collapsed
+            && !self.sidebar_state.workspace_store.recents_section_collapsed
+        {
+            rail_rows.extend(layout.recents);
+        }
+
+        let mut ws_rail = v_flex().gap_1().items_center();
+        let in_starred = self.sidebar_state.active_workspace_id == STARRED_WORKSPACE_ID;
+        ws_rail = ws_rail.child(
+            div()
+                .id("ws-pill-starred")
+                .role(Role::Button)
+                .test_support()
+                .w(px(28.0))
+                .h(px(24.0))
+                .rounded(RADIUS_CHIP)
+                .bg(if in_starred {
+                    theme::bg_active_row()
+                } else {
+                    theme::bg_surface()
+                })
+                .border_1()
+                .border_color(if in_starred {
+                    theme::accent_amber()
+                } else {
+                    theme::border_subtle()
+                })
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .text_color(theme::accent_amber())
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.sidebar_state.active_workspace_id = STARRED_WORKSPACE_ID.to_string();
+                        this.sidebar_state.rename = None;
+                        this.cleanup_unmounted_surface_state();
+                        cx.notify();
+                    }),
+                )
+                .child("★"),
+        );
+
+        for (idx, ws) in self
+            .sidebar_state
+            .workspace_store
+            .visible_workspaces(now)
+            .into_iter()
+            .take(5)
+            .enumerate()
+        {
+            let active = self.sidebar_state.active_workspace_id == ws.id;
+            let ws_id = ws.id.clone();
+            let initial: String = ws
+                .name
+                .chars()
+                .next()
+                .map(|c| c.to_ascii_uppercase().to_string())
+                .unwrap_or_else(|| "W".into());
+            let accent = ws
+                .color
+                .as_deref()
+                .and_then(parse_hex_color)
+                .unwrap_or_else(theme::text_secondary);
+            ws_rail = ws_rail.child(
+                div()
+                    .id(SharedString::from(format!("ws-pill-{idx}")))
+                    .role(Role::Button)
+                    .test_support()
+                    .w(px(28.0))
+                    .h(px(24.0))
+                    .rounded(RADIUS_CHIP)
+                    .bg(if active {
+                        theme::bg_active_row()
+                    } else {
+                        theme::bg_surface()
+                    })
+                    .border_1()
+                    .border_color(if active {
+                        accent
+                    } else {
+                        theme::border_subtle()
+                    })
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(if active {
+                        theme::text_primary()
+                    } else {
+                        theme::text_muted()
+                    })
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.sidebar_state.active_workspace_id = ws_id.clone();
+                            this.sidebar_state.rename = None;
+                            this.cleanup_unmounted_surface_state();
+                            cx.notify();
+                        }),
+                    )
+                    .child(initial),
+            );
+        }
+
+        let mut avatars = v_flex().gap_1p5().items_center();
+        for (idx, row) in rail_rows.iter().enumerate() {
+            let is_selected = active_key.as_deref() == Some(row.session_key.as_str());
+            let key_left = row.session_key.clone();
+            let key_right = row.session_key.clone();
+            let badge = if jump_badges {
+                jump_index_for(&row.session_key).map(|n| n.to_string())
+            } else {
+                None
+            };
+            let dot_color = if row.working {
+                Some(theme::accent_green())
+            } else if row.unread {
+                Some(theme::accent_blue())
+            } else if row.favorite {
+                Some(theme::accent_amber())
+            } else {
+                None
+            };
+
+            avatars = avatars.child(
+                div()
+                    .id(SharedString::from(format!("rail-session-{idx}")))
+                    .role(Role::Button)
+                    .test_support()
+                    .relative()
+                    .w(px(34.0))
+                    .h(px(34.0))
+                    .rounded(RADIUS_CHIP)
+                    .bg(Self::agent_color(row.agent))
+                    .border_1()
+                    .border_color(if is_selected {
+                        theme::text_primary()
+                    } else {
+                        theme::bg_sidebar()
+                    })
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(theme::bg_canvas())
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            if let Some(sess) = this.find_session_by_key(&key_left) {
+                                this.open_session_with_tracking(sess, false, cx);
+                            }
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _, window, cx| {
+                            this.open_palette_tab_context(key_right.clone(), window, cx);
+                        }),
+                    )
+                    .child(badge.unwrap_or_else(|| row.agent.glyph().to_string()))
+                    .when_some(dot_color, |el, col| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .right_0()
+                                .bottom_0()
+                                .w(px(8.0))
+                                .h(px(8.0))
+                                .rounded(RADIUS_CHIP)
+                                .bg(col)
+                                .border_1()
+                                .border_color(theme::bg_sidebar()),
+                        )
+                    }),
+            );
+        }
+
+        v_flex()
+            .id("sidebar-rail")
+            .test_support()
+            .w(px(56.0))
+            .h_full()
+            .bg(theme::bg_sidebar())
+            .border_r_1()
+            .border_color(theme::border_subtle())
+            .py_2()
+            .px_1p5()
+            .gap_2()
+            .items_center()
+            .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, _, cx| {
+                this.handle_modifiers_changed(ev, cx);
+            }))
+            .child(
+                Button::new("open-palette-btn")
+                    .xsmall()
+                    .label("⌘K")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_palette(window, cx);
+                    })),
+            )
+            .when(self.main_surface != MainSurface::Inbox, |el| {
+                el.child(
+                    div()
+                        .id("sidebar-inbox-btn")
+                        .role(Role::Button)
+                        .test_support()
+                        .w(px(32.0))
+                        .h(px(26.0))
+                        .rounded(RADIUS_CHIP)
+                        .bg(theme::bg_surface())
+                        .border_1()
+                        .border_color(if unread_count > 0 {
+                            theme::accent_blue()
+                        } else {
+                            theme::border_subtle()
+                        })
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_xs()
+                        .text_color(if unread_count > 0 {
+                            theme::accent_blue()
+                        } else {
+                            theme::text_muted()
+                        })
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                cx.stop_propagation();
+                                if this.table_modal_state.is_open() {
+                                    this.table_modal_state.close();
+                                }
+                                this.active_modal = ActiveModal::None;
+                                this.set_main_surface(MainSurface::Inbox);
+                                this.focus_inbox(window, cx);
+                                cx.notify();
+                            }),
+                        )
+                        .child(if unread_count > 0 {
+                            unread_count.to_string()
+                        } else {
+                            "In".to_string()
+                        }),
+                )
+            })
+            .child(ws_rail)
+            .child(
+                div()
+                    .id("sessions-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(avatars),
+            )
+            // Update card intentionally omitted in Collapsed rail mode to prevent overflow.
+            .child(
+                div()
+                    .id("gpu-status-card")
+                    .role(Role::Button)
+                    .test_support()
+                    .w(px(28.0))
+                    .h(px(28.0))
+                    .rounded(RADIUS_CHIP)
+                    .bg(theme::bg_surface())
+                    .border_1()
+                    .border_color(if gpu_safe {
+                        theme::accent_green()
+                    } else {
+                        theme::accent_amber()
+                    })
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(if gpu_safe {
+                        theme::accent_green()
+                    } else {
+                        theme::accent_amber()
+                    })
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            if this.table_modal_state.is_open() {
+                                this.table_modal_state.close();
+                            }
+                            this.set_main_surface(MainSurface::Settings);
+                            this.active_modal = ActiveModal::None;
+                            window.focus(&this.root_focus_handle, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .child("G"),
+            )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit::{AppContext, Entity, TestAppContext, WindowOptions, test::TestWindowExt};
+    use multibot_core::workspaces::canonicalize_session_title;
+    use multibot_proto::AgentKind;
+    use std::sync::Arc;
+
+    fn sample_sessions() -> Vec<SessionSummary> {
+        vec![
+            SessionSummary {
+                id: "s1".into(),
+                agent: AgentKind::Claude,
+                title: "Pinned Chat".into(),
+                cwd: Some("/repo/app".into()),
+                source_path: "/tmp/s1.jsonl".into(),
+                updated_at_ms: 5_000,
+                working: true,
+                needs_attention: true,
+                last_assistant_id: Some("a1".into()),
+                last_assistant_ms: Some(5_000),
+                ..Default::default()
+            },
+            SessionSummary {
+                id: "s2".into(),
+                agent: AgentKind::Codex,
+                title: "Grouped Chat".into(),
+                cwd: Some("/repo/api".into()),
+                source_path: "/tmp/s2.jsonl".into(),
+                updated_at_ms: 4_000,
+                needs_attention: true,
+                last_assistant_id: Some("a2".into()),
+                last_assistant_ms: Some(4_000),
+                ..Default::default()
+            },
+            SessionSummary {
+                id: "s3".into(),
+                agent: AgentKind::Antigravity,
+                title: "Recent Read Chat".into(),
+                cwd: Some("/repo/ui".into()),
+                source_path: "/tmp/s3.jsonl".into(),
+                updated_at_ms: 3_000,
+                needs_attention: false,
+                ..Default::default()
+            },
+        ]
+    }
+
+    fn open_view(cx: &mut TestAppContext) -> (gpui_kit::AnyWindowHandle, Entity<MultibotView>) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::theme::apply_multibot_dark_theme(cx);
+            crate::bind_multibot_keys(cx);
+        });
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
+                cx.new(|cx| MultibotView::new(rt, window, cx))
+            })
+            .unwrap()
+        })
+    }
+
+    #[test]
+    fn sidebar_3_state_cycle_and_labels() {
+        let mut state = SidebarState::default();
+        assert_eq!(state.mode, SidebarMode::Open);
+        assert!(state.is_shown());
+        assert_eq!(state.toggle_button_label(), "Sidebar");
+
+        state.cycle();
+        assert_eq!(state.mode, SidebarMode::Collapsed);
+        assert!(state.is_shown());
+        assert_eq!(state.toggle_button_label(), "Rail");
+
+        state.cycle();
+        assert_eq!(state.mode, SidebarMode::Hidden);
+        assert!(!state.is_shown());
+        assert_eq!(state.toggle_button_label(), "Show Sidebar");
+
+        state.cycle();
+        assert_eq!(state.mode, SidebarMode::Open);
+        assert!(state.is_shown());
+    }
+
+    #[test]
+    fn jump_badges_are_altgr_safe() {
+        assert!(should_show_jump_badges(Modifiers {
+            control: true,
+            ..Default::default()
+        }));
+        // AltGr = Ctrl+Alt -> MUST return false
+        assert!(!should_show_jump_badges(Modifiers {
+            control: true,
+            alt: true,
+            ..Default::default()
+        }));
+        assert!(!should_show_jump_badges(Modifiers {
+            control: true,
+            shift: true,
+            ..Default::default()
+        }));
+        assert!(!should_show_jump_badges(Modifiers {
+            control: true,
+            platform: true,
+            ..Default::default()
+        }));
+        assert!(!should_show_jump_badges(Modifiers::default()));
+    }
+
+    #[test]
+    fn inline_rename_handles_keys_and_canonical_rules() {
+        let mut r = InlineRenameState::new("local:claude:s1".into(), "s1".into(), "Old".into());
+        assert_eq!(
+            r.handle_key("backspace", None, Modifiers::default()),
+            RenameKeyOutcome::Consumed
+        );
+        assert_eq!(r.draft, "Ol");
+        assert_eq!(
+            r.handle_key("k", Some("k"), Modifiers::default()),
+            RenameKeyOutcome::Consumed
+        );
+        assert_eq!(r.draft, "Olk");
+        assert_eq!(
+            r.handle_key("enter", None, Modifiers::default()),
+            RenameKeyOutcome::Commit
+        );
+        assert_eq!(
+            r.handle_key("escape", None, Modifiers::default()),
+            RenameKeyOutcome::Cancel
+        );
+
+        // Blank rejected, >63 Unicode chars capped
+        assert_eq!(canonicalize_session_title("   "), None);
+        let long = "日".repeat(80);
+        assert_eq!(canonicalize_session_title(&long).unwrap().chars().count(), 63);
+    }
+
+    #[gpui_kit::test]
+    fn renders_pinned_groups_recents_and_cycles_three_modes(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.sessions = sample_sessions();
+                let k1 = v.session_key_for(&v.sessions[0]);
+                let k2 = v.session_key_for(&v.sessions[1]);
+                v.sidebar_state.workspace_store.toggle_pin(&k1, false);
+                v.sidebar_state.workspace_store.toggle_favorite(&k1);
+                v.sidebar_state.workspace_store.toggle_group_for_session(
+                    &k2,
+                    DEFAULT_WORKSPACE_ID,
+                    None,
+                    "Backend",
+                );
+                v.sidebar_state.unread_only = true;
+                cx.notify();
+            });
+            window.render_frame(cx);
+
+            // Pinned grid rendered, group rendered, unread-only pill rendered
+            assert!(window.try_find("sidebar-pinned-grid").is_some());
+            assert!(window.try_find("sidebar-group-0").is_some());
+            assert!(window.try_find("sidebar-unread-only-pill").is_some());
+
+            // Toggle group collapse and turn off unread-only
+            window.click("sidebar-group-0", cx);
+            window.render_frame(cx);
+            window.click("sidebar-unread-only-pill", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("sidebar-unread-only-pill").is_none());
+
+            // Switch to Starred workspace and create a new workspace
+            window.click("ws-pill-starred", cx);
+            window.render_frame(cx);
+            window.click("ws-pill-new", cx);
+            window.render_frame(cx);
+
+            // Cycle Open -> Collapsed -> Hidden -> Open
+            window.click("toggle-sidebar-btn", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("sidebar-rail").is_some());
+            assert!(window.try_find("gpu-status-card").is_some());
+
+            window.click("toggle-sidebar-btn", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("sidebar-rail").is_none());
+            assert!(window.try_find("sidebar-open").is_none());
+
+            window.click("toggle-sidebar-btn", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("sidebar-open").is_some());
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn inline_rename_consumes_printable_keys_at_63_char_cap() {
+        let mut r = InlineRenameState::new("k".into(), "s1".into(), "a".repeat(63));
+        assert_eq!(
+            r.handle_key("q", Some("q"), Modifiers::default()),
+            RenameKeyOutcome::Consumed
+        );
+        assert_eq!(r.draft.chars().count(), 63);
+        assert_eq!(
+            r.handle_key("j", None, Modifiers::default()),
+            RenameKeyOutcome::Consumed
+        );
+        assert_eq!(
+            r.handle_key("e", Some("日"), Modifiers::default()),
+            RenameKeyOutcome::Consumed
+        );
+        // Ctrl chord is still Ignored so system shortcuts can work
+        assert_eq!(
+            r.handle_key(
+                "k",
+                None,
+                Modifiers {
+                    control: true,
+                    ..Default::default()
+                }
+            ),
+            RenameKeyOutcome::Ignored
+        );
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_g_collapses_group_without_ungrouping_and_collapsed_rail_matches_ctrl_digit_order(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.sessions = sample_sessions();
+                let k1 = v.session_key_for(&v.sessions[0]);
+                let k2 = v.session_key_for(&v.sessions[1]);
+                let k3 = v.session_key_for(&v.sessions[2]);
+                v.selected_session = Some(v.sessions[2].clone());
+
+                // Ungrouped session: toggle_active_group is a no-op
+                v.toggle_active_group(cx);
+                assert!(v.sidebar_state.workspace_store.groups.is_empty());
+
+                // Group s1 & s2; select s1; Ctrl+G collapses group without removing membership
+                let gid = v
+                    .sidebar_state
+                    .workspace_store
+                    .toggle_group_for_session(&k1, DEFAULT_WORKSPACE_ID, None, "Team")
+                    .unwrap();
+                v.sidebar_state.workspace_store.toggle_group_for_session(
+                    &k2,
+                    DEFAULT_WORKSPACE_ID,
+                    Some(&gid),
+                    "Team",
+                );
+                v.selected_session = Some(v.sessions[0].clone());
+                v.toggle_active_group(cx);
+                assert!(
+                    v.sidebar_state
+                        .workspace_store
+                        .groups
+                        .iter()
+                        .find(|g| g.id == gid)
+                        .unwrap()
+                        .collapsed
+                );
+                assert_eq!(
+                    v.sidebar_state.workspace_store.session_meta[&k1]
+                        .group_id
+                        .as_deref(),
+                    Some(gid.as_str())
+                );
+
+                // In Collapsed rail with jump badges ON, only s3 is visible with badge "1"
+                v.sidebar_state.set_mode(SidebarMode::Collapsed);
+                v.sidebar_state.show_jump_badges = true;
+                let _ = k3;
+                cx.notify();
+            });
+            window.render_frame(cx);
+
+            assert!(window.try_find("rail-session-0").is_some());
+            assert!(window.try_find("rail-session-1").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn sidebar_rename_focus_and_close_overlay_cancels_rename_without_closing_inbox(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.sessions = sample_sessions();
+                v.main_surface = MainSurface::Inbox;
+                let k1 = v.session_key_for(&v.sessions[0]);
+                v.start_sidebar_rename_with_window(k1, window, cx);
+            });
+            window.render_frame(cx);
+            assert!(view.read_with(cx, |v, _| v.sidebar_state.rename.is_some()));
+
+            // Dispatch CloseOverlay (Escape) while sidebar focus handle is focused
+            let fh = view.read_with(cx, |v, _| v.sidebar_state.focus_handle.clone().unwrap());
+            fh.dispatch_action(&CloseOverlay, window, cx);
+            window.render_frame(cx);
+
+            // Rename is canceled, and Inbox remains open!
+            let (renaming, surface) =
+                view.read_with(cx, |v, _| (v.sidebar_state.rename.is_some(), v.main_surface));
+            assert!(!renaming);
+            assert_eq!(surface, MainSurface::Inbox);
+
+            // Second CloseOverlay propagates to root and closes Inbox
+            fh.dispatch_action(&CloseOverlay, window, cx);
+            window.render_frame(cx);
+            assert_eq!(
+                view.read_with(cx, |v, _| v.main_surface),
+                MainSurface::Chat
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn sidebar_recents_sync_pinned_collapse_and_modal_precedence(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            // (a) Persisted recents_section_collapsed = true while recents_collapsed = false:
+            // a SINGLE click on sidebar-recents-header must expand Recents cleanly.
+            // (b) pinned_section_collapsed = true hides Open sidebar's pinned tile grid.
+            view.update(cx, |v, cx| {
+                v.sessions = sample_sessions();
+                let k1 = v.session_key_for(&v.sessions[0]);
+                v.sidebar_state.workspace_store.toggle_pin(&k1, false);
+                v.sidebar_state.workspace_store.recents_section_collapsed = true;
+                v.sidebar_state.recents_collapsed = false;
+                v.sidebar_state.workspace_store.pinned_section_collapsed = true;
+                cx.notify();
+            });
+            window.render_frame(cx);
+
+            assert!(window.try_find("sidebar-pinned-grid").is_none());
+            assert!(window.try_find("session-0").is_none());
+
+            // Single click on sidebar-recents-header expands Recents on the first click
+            window.click("sidebar-recents-header", cx);
+            window.render_frame(cx);
+            view.read_with(cx, |v, _| {
+                assert!(!v.sidebar_state.recents_collapsed);
+                assert!(!v.sidebar_state.workspace_store.recents_section_collapsed);
+            });
+            assert!(window.try_find("session-0").is_some());
+
+            // Uncollapsing pinned_section_collapsed restores sidebar-pinned-grid
+            view.update(cx, |v, cx| {
+                v.sidebar_state.workspace_store.pinned_section_collapsed = false;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("sidebar-pinned-grid").is_some());
+
+            // (c) Focused sidebar with active rename + ActiveModal::Shortcuts on top:
+            // raw keydown must not mutate rename, and 1st CloseOverlay closes Shortcuts FIRST.
+            view.update(cx, |v, cx| {
+                let k2 = v.session_key_for(&v.sessions[1]);
+                v.start_sidebar_rename_with_window(k2, window, cx);
+                v.active_modal = ActiveModal::Shortcuts;
+                cx.notify();
+            });
+            window.render_frame(cx);
+
+            let orig_draft = view.read_with(cx, |v, _| {
+                v.sidebar_state.rename.as_ref().unwrap().draft.clone()
+            });
+
+            // Raw keydown while Shortcuts is open must not touch rename draft
+            view.update(cx, |v, cx| {
+                let mut x_ks = gpui_kit::Keystroke::parse("x").unwrap();
+                x_ks.key_char = Some("x".into());
+                let ev_x = KeyDownEvent {
+                    keystroke: x_ks,
+                    is_held: false,
+                    prefer_character_input: false,
+                };
+                v.handle_sidebar_keydown(&ev_x, cx);
+                assert_eq!(
+                    v.sidebar_state.rename.as_ref().unwrap().draft,
+                    orig_draft
+                );
+            });
+
+            let fh = view.read_with(cx, |v, _| v.sidebar_state.focus_handle.clone().unwrap());
+
+            // 1st CloseOverlay closes Shortcuts modal while preserving sidebar rename
+            fh.dispatch_action(&CloseOverlay, window, cx);
+            window.render_frame(cx);
+            view.read_with(cx, |v, _| {
+                assert_eq!(v.active_modal, ActiveModal::None);
+                assert!(v.sidebar_state.rename.is_some());
+            });
+
+            // 2nd CloseOverlay cancels sidebar rename
+            fh.dispatch_action(&CloseOverlay, window, cx);
+            window.render_frame(cx);
+            view.read_with(cx, |v, _| {
+                assert!(v.sidebar_state.rename.is_none());
+            });
+        })
+        .unwrap();
+    }
+}

@@ -1,0 +1,3 @@
+{"type":"session_meta","timestamp":"2026-11-26T10:00:00Z","payload":{"id":"codex-basic-001","cwd":"/tmp/proj/codex-basic"}}
+{"type":"response_item","timestamp":"2026-11-26T10:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Summarize the workspace layout"}]}}
+{"type":"response_item","timestamp":"2026-11-26T10:00:03Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Workspace has proto, gpu, keys, core, daemon, and desktop crates."}]}}

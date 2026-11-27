@@ -1,0 +1,2 @@
+{"type":"user","uuid":"u-busy-1","cwd":"/tmp/proj/semantic","timestamp":"2026-11-26T11:00:00Z","message":{"content":"Run full test suite"}}
+{"type":"assistant","uuid":"a-busy-1","cwd":"/tmp/proj/semantic","timestamp":"2026-11-26T11:00:01Z","message":{"model":"claude-opus-4-6","content":[{"type":"text","text":"Running cargo test now."},{"type":"tool_use","id":"tu_open_1","name":"Bash","input":{"command":"cargo test --workspace","description":"Run workspace tests"}}]}}

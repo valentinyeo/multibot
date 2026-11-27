@@ -1,0 +1,2 @@
+{"type":"user","uuid":"u-done-1","cwd":"/tmp/proj/semantic","timestamp":"2026-11-26T11:00:00Z","message":{"content":"Verify build status"}}
+{"type":"assistant","uuid":"a-done-1","cwd":"/tmp/proj/semantic","timestamp":"2026-11-26T11:00:02Z","message":{"model":"claude-opus-4-6","content":[{"type":"text","text":"All done. Build passed cleanly."}]}}

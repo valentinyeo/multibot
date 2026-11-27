@@ -1,0 +1,2 @@
+{"role":"user","text":"Inspect workspace crates and GPU safety.","timestamp_ms":1795687200000}
+{"role":"assistant","text":"Found 6 crates with DXGI 0x10DE skip active.","timestamp_ms":1795687202000}
