@@ -1038,9 +1038,20 @@ impl MultibotView {
         false
     }
 
+    /// Returns `true` when the sidebar is actually drawn for the current surface.
+    /// The Inbox is keyboard-first and minimal: it never renders the sidebar, while the
+    /// user's `sidebar_mode` preference stays untouched and reappears when leaving Inbox.
+    pub(crate) fn sidebar_rendered(&self) -> bool {
+        self.sidebar_state.is_shown() && self.main_surface != MainSurface::Inbox
+    }
+
     /// Returns `true` if `session_key` can mount an inline sidebar or top-pill rename input
     /// in the current surface and sidebar visibility state.
     pub(crate) fn can_mount_sidebar_rename(&self, session_key: &str) -> bool {
+        if self.main_surface == MainSurface::Inbox {
+            // The minimal Inbox never draws the sidebar, so no sidebar rename can mount there.
+            return false;
+        }
         match self.sidebar_state.mode {
             SidebarMode::Open => self.is_session_rendered_in_open_sidebar(session_key),
             SidebarMode::Collapsed | SidebarMode::Hidden => {
@@ -1068,16 +1079,18 @@ impl MultibotView {
     }
 
     /// Returns `true` when `sidebar_state.new_workspace_draft` has a mounted input
-    /// (only inside `#sidebar-open`).
+    /// (only inside a rendered `#sidebar-open`).
     pub(crate) fn is_sidebar_workspace_draft_mounted(&self) -> bool {
         self.sidebar_state.new_workspace_draft.is_some()
             && self.sidebar_state.mode == SidebarMode::Open
+            && self.sidebar_rendered()
     }
 
     /// Returns `true` when an Open-sidebar inline edit (rename or new-workspace draft) is
     /// currently mounted inside `#sidebar-open`.
     pub(crate) fn is_sidebar_inline_edit_mounted(&self) -> bool {
         self.sidebar_state.mode == SidebarMode::Open
+            && self.sidebar_rendered()
             && (self.is_sidebar_rename_mounted() || self.is_sidebar_workspace_draft_mounted())
     }
 
@@ -4595,13 +4608,18 @@ impl MultibotView {
         }
     }
 
+    /// Returns `true` when the floating top header bar is drawn for the current surface.
+    /// The Inbox is keyboard-first: it hides the whole floating header (title pill and the
+    /// Inbox / menu buttons) because the user already knows where they are.
+    pub(crate) fn top_floating_bar_rendered(&self) -> bool {
+        self.main_surface != MainSurface::Inbox
+    }
+
     pub(crate) fn render_top_floating_bar(
         &self,
         title: String,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let is_inbox = self.main_surface == MainSurface::Inbox;
-
         let header_rename_draft =
             if self.sidebar_state.mode != SidebarMode::Open && self.is_sidebar_rename_mounted() {
                 self.sidebar_state.rename.as_ref().map(|r| r.draft.clone())
@@ -4673,7 +4691,7 @@ impl MultibotView {
                     .items_center()
                     .gap_1p5()
                     .child({
-                        let b = Button::new("toggle-inbox")
+                        Button::new("toggle-inbox")
                             .xsmall()
                             .icon(gpui_kit::component::Icon::default().data(theme::INBOX_ICON))
                             .accessibility_label("Inbox")
@@ -4683,16 +4701,11 @@ impl MultibotView {
                                     this.table_modal_state.close();
                                 }
                                 this.active_modal = ActiveModal::None;
-                                if this.main_surface == MainSurface::Inbox {
-                                    this.set_main_surface(MainSurface::Chat);
-                                    this.focus_active_surface_default(window, cx);
-                                } else {
-                                    this.set_main_surface(MainSurface::Inbox);
-                                    this.focus_inbox(window, cx);
-                                }
+                                this.set_main_surface(MainSurface::Inbox);
+                                this.inbox_state.select_all_split();
+                                this.focus_inbox(window, cx);
                                 cx.notify();
-                            }));
-                        if is_inbox { b.primary() } else { b }
+                            }))
                     })
                     .when(
                         self.sidebar_state
@@ -4925,7 +4938,7 @@ impl MultibotView {
             || ((self.main_surface != MainSurface::Settings
                 || self.settings_tab != crate::settings::SettingsTab::Hosts)
                 && self.host_input.read(cx).focus_handle(cx).is_focused(window))
-            || (self.sidebar_state.mode != SidebarMode::Open
+            || ((self.sidebar_state.mode != SidebarMode::Open || !self.sidebar_rendered())
                 && self
                     .sidebar_state
                     .focus_handle
@@ -5147,7 +5160,7 @@ impl Render for MultibotView {
                     this.sidebar_state.rename = None;
                     this.focus_active_surface_default(window, cx);
                 } else if this.is_sidebar_workspace_draft_mounted() {
-                    // 9. Inline new workspace draft (only when Open sidebar is mounted)
+                    // 9. Inline new workspace draft (only when Open sidebar is rendered)
                     this.sidebar_state.new_workspace_draft = None;
                     this.focus_active_surface_default(window, cx);
                 } else if this.is_inbox_rename_mounted() {
@@ -5781,7 +5794,7 @@ impl Render for MultibotView {
             .child(
                 h_flex()
                     .size_full()
-                    .when(self.sidebar_state.is_shown(), |el| {
+                    .when(self.sidebar_rendered(), |el| {
                         el.child(self.render_sidebar(cx))
                     })
                     .child(match self.main_surface {
@@ -6720,7 +6733,8 @@ mod tests {
             window.render_frame(cx);
             window.click("pal-cmd-inbox", cx);
             window.render_frame(cx);
-            window.click("inbox-tab-claude", cx);
+            // Minimal Inbox: split pills stay, provider pills do not exist anymore
+            window.click("inbox-split-favorites", cx);
             window.render_frame(cx);
             window.press("f1", cx);
             window.render_frame(cx);
@@ -7845,17 +7859,15 @@ mod tests {
             });
             window.render_frame(cx);
 
-            // 1st Esc cancels mounted Open-sidebar rename (#8), leaving Inbox rename and unmounted reply_quote intact
-            window.press("escape", cx);
-            window.render_frame(cx);
-            assert!(view.read(cx).sidebar_state.rename.is_none());
-            assert!(view.read(cx).inbox_state.rename.is_some());
-            assert!(view.read(cx).chat_state.reply_quote.is_some());
-
-            // 2nd Esc cancels Inbox rename (#10), NOT unmounted Chat reply_quote
+            // Minimal Inbox: a stale sidebar rename can never mount there, so the first Esc cancels
+            // the Inbox rename (#10) and leaves the unmounted Chat reply_quote alone.
             window.press("escape", cx);
             window.render_frame(cx);
             assert!(view.read(cx).inbox_state.rename.is_none());
+            assert!(
+                !view.read(cx).is_sidebar_rename_mounted(),
+                "A sidebar rename must never be mounted while the minimal Inbox hides the sidebar"
+            );
             assert!(view.read(cx).chat_state.reply_quote.is_some());
             assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
         })
@@ -9738,7 +9750,8 @@ mod tests {
             window.click("sidebar-recents-header", cx);
             window.render_frame(cx);
 
-            // Switch Window 1 to Inbox (All split), toggle unread_only pill, and mark session Waiting via 'e'
+            // Switch Window 1 to Inbox (All split), toggle unread_only via Ctrl+Shift+U (the pill is
+            // gone in minimal Inbox), and mark the session Waiting via 'e'
             view1.update(cx, |v, cx| {
                 v.main_surface = MainSurface::Inbox;
                 v.inbox_state.select_all_split();
@@ -9746,7 +9759,7 @@ mod tests {
                 cx.notify();
             });
             window.render_frame(cx);
-            window.click("inbox-unread-only-pill", cx);
+            window.press("ctrl-shift-u", cx);
             window.render_frame(cx);
             assert!(view1.read(cx).sidebar_state.unread_only);
             view1.update(cx, |v, cx| {
@@ -9950,11 +9963,11 @@ mod tests {
                 "clicking #sidebar-inbox-btn must focus inbox-root"
             );
 
-            // Leave Inbox via top button #toggle-inbox, then re-enter via #toggle-inbox and verify focus
-            window.click("toggle-inbox", cx);
+            // Minimal Inbox hides the whole header: leave with Ctrl+Shift+I and re-enter with Alt+I
+            window.press("ctrl-shift-i", cx);
             window.render_frame(cx);
             assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
-            window.click("toggle-inbox", cx);
+            window.press("alt-i", cx);
             window.render_frame(cx);
             assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
             assert!(
@@ -9963,7 +9976,7 @@ mod tests {
                     .focus_handle
                     .as_ref()
                     .is_some_and(|fh| fh.is_focused(window)),
-                "clicking #toggle-inbox must focus inbox-root"
+                "Alt+I must focus inbox-root"
             );
         })
         .unwrap();
@@ -11284,24 +11297,24 @@ mod tests {
                 "Typing + Enter on Settings must NOT silently rename the Chat session"
             );
 
-            // 5. Open sidebar on Inbox: sidebar rename IS mounted, Esc cancels rename without closing Inbox;
-            //    and cycling sidebar away from Open while on Inbox cancels sidebar_state.rename cleanly.
+            // 5. Open sidebar preference + Inbox: the minimal Inbox hides the sidebar, so a sidebar
+            //    rename must NOT mount there; cycling the preference leaves Inbox untouched.
             view.update(cx, |v, cx| {
                 v.set_sidebar_mode_synced(SidebarMode::Open, cx);
                 v.set_main_surface(MainSurface::Inbox);
                 v.start_sidebar_rename_with_window(k1.clone(), window, cx);
             });
             window.render_frame(cx);
-            assert!(view.read(cx).sidebar_state.rename.is_some());
+            assert!(
+                view.read(cx).sidebar_state.rename.is_none(),
+                "Open-sidebar rename must NOT mount while the sidebar is hidden in Inbox"
+            );
 
-            // Cycling sidebar away from Open on Inbox must clear unmounted sidebar_state.rename
+            // Cycling the sidebar preference on Inbox must not resurrect an unmounted rename
             window.press("ctrl-shift-b", cx);
             window.render_frame(cx);
             assert_eq!(view.read(cx).sidebar_state.mode, SidebarMode::Collapsed);
-            assert!(
-                view.read(cx).sidebar_state.rename.is_none(),
-                "Collapsing sidebar while on Inbox must clear unmounted sidebar_state.rename"
-            );
+            assert!(view.read(cx).sidebar_state.rename.is_none());
             assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
         })
         .unwrap();
@@ -11702,7 +11715,7 @@ mod tests {
             let k1 = view.read(cx).session_key_for(&s1);
             let k2 = view.read(cx).session_key_for(&s2);
 
-            // 1. Enter Inbox, start F2 rename on Claude Alpha, then click #inbox-tab-codex
+            // 1. Enter Inbox, start F2 rename on Claude Alpha, then click a workspace split
             window.press("alt-i", cx);
             window.render_frame(cx);
             assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
@@ -11717,21 +11730,21 @@ mod tests {
                 Some(k1.as_str())
             );
 
-            window.click("inbox-tab-codex", cx);
+            window.click("inbox-tab-all", cx);
             window.render_frame(cx);
             assert!(
                 view.read(cx).inbox_state.rename.is_none(),
-                "Clicking #inbox-tab-codex must clear inbox_state.rename"
+                "Clicking #inbox-tab-all must clear inbox_state.rename"
             );
 
-            // j/k/Enter must navigate & open Codex rows, NOT blindly rename hidden Claude Alpha!
+            // j/k/Enter must navigate & open Inbox rows, NOT blindly rename the hidden session!
             assert_eq!(view.read(cx).inbox_state.selected_row, 0);
             window.press("j", cx);
             window.render_frame(cx);
             assert_eq!(
                 view.read(cx).inbox_state.selected_row,
                 1,
-                "j must navigate filtered Codex Inbox rows immediately"
+                "j must navigate Inbox rows immediately"
             );
             window.press("k", cx);
             window.render_frame(cx);
@@ -11741,8 +11754,8 @@ mod tests {
             assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
             assert_eq!(
                 view.read(cx).selected_session.as_ref().map(|s| s.id.as_str()),
-                Some("r6-in2"),
-                "Enter must open selected Codex row r6-in2"
+                Some("r6-in1"),
+                "Enter must open the selected Inbox row r6-in1"
             );
             assert_eq!(
                 view.read(cx)
@@ -11750,24 +11763,11 @@ mod tests {
                     .workspace_store
                     .effective_title(&k1, "Claude Alpha"),
                 "Claude Alpha",
-                "Hidden Claude Alpha must NOT be silently renamed by j/k/Enter"
+                "Hidden sessions must NOT be silently renamed by j/k/Enter"
             );
 
-            // 2. Inbox F2 -> click #inbox-unread-only-pill clears inbox_state.rename
+            // 2. Inbox F2 -> Ctrl+Shift+U clears inbox_state.rename
             window.press("alt-i", cx);
-            window.render_frame(cx);
-            window.press("f2", cx);
-            window.render_frame(cx);
-            assert!(view.read(cx).inbox_state.rename.is_some());
-            window.click("inbox-unread-only-pill", cx);
-            window.render_frame(cx);
-            assert!(
-                view.read(cx).inbox_state.rename.is_none(),
-                "Clicking #inbox-unread-only-pill must clear inbox_state.rename"
-            );
-
-            // 3. Inbox F2 -> Ctrl+Shift+U clears inbox_state.rename
-            window.click("inbox-unread-only-pill", cx);
             window.render_frame(cx);
             window.press("f2", cx);
             window.render_frame(cx);
@@ -11780,11 +11780,11 @@ mod tests {
             );
             window.press("ctrl-shift-u", cx);
             window.render_frame(cx);
-
-            // 4. Inbox F2 -> click #inbox-split-favorites clears inbox_state.rename
             window.press("f2", cx);
             window.render_frame(cx);
             assert!(view.read(cx).inbox_state.rename.is_some());
+
+            // 3. Inbox F2 -> click #inbox-split-favorites clears inbox_state.rename
             window.click("inbox-split-favorites", cx);
             window.render_frame(cx);
             assert!(
@@ -11792,7 +11792,7 @@ mod tests {
                 "Clicking #inbox-split-favorites must clear inbox_state.rename"
             );
 
-            // 5. Empty/filtered Inbox (#inbox-split-favorites = 0 rows) + Collapsed sidebar:
+            // 4. Empty/filtered Inbox (#inbox-split-favorites = 0 rows) + Collapsed sidebar:
             //    Ctrl+K -> Rename session must NOT open an unmounted inbox_state.rename or sidebar_state.rename!
             view.update(cx, |v, cx| {
                 v.set_sidebar_mode_synced(SidebarMode::Collapsed, cx);
@@ -11901,27 +11901,29 @@ mod tests {
             let k1 = view.read(cx).session_key_for(&s1);
             let k2 = view.read(cx).session_key_for(&s2);
 
-            // --- Scenario 1: Inbox + Open-sidebar rename -> Ctrl+K / F1 -> Esc restores
-            //     #sidebar-open focus, typing + Enter commits cleanly, then Inbox j/k works ---
+            // --- Scenario 1: Inbox is minimal (no sidebar), so F2 edits the Inbox row inline and
+            //     Ctrl+K / F1 -> Esc restores #inbox-root focus so typing + Enter commits cleanly ---
             window.press("alt-i", cx);
             window.render_frame(cx);
             assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
 
-            view.update(cx, |v, cx| {
-                v.start_sidebar_rename_with_window(k1.clone(), window, cx);
-            });
+            window.press("f2", cx);
             window.render_frame(cx);
-            assert!(view.read(cx).is_sidebar_rename_mounted());
+            assert!(view.read(cx).is_inbox_rename_mounted());
+            assert!(
+                !view.read(cx).is_sidebar_rename_mounted(),
+                "Open-sidebar rename must never mount in the minimal Inbox"
+            );
             assert!(
                 view.read(cx)
-                    .sidebar_state
+                    .inbox_state
                     .focus_handle
                     .as_ref()
                     .is_some_and(|fh| fh.is_focused(window)),
-                "#sidebar-open must be focused when Open-sidebar rename starts on Inbox"
+                "#inbox-root must be focused when the Inbox rename starts"
             );
 
-            // Ctrl+K -> Esc restores #sidebar-open focus (no Inbox/sidebar double-deadlock)
+            // Ctrl+K -> Esc restores #inbox-root focus (no Inbox/sidebar double-deadlock)
             window.press("ctrl-k", cx);
             window.render_frame(cx);
             assert_eq!(view.read(cx).active_modal, ActiveModal::Palette);
@@ -11929,40 +11931,40 @@ mod tests {
             window.render_frame(cx);
             assert_eq!(view.read(cx).active_modal, ActiveModal::None);
             assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
-            assert!(view.read(cx).is_sidebar_rename_mounted());
+            assert!(view.read(cx).is_inbox_rename_mounted());
             assert!(
                 view.read(cx)
-                    .sidebar_state
+                    .inbox_state
                     .focus_handle
                     .as_ref()
                     .is_some_and(|fh| fh.is_focused(window)),
-                "Esc from Ctrl+K on Inbox must restore focus to #sidebar-open when Open-sidebar rename is mounted"
+                "Esc from Ctrl+K on Inbox must restore #inbox-root focus"
             );
 
-            // F1 -> Esc also restores #sidebar-open focus
+            // F1 -> Esc also restores #inbox-root focus
             window.press("f1", cx);
             window.render_frame(cx);
             assert_eq!(view.read(cx).active_modal, ActiveModal::Shortcuts);
             window.press("escape", cx);
             window.render_frame(cx);
             assert_eq!(view.read(cx).active_modal, ActiveModal::None);
-            assert!(view.read(cx).is_sidebar_rename_mounted());
+            assert!(view.read(cx).is_inbox_rename_mounted());
             assert!(
                 view.read(cx)
-                    .sidebar_state
+                    .inbox_state
                     .focus_handle
                     .as_ref()
                     .is_some_and(|fh| fh.is_focused(window)),
-                "Esc from F1 on Inbox must restore focus to #sidebar-open when Open-sidebar rename is mounted"
+                "Esc from F1 on Inbox must restore #inbox-root focus"
             );
 
-            // Typing + Enter commits the sidebar rename cleanly
+            // Typing + Enter commits the Inbox rename cleanly
             window.press("x", cx);
             window.press("enter", cx);
             window.render_frame(cx);
             assert!(
-                view.read(cx).sidebar_state.rename.is_none(),
-                "Enter must commit restored Open-sidebar rename on Inbox"
+                view.read(cx).inbox_state.rename.is_none(),
+                "Enter must commit the restored Inbox rename"
             );
             assert_eq!(
                 view.read(cx)
@@ -11978,7 +11980,7 @@ mod tests {
                     .focus_handle
                     .as_ref()
                     .is_some_and(|fh| fh.is_focused(window)),
-                "Focus must return to #inbox-root after Open-sidebar rename commits on Inbox"
+                "Focus must return to #inbox-root after the Inbox rename commits"
             );
 
             // Inbox j/k works immediately after commit
@@ -11988,14 +11990,14 @@ mod tests {
             assert_eq!(
                 view.read(cx).inbox_state.selected_row,
                 1,
-                "Inbox j must work immediately after Open-sidebar rename commits"
+                "Inbox j must work immediately after the Inbox rename commits"
             );
             window.press("k", cx);
             window.render_frame(cx);
             assert_eq!(
                 view.read(cx).inbox_state.selected_row,
                 0,
-                "Inbox k must work immediately after Open-sidebar rename commits"
+                "Inbox k must work immediately after the Inbox rename commits"
             );
 
             // --- Scenario 2: Chat + Open-sidebar rename -> Ctrl+K / F1 -> Esc restores
@@ -12222,11 +12224,8 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn test_round7_open_sidebar_rename_and_draft_cleared_on_inbox_restores_inbox_focus(
-        cx: &mut TestAppContext,
-    ) {
-        let (handle1, view1) = open_test_view_with_entity(cx);
-        let (handle2, view2) = open_test_view_with_entity(cx);
+    fn test_round7_minimal_inbox_hides_sidebar_and_restores_it_on_leave(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
 
         let mut s1 = make_session("r7-inb-1", AgentKind::Claude, "Alpha", false);
         s1.updated_at_ms = 30_000;
@@ -12234,235 +12233,120 @@ mod tests {
         let mut s2 = make_session("r7-inb-2", AgentKind::Codex, "Beta", false);
         s2.updated_at_ms = 20_000;
         s2.last_assistant_id = Some("a2".into());
-        let mut s3 = make_session("r7-inb-3", AgentKind::Antigravity, "Gamma", false);
-        s3.updated_at_ms = 10_000;
-        s3.last_assistant_id = Some("a3".into());
 
-        let (k1, k2) = cx
-            .update_window(handle1, |_, window, cx| {
-                view1.update(cx, |v, cx| {
-                    let _ = v
-                        .sidebar_state
-                        .workspace_store
-                        .create_workspace("Work", None);
-                    v.sessions = vec![s1.clone(), s2.clone(), s3.clone()];
-                    v.selected_session = Some(s1.clone());
-                    v.sidebar_state.mode = SidebarMode::Open;
-                    v.settings.sidebar_mode = SidebarMode::Open;
-                    v.set_main_surface(MainSurface::Inbox);
-                    v.inbox_state.select_all_split();
-                    v.focus_inbox(window, cx);
-                    v.sync_sessions_to_shared(cx);
-                    v.sync_workspace_to_shared(cx);
-                    cx.notify();
-                });
-                window.render_frame(cx);
-                let k1 = view1.read(cx).session_key_for(&s1);
-                let k2 = view1.read(cx).session_key_for(&s2);
-
-                // --- Path A: Open-sidebar rename on Inbox cleared via Ctrl+Shift+U ---
-                view1.update(cx, |v, cx| {
-                    v.start_sidebar_rename_with_window(k1.clone(), window, cx);
-                });
-                window.render_frame(cx);
-                assert!(view1.read(cx).is_sidebar_rename_mounted());
-                assert!(
-                    view1
-                        .read(cx)
-                        .sidebar_state
-                        .focus_handle
-                        .as_ref()
-                        .is_some_and(|fh| fh.is_focused(window))
-                );
-
-                window.press("ctrl-shift-u", cx);
-                window.render_frame(cx);
-                assert!(view1.read(cx).sidebar_state.rename.is_none());
-                assert_eq!(view1.read(cx).main_surface, MainSurface::Inbox);
-                assert!(
-                    view1
-                        .read(cx)
-                        .inbox_state
-                        .focus_handle
-                        .as_ref()
-                        .is_some_and(|fh| fh.is_focused(window)),
-                    "Ctrl+Shift+U clearing Open-sidebar rename on Inbox must restore #inbox-root focus"
-                );
-                // Toggle unread_only back off so all rows stay visible, then verify j/k/Tab work!
-                window.press("ctrl-shift-u", cx);
-                window.render_frame(cx);
-                window.press("j", cx);
-                window.render_frame(cx);
-                assert_eq!(
-                    view1.read(cx).inbox_state.selected_row,
-                    1,
-                    "Inbox `j` must work immediately after Ctrl+Shift+U clears Open-sidebar rename"
-                );
-                window.press("k", cx);
-                window.render_frame(cx);
-                assert_eq!(view1.read(cx).inbox_state.selected_row, 0);
-                let split_before_tab = view1.read(cx).inbox_state.active_split.clone();
-                window.press("tab", cx);
-                window.render_frame(cx);
-                assert_ne!(
-                    view1.read(cx).inbox_state.active_split,
-                    split_before_tab,
-                    "Inbox `Tab` must cycle splits after Ctrl+Shift+U clears Open-sidebar rename"
-                );
-                view1.update(cx, |v, cx| {
-                    v.inbox_state.select_all_split();
-                    cx.notify();
-                });
-                window.render_frame(cx);
-
-                // --- Path B: Open-sidebar rename on Inbox cleared via sidebar mouse click (#ws-pill-starred) ---
-                view1.update(cx, |v, cx| {
-                    v.start_sidebar_rename_with_window(k1.clone(), window, cx);
-                });
-                window.render_frame(cx);
-                assert!(view1.read(cx).is_sidebar_rename_mounted());
-                window.click("workspace-dropdown", cx);
-                window.render_frame(cx);
-                window.click("workspace-option-2", cx);
-                window.render_frame(cx);
-                assert!(view1.read(cx).sidebar_state.rename.is_none());
-                assert!(
-                    view1
-                        .read(cx)
-                        .inbox_state
-                        .focus_handle
-                        .as_ref()
-                        .is_some_and(|fh| fh.is_focused(window)),
-                    "Clicking #ws-pill-starred during Open-sidebar rename on Inbox must restore #inbox-root focus"
-                );
-                window.press("j", cx);
-                window.render_frame(cx);
-                assert_eq!(view1.read(cx).inbox_state.selected_row, 1);
-
-                // --- Path C: Open-sidebar rename on Inbox cleared via Alt+3 workspace switch ---
-                window.click("workspace-dropdown", cx);
-                window.render_frame(cx);
-                window.click("workspace-option-3", cx);
-                window.render_frame(cx);
-                view1.update(cx, |v, cx| {
-                    v.start_sidebar_rename_with_window(k2.clone(), window, cx);
-                });
-                window.render_frame(cx);
-                assert!(view1.read(cx).is_sidebar_rename_mounted());
-                window.press("alt-3", cx);
-                window.render_frame(cx);
-                assert!(view1.read(cx).sidebar_state.rename.is_none());
-                assert!(
-                    view1
-                        .read(cx)
-                        .inbox_state
-                        .focus_handle
-                        .as_ref()
-                        .is_some_and(|fh| fh.is_focused(window)),
-                    "Alt+3 clearing Open-sidebar rename on Inbox must restore #inbox-root focus"
-                );
-                window.press("k", cx);
-                window.render_frame(cx);
-                assert_eq!(view1.read(cx).inbox_state.selected_row, 0);
-
-                // --- Path D: Open-sidebar new_workspace_draft cleared on Inbox restores #inbox-root focus ---
-                window.press("alt-2", cx);
-                window.render_frame(cx);
-                view1.update(cx, |v, cx| {
-                    v.sidebar_state.new_workspace_draft = Some("Scratch".into());
-                    v.focus_sidebar(window, cx);
-                    cx.notify();
-                });
-                window.render_frame(cx);
-                assert!(view1.read(cx).is_sidebar_workspace_draft_mounted());
-                assert!(
-                    view1
-                        .read(cx)
-                        .sidebar_state
-                        .focus_handle
-                        .as_ref()
-                        .is_some_and(|fh| fh.is_focused(window))
-                );
-                view1.update(cx, |v, cx| {
-                    v.sidebar_state.new_workspace_draft = None;
-                    cx.notify();
-                });
-                window.render_frame(cx);
-                assert!(
-                    view1
-                        .read(cx)
-                        .inbox_state
-                        .focus_handle
-                        .as_ref()
-                        .is_some_and(|fh| fh.is_focused(window)),
-                    "Clearing new_workspace_draft on Inbox must restore #inbox-root focus"
-                );
-
-                // --- Path E setup: start Open-sidebar rename on s1 before Window 2 deletes s1 via SharedAppStore ---
-                view1.update(cx, |v, cx| {
-                    v.start_sidebar_rename_with_window(k1.clone(), window, cx);
-                });
-                window.render_frame(cx);
-                assert!(view1.read(cx).is_sidebar_rename_mounted());
-                assert!(
-                    view1
-                        .read(cx)
-                        .sidebar_state
-                        .focus_handle
-                        .as_ref()
-                        .is_some_and(|fh| fh.is_focused(window))
-                );
-
-                (k1, k2)
-            })
-            .unwrap();
-
-        // Window 2 archives/removes s1 and publishes to SharedAppStore
-        cx.update_window(handle2, |_, window, cx| {
-            view2.update(cx, |v, cx| {
-                v.sessions.retain(|s| s.id != "r7-inb-1");
-                v.selected_session = v.sessions.first().cloned();
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                let _ = v
+                    .sidebar_state
+                    .workspace_store
+                    .create_workspace("Work", None);
+                v.sessions = vec![s1.clone(), s2.clone()];
+                v.selected_session = Some(s1.clone());
+                v.sidebar_state.mode = SidebarMode::Open;
+                v.settings.sidebar_mode = SidebarMode::Open;
                 v.sync_sessions_to_shared(cx);
+                v.sync_workspace_to_shared(cx);
                 cx.notify();
             });
             window.render_frame(cx);
-        })
-        .unwrap();
+            assert!(
+                window.try_find("sidebar-open").is_some(),
+                "Chat must render the Open sidebar"
+            );
 
-        // Window 1 renders and must immediately clear rename + restore #inbox-root focus
-        cx.update_window(handle1, |_, window, cx| {
+            // --- Alt+I hides the sidebar and the whole floating header, without mutating
+            //     the stored sidebar preference ---
+            window.press("alt-i", cx);
             window.render_frame(cx);
+            assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
             assert!(
-                view1.read(cx).sidebar_state.rename.is_none(),
-                "SharedAppStore sync removing renamed session {k1} must clear Open-sidebar rename"
+                window.try_find("sidebar-open").is_none(),
+                "Minimal Inbox must NOT render #sidebar-open"
             );
             assert!(
-                view1
-                    .read(cx)
-                    .inbox_state
-                    .focus_handle
-                    .as_ref()
-                    .is_some_and(|fh| fh.is_focused(window)),
-                "SharedAppStore sync clearing Open-sidebar rename on Inbox must restore #inbox-root focus"
+                window.try_find("sidebar-rail").is_none(),
+                "Minimal Inbox must NOT render the collapsed sidebar rail"
             );
+            assert!(!view.read(cx).sidebar_rendered());
+            assert!(
+                view.read(cx).sidebar_state.mode == SidebarMode::Open,
+                "Hiding the sidebar in Inbox must NOT mutate the user's sidebar preference"
+            );
+            assert!(
+                view.read(cx).settings.sidebar_mode == SidebarMode::Open,
+                "Hiding the sidebar in Inbox must NOT mutate the persisted sidebar_mode"
+            );
+            for removed in ["header-title-pill", "toggle-inbox", "chat-menu"] {
+                assert!(
+                    window.try_find(removed).is_none(),
+                    "Minimal Inbox must not render {removed}"
+                );
+            }
 
-            // Real Inbox j / k / Tab / Enter navigation must work cleanly!
+            // Keyboard navigation stays intact: j / k / Tab / Shift+Tab
+            assert_eq!(view.read(cx).inbox_state.selected_row, 0);
             window.press("j", cx);
             window.render_frame(cx);
-            assert_eq!(view1.read(cx).inbox_state.selected_row, 1);
+            assert_eq!(view.read(cx).inbox_state.selected_row, 1);
             window.press("k", cx);
             window.render_frame(cx);
-            assert_eq!(view1.read(cx).inbox_state.selected_row, 0);
+            assert_eq!(view.read(cx).inbox_state.selected_row, 0);
+            let split_before_tab = view.read(cx).inbox_state.active_split.clone();
+            window.press("tab", cx);
+            window.render_frame(cx);
+            assert_ne!(
+                view.read(cx).inbox_state.active_split,
+                split_before_tab,
+                "Tab must cycle Inbox splits in the minimal layout"
+            );
+            window.press("shift-tab", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).inbox_state.active_split, split_before_tab);
+
+            // Enter still opens the selected row
             window.press("enter", cx);
             window.render_frame(cx);
+            assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
             assert_eq!(
-                view1.read(cx).main_surface,
-                MainSurface::Chat,
-                "Inbox Enter must open selected session ({k2}) after SharedAppStore rename recovery"
+                view.read(cx).selected_session.as_ref().map(|s| s.id.as_str()),
+                Some("r7-inb-1"),
+                "Enter must open the selected Inbox row"
             );
-            assert_eq!(
-                view1.read(cx).selected_session.as_ref().map(|s| s.id.as_str()),
-                Some("r7-inb-2")
+            assert!(
+                window.try_find("sidebar-open").is_some(),
+                "Leaving Inbox must restore the previous sidebar visibility"
+            );
+            assert!(view.read(cx).sidebar_rendered());
+
+            // Alt+I again, Esc leaves Inbox and restores the sidebar
+            window.press("alt-i", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
+            assert!(window.try_find("sidebar-open").is_none());
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
+            assert!(
+                window.try_find("sidebar-open").is_some(),
+                "Esc must restore the previous sidebar visibility"
+            );
+
+            // A Collapsed preference is restored as Collapsed, not Open
+            view.update(cx, |v, cx| {
+                v.set_sidebar_mode_synced(SidebarMode::Collapsed, cx);
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("sidebar-rail").is_some());
+            window.press("alt-i", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
+            assert!(window.try_find("sidebar-rail").is_none());
+            window.press("ctrl-shift-i", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
+            assert!(
+                window.try_find("sidebar-rail").is_some(),
+                "Leaving Inbox must restore the Collapsed sidebar rail"
             );
         })
         .unwrap();

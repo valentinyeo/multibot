@@ -155,6 +155,8 @@ Opening multiprompt is locked until device login is validated and the initial se
 
 ### Inbox (Alt+I)
 
+The Inbox is keyboard-first and minimal. While it is open, the sidebar and the floating header bar (title pill, Inbox and menu buttons) are hidden. Your sidebar preference is untouched and comes back when you leave the Inbox. The provider filter pills (Claude, Antigravity, Codex) and the Unread Only button are not shown; the unread-only filter still works through Ctrl+Shift+U.
+
 | Keys | Action |
 | --- | --- |
 | Sidebar inbox button | Click to open; Ctrl+Shift+I toggles; Alt+I opens / selects All |

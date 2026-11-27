@@ -12,14 +12,12 @@ use gpui_kit::{
     px,
 };
 use multibot_core::workspaces::{InboxRow, InboxSplit, now_unix_ms};
-use multibot_proto::AgentKind;
 
 const DOUBLE_G_WINDOW_MS: i64 = 600;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct InboxState {
     pub active_split: InboxSplit,
-    pub agent_filter: Option<AgentKind>,
     pub selected_row: usize,
     pub filter_query: String,
     pub filter_focused: bool,
@@ -48,7 +46,6 @@ pub(crate) enum InboxKeyOutcome {
 impl InboxState {
     pub(crate) fn select_all_split(&mut self) {
         self.active_split = InboxSplit::All;
-        self.agent_filter = None;
         self.selected_row = 0;
         self.last_g_press_ms = None;
         self.rename = None;
@@ -347,17 +344,13 @@ pub(crate) fn format_relative_age(timestamp_ms: i64, now_ms: i64) -> String {
 impl MultibotView {
     pub(crate) fn compute_inbox_rows(&self, now_ms: i64) -> Vec<InboxRow> {
         let inputs = self.session_inputs();
-        let mut rows = self.sidebar_state.workspace_store.query_inbox(
+        self.sidebar_state.workspace_store.query_inbox(
             &self.inbox_state.active_split,
             &inputs,
             self.sidebar_state.unread_only,
             &self.inbox_state.filter_query,
             now_ms,
-        );
-        if let Some(agent_kind) = self.inbox_state.agent_filter {
-            rows.retain(|r| r.agent == agent_kind);
-        }
-        rows
+        )
     }
 
     pub(crate) fn ensure_inbox_focus_handle(&mut self, cx: &mut Context<Self>) -> FocusHandle {
@@ -541,16 +534,13 @@ impl MultibotView {
         let mut ws_split_counter = 0usize;
         for split in splits {
             let active = self.inbox_state.active_split == split;
-            let mut split_rows = self.sidebar_state.workspace_store.query_inbox(
+            let split_rows = self.sidebar_state.workspace_store.query_inbox(
                 &split,
                 &inputs,
                 self.sidebar_state.unread_only,
                 &self.inbox_state.filter_query,
                 now,
             );
-            if let Some(agent_kind) = self.inbox_state.agent_filter {
-                split_rows.retain(|r| r.agent == agent_kind);
-            }
             let count = split_rows.len();
 
             let (el_id, label): (SharedString, String) = match &split {
@@ -625,38 +615,12 @@ impl MultibotView {
             );
         }
 
-        // 2. Filter Bar + Preserved Slice 1 Agent Chips (`inbox-tab-claude/agy/codex`) + Unread-only Pill
-        let agent_base_rows = self.sidebar_state.workspace_store.query_inbox(
-            &self.inbox_state.active_split,
-            &inputs,
-            self.sidebar_state.unread_only,
-            &self.inbox_state.filter_query,
-            now,
-        );
-        let count_claude = agent_base_rows
-            .iter()
-            .filter(|r| r.agent == AgentKind::Claude)
-            .count();
-        let count_agy = agent_base_rows
-            .iter()
-            .filter(|r| r.agent == AgentKind::Antigravity)
-            .count();
-        let count_codex = agent_base_rows
-            .iter()
-            .filter(|r| r.agent == AgentKind::Codex)
-            .count();
-
-        let agent_chips = [
-            ("inbox-tab-claude", format!("Claude  {count_claude}"), AgentKind::Claude),
-            (
-                "inbox-tab-agy",
-                format!("Antigravity  {count_agy}"),
-                AgentKind::Antigravity,
-            ),
-            ("inbox-tab-codex", format!("Codex  {count_codex}"), AgentKind::Codex),
-        ];
-
-        let mut filter_bar = h_flex().flex_wrap().gap_2().items_center().justify_between();
+        // 2. Filter Bar (workspace splits + search stay; provider pills and Unread Only are gone)
+        let mut filter_bar = h_flex()
+            .flex_wrap()
+            .gap_2()
+            .items_center()
+            .justify_between();
         filter_bar = filter_bar.child(
             div()
                 .id("inbox-filter-input")
@@ -705,103 +669,7 @@ impl MultibotView {
                 }),
         );
 
-        let mut right_pills = h_flex().gap_1p5().items_center();
-        for (id, label, kind) in agent_chips {
-            let active = self.inbox_state.agent_filter == Some(kind);
-            right_pills = right_pills.child(
-                div()
-                    .id(id)
-                    .role(Role::Button)
-                    .test_support()
-                    .px_2p5()
-                    .py_1()
-                    .rounded(RADIUS_CHIP)
-                    .bg(if active {
-                        theme::bg_active_row()
-                    } else {
-                        theme::bg_surface()
-                    })
-                    .border_1()
-                    .border_color(if active {
-                        Self::agent_color(kind)
-                    } else {
-                        theme::border_subtle()
-                    })
-                    .text_xs()
-                    .text_color(if active {
-                        theme::text_primary()
-                    } else {
-                        theme::text_muted()
-                    })
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
-                            this.inbox_state.agent_filter =
-                                if this.inbox_state.agent_filter == Some(kind) {
-                                    None
-                                } else {
-                                    Some(kind)
-                                };
-                            this.inbox_state.selected_row = 0;
-                            this.inbox_state.rename = None;
-                            this.sidebar_state.rename = None;
-                            this.sidebar_state.new_workspace_draft = None;
-                            this.focus_inbox(window, cx);
-                            cx.notify();
-                        }),
-                    )
-                    .child(label),
-            );
-        }
-
         let unread_only = self.sidebar_state.unread_only;
-        right_pills = right_pills.child(
-            div()
-                .id("inbox-unread-only-pill")
-                .role(Role::Button)
-                .test_support()
-                .px_2p5()
-                .py_1()
-                .rounded(RADIUS_CHIP)
-                .bg(if unread_only {
-                    theme::bg_active_row()
-                } else {
-                    theme::bg_surface()
-                })
-                .border_1()
-                .border_color(if unread_only {
-                    theme::accent_blue()
-                } else {
-                    theme::border_subtle()
-                })
-                .text_xs()
-                .text_color(if unread_only {
-                    theme::accent_blue()
-                } else {
-                    theme::text_muted()
-                })
-                .cursor_pointer()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| {
-                        this.sidebar_state.unread_only = !this.sidebar_state.unread_only;
-                        this.inbox_state.selected_row = 0;
-                        this.inbox_state.rename = None;
-                        this.sidebar_state.rename = None;
-                        this.sidebar_state.new_workspace_draft = None;
-                        this.focus_inbox(window, cx);
-                        this.sync_workspace_to_shared(cx);
-                        cx.notify();
-                    }),
-                )
-                .child(if unread_only {
-                    "Unread Only · ON"
-                } else {
-                    "Unread Only"
-                }),
-        );
-        filter_bar = filter_bar.child(right_pills);
 
         // 3. Session Rows
         let mut rows_el = v_flex().gap_1p5();
@@ -1053,7 +921,6 @@ impl MultibotView {
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                 this.handle_inbox_keydown(ev, cx);
             }))
-            .child(self.render_top_floating_bar("Inbox".into(), cx))
             .child(
                 div()
                     .id("inbox-scroll")
@@ -1078,7 +945,7 @@ impl MultibotView {
 mod tests {
     use super::*;
     use gpui_kit::{AppContext, Entity, TestAppContext, WindowOptions, test::TestWindowExt};
-    use multibot_proto::SessionSummary;
+    use multibot_proto::{AgentKind, SessionSummary};
     use std::sync::Arc;
 
     fn sample_splits() -> Vec<InboxSplit> {
@@ -1250,7 +1117,9 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn renders_inbox_splits_agent_chips_and_opens_clicked_row(cx: &mut TestAppContext) {
+    fn renders_minimal_inbox_without_header_or_filter_chips_and_opens_clicked_row(
+        cx: &mut TestAppContext,
+    ) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::theme::apply_multibot_dark_theme(cx);
@@ -1300,17 +1169,31 @@ mod tests {
             });
             window.render_frame(cx);
 
-            // Click splits and preserved Slice 1 agent chip
+            // Minimal Inbox: workspace splits and the search bar stay, nothing else
             window.click("inbox-split-frequent", cx);
             window.render_frame(cx);
             window.click("inbox-split-favorites", cx);
             window.render_frame(cx);
             window.click("inbox-tab-all", cx);
             window.render_frame(cx);
-            window.click("inbox-tab-claude", cx);
-            window.render_frame(cx);
-            window.click("inbox-unread-only-pill", cx);
-            window.render_frame(cx);
+            assert!(
+                window.try_find("inbox-filter-input").is_some(),
+                "Inbox must keep the search bar"
+            );
+            for removed in [
+                "inbox-tab-claude",
+                "inbox-tab-agy",
+                "inbox-tab-codex",
+                "inbox-unread-only-pill",
+                "header-title-pill",
+                "toggle-inbox",
+                "chat-menu",
+            ] {
+                assert!(
+                    window.try_find(removed).is_none(),
+                    "Minimal Inbox must not render {removed}"
+                );
+            }
 
             // Click first row -> switches to Chat with c1 selected
             window.click("inbox-row-0", cx);
@@ -1321,6 +1204,109 @@ mod tests {
             });
             assert_eq!(surface, MainSurface::Chat);
             assert_eq!(sel_id.as_deref(), Some("c1"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn minimal_inbox_keeps_keyboard_navigation_and_esc_close(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::theme::apply_multibot_dark_theme(cx);
+            crate::bind_multibot_keys(cx);
+            crate::state::SharedAppStore::init(cx, multibot_core::MultibotSettings::default());
+        });
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let (handle, view): (gpui_kit::AnyWindowHandle, Entity<MultibotView>) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
+                cx.new(|cx| MultibotView::new(rt, window, cx))
+            })
+            .unwrap()
+        });
+
+        let now = now_unix_ms();
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.sessions = vec![
+                    SessionSummary {
+                        id: "kb-1".into(),
+                        agent: AgentKind::Claude,
+                        title: "Keyboard One".into(),
+                        updated_at_ms: now - 2_000,
+                        ..Default::default()
+                    },
+                    SessionSummary {
+                        id: "kb-2".into(),
+                        agent: AgentKind::Codex,
+                        title: "Keyboard Two".into(),
+                        updated_at_ms: now - 1_000,
+                        ..Default::default()
+                    },
+                ];
+                cx.notify();
+            });
+            window.render_frame(cx);
+
+            // Alt+I opens the Inbox on the All split with the first row selected
+            window.press("alt-i", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
+            assert_eq!(view.read(cx).inbox_state.active_split, InboxSplit::All);
+            assert_eq!(view.read(cx).inbox_state.selected_row, 0);
+
+            // J / K move the selection and clamp at both ends
+            window.press("j", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).inbox_state.selected_row, 1);
+            window.press("j", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).inbox_state.selected_row, 1, "j must clamp at the last row");
+            window.press("k", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).inbox_state.selected_row, 0);
+            window.press("k", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).inbox_state.selected_row, 0, "k must clamp at the first row");
+
+            // Down / Up work like J / K
+            window.press("down", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).inbox_state.selected_row, 1);
+            window.press("up", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).inbox_state.selected_row, 0);
+
+            // Tab / Shift+Tab cycle workspace splits
+            let split_before = view.read(cx).inbox_state.active_split.clone();
+            window.press("tab", cx);
+            window.render_frame(cx);
+            assert_ne!(view.read(cx).inbox_state.active_split, split_before);
+            window.press("shift-tab", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).inbox_state.active_split, split_before);
+
+            // Enter opens the selected row and returns to Chat
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
+            assert_eq!(
+                view.read(cx).selected_session.as_ref().map(|s| s.id.as_str()),
+                Some("kb-2"),
+                "Enter must open the newest Inbox row (kb-2)"
+            );
+
+            // Alt+I again, then Esc closes the Inbox
+            window.press("alt-i", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
         })
         .unwrap();
     }

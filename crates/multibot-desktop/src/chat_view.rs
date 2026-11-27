@@ -4923,7 +4923,9 @@ impl MultibotView {
             .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 this.stage_dropped_paths(paths.paths(), window, cx);
             }))
-            .child(self.render_top_floating_bar(header_title, cx))
+            .when(self.top_floating_bar_rendered(), |el| {
+                el.child(self.render_top_floating_bar(header_title, cx))
+            })
             .when_some(self.render_todo_header_and_drawer(cx), |el, todo_ui| {
                 el.child(todo_ui)
             })
