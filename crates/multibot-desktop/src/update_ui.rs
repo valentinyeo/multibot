@@ -4,7 +4,7 @@ use crate::theme::{self, RADIUS_CHIP, RADIUS_ROW};
 use gpui_kit::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Styled, TestSupportExt,
     component::{
-        Sizable,
+        Disableable, Sizable,
         button::{Button, ButtonVariants},
         h_flex, v_flex,
     },
@@ -107,12 +107,11 @@ impl UpdateUiState {
             UpdateState::ReadyToRestart(staged) => {
                 !Self::is_version_dismissed(&staged.version, dismissed_version)
             }
-            UpdateState::Downloading { .. } | UpdateState::Verifying { .. } => true,
+            UpdateState::Downloading { .. }
+            | UpdateState::Verifying { .. }
+            | UpdateState::Applying { .. } => true,
             UpdateState::Error { .. } => !self.error_dismissed,
-            UpdateState::Idle
-            | UpdateState::Checking
-            | UpdateState::UpToDate
-            | UpdateState::Applying { .. } => false,
+            UpdateState::Idle | UpdateState::Checking | UpdateState::UpToDate => false,
         }
     }
 
@@ -226,7 +225,10 @@ impl UpdateUiState {
                         .to_string(),
                     );
                 }
-                out.push("Update & Restart".to_string());
+                out.push(format!(
+                    "Update to v{}",
+                    Self::normalize_version(&info.version)
+                ));
                 out.push("Later".to_string());
                 out
             }
@@ -245,7 +247,10 @@ impl UpdateUiState {
                         .to_string(),
                     );
                 }
-                out.push("Update & Restart".to_string());
+                out.push(format!(
+                    "Update to v{}",
+                    Self::normalize_version(&staged.version)
+                ));
                 out.push("Later".to_string());
                 out
             }
@@ -276,10 +281,11 @@ impl UpdateUiState {
                 out.push("Dismiss".to_string());
                 out
             }
-            UpdateState::Idle
-            | UpdateState::Checking
-            | UpdateState::UpToDate
-            | UpdateState::Applying { .. } => Vec::new(),
+            UpdateState::Applying { .. } => vec![
+                "Installing & restarting...".to_string(),
+                "Multibot will reopen automatically".to_string(),
+            ],
+            UpdateState::Idle | UpdateState::Checking | UpdateState::UpToDate => Vec::new(),
         }
     }
 
@@ -612,7 +618,10 @@ impl MultibotView {
                         .xsmall()
                         .primary()
                         .rounded(RADIUS_CHIP)
-                        .label("Update & Restart")
+                        .label(format!(
+                            "Update to v{}",
+                            UpdateUiState::normalize_version(version)
+                        ))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.trigger_primary_update_action(cx);
                             this.focus_active_surface_default(window, cx);
@@ -632,6 +641,52 @@ impl MultibotView {
         );
 
         card.into_any_element()
+    }
+
+    pub(crate) fn render_update_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (label, busy) = match &self.update_ui.state {
+            UpdateState::Available(info) => (
+                format!(
+                    "Update to v{}",
+                    UpdateUiState::normalize_version(&info.version)
+                ),
+                false,
+            ),
+            UpdateState::ReadyToRestart(staged) => (
+                format!(
+                    "Update to v{}",
+                    UpdateUiState::normalize_version(&staged.version)
+                ),
+                false,
+            ),
+            UpdateState::Downloading {
+                bytes_done,
+                bytes_total,
+                ..
+            } => (
+                UpdateUiState::download_progress(*bytes_done, *bytes_total)
+                    .map(|(_, pct)| format!("Downloading... {pct}%"))
+                    .unwrap_or_else(|| "Downloading...".to_string()),
+                true,
+            ),
+            UpdateState::Verifying { .. } => ("Verifying...".to_string(), true),
+            UpdateState::Applying { .. } => ("Installing & restarting...".to_string(), true),
+            _ => return None,
+        };
+        Some(
+            Button::new("update-header-btn")
+                .xsmall()
+                .primary()
+                .rounded(RADIUS_CHIP)
+                .label(label)
+                .disabled(busy)
+                .tooltip("Download, verify, install, and restart Multibot")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.trigger_primary_update_action(cx);
+                    this.focus_active_surface_default(window, cx);
+                }))
+                .into_any_element(),
+        )
     }
 
     /// Sidebar update card rendered directly above `#gpu-status-card`.
@@ -718,7 +773,8 @@ impl MultibotView {
                     );
                 Some(card.into_any_element())
             }
-            UpdateState::Verifying { version } => {
+            UpdateState::Verifying { version } | UpdateState::Applying { version } => {
+                let applying = matches!(self.update_ui.state, UpdateState::Applying { .. });
                 let card = v_flex()
                     .id("update-card")
                     .test_support()
@@ -734,13 +790,21 @@ impl MultibotView {
                         div()
                             .text_xs()
                             .text_color(theme::text_primary())
-                            .child(UpdateUiState::verifying_headline(version)),
+                            .child(if applying {
+                                "Installing & restarting...".to_string()
+                            } else {
+                                UpdateUiState::verifying_headline(version)
+                            }),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(theme::text_muted())
-                            .child("Checking package integrity"),
+                            .child(if applying {
+                                "Multibot will reopen automatically"
+                            } else {
+                                "Checking package integrity"
+                            }),
                     );
                 Some(card.into_any_element())
             }
@@ -814,10 +878,7 @@ impl MultibotView {
                     .child(actions);
                 Some(card.into_any_element())
             }
-            UpdateState::Idle
-            | UpdateState::Checking
-            | UpdateState::UpToDate
-            | UpdateState::Applying { .. } => None,
+            UpdateState::Idle | UpdateState::Checking | UpdateState::UpToDate => None,
         }
     }
 
@@ -1140,7 +1201,8 @@ mod tests {
         ui.set_update_state(UpdateState::Applying {
             version: "0.1.6".into(),
         });
-        assert!(!ui.is_card_visible(SidebarMode::Open, true, None));
+        assert!(ui.is_card_visible(SidebarMode::Open, true, None));
+        assert_eq!(ui.formatted_card_strings()[0], "Installing & restarting...");
     }
 
     #[test]
@@ -1336,6 +1398,45 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn update_pill_works_in_chat_and_inbox_without_open_sidebar(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            for surface in [
+                crate::state::MainSurface::Chat,
+                crate::state::MainSurface::Inbox,
+            ] {
+                let release = sample_release("0.2.0", vec![]);
+                view.update(cx, |v, cx| {
+                    v.set_sidebar_mode_synced(SidebarMode::Collapsed, cx);
+                    v.set_main_surface(surface);
+                    v.set_update_state(UpdateState::Available(release.clone()), cx);
+                });
+                window.render_frame(cx);
+                assert!(window.try_find("update-card").is_none());
+                assert!(window.try_find("update-header-btn").is_some());
+                window.click("update-header-btn", cx);
+                window.render_frame(cx);
+                assert_eq!(
+                    view.read(cx).update_ui.pending_action,
+                    Some(UpdateUiAction::DownloadAndRestart(release))
+                );
+                assert_eq!(window.find("update-header-btn").disabled(), Some(true));
+                view.update(cx, |v, cx| {
+                    v.set_update_state(
+                        UpdateState::Applying {
+                            version: "0.2.0".into(),
+                        },
+                        cx,
+                    );
+                });
+                window.render_frame(cx);
+                assert_eq!(window.find("update-header-btn").disabled(), Some(true));
+            }
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
     fn headless_primary_cta_progress_verifying_ready_and_error_retry(cx: &mut TestAppContext) {
         let (handle, view) = open_test_view(cx);
         let guard = TempSettingsGuard::new("cta-lifecycle");
@@ -1350,7 +1451,7 @@ mod tests {
             });
             window.render_frame(cx);
 
-            // Click "Update & Restart" -> Downloading + progress track visible.
+            // One click starts the download and automatic restart.
             window.click("update-primary-btn", cx);
             window.render_frame(cx);
             assert!(matches!(
@@ -1375,7 +1476,7 @@ mod tests {
             window.render_frame(cx);
             assert!(window.try_find("update-card").is_some());
 
-            // ReadyToRestart -> clicking primary CTA transitions to Applying and hides card.
+            // Installation stays visible until the updated app takes over.
             let staged = sample_staged("0.2.0", vec!["Ready"]);
             view.update(cx, |v, cx| {
                 v.set_update_state(UpdateState::ReadyToRestart(staged.clone()), cx);
@@ -1391,7 +1492,8 @@ mod tests {
                 view.read(cx).update_ui.pending_action,
                 Some(UpdateUiAction::ApplyAndRestart(staged))
             );
-            assert!(window.try_find("update-card").is_none());
+            assert!(window.try_find("update-card").is_some());
+            assert!(window.try_find("update-primary-btn").is_none());
 
             // Retryable error shows Retry button and clicking it retries download.
             view.update(cx, |v, cx| {

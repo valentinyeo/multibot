@@ -189,7 +189,10 @@ jobs:
   package:
     name: Package & Verify Release Assets
     needs: [prepare, linux, windows]
-    runs-on: ubuntu-24.04
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v6
         with:
@@ -207,13 +210,27 @@ jobs:
           name: multibot-windows-exe
           path: bundle
 
+      - name: Build per-user Windows setup installer
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $started = Get-Date
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:RELEASE_VERSION" "/DSourceDir=$env:GITHUB_WORKSPACE\bundle" installer/multibot.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path release/Multibot-Setup-x64.exe)) { throw "Installer missing" }
+          $elapsed = ((Get-Date) - $started).TotalSeconds
+          "Installer compilation: $elapsed seconds" >> $env:GITHUB_STEP_SUMMARY
+          if ($elapsed -ge 10) { throw "Installer compilation exceeded the 10-second budget" }
+
       - name: Build zip, SHA256SUMS.txt, and update-manifest.json (fail-closed)
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          python3 - <<'PY'
+          python - <<'PY'
           import datetime
           import hashlib
           import json
@@ -409,6 +426,11 @@ jobs:
 
           validate_pe64_amd64(exe_path)
           validate_elf64_x86_64(daemon_path)
+          installer_name = "Multibot-Setup-x64.exe"
+          installer_path = release_dir / installer_name
+          if not installer_path.is_file() or installer_path.stat().st_size <= 0:
+              sys.exit("Missing or empty Windows setup installer")
+          installer_sha = sha256_file(installer_path)
 
           exe_sha = sha256_file(exe_path)
           daemon_sha = sha256_file(daemon_path)
@@ -451,6 +473,7 @@ jobs:
               f"{zip_sha}  {zip_name}\n"
               f"{exe_sha}  multibot.exe\n"
               f"{daemon_sha}  multibotd-linux-x86_64\n"
+              f"{installer_sha}  {installer_name}\n"
           )
           (release_dir / "SHA256SUMS.txt").write_text(sums_text, encoding="utf-8")
 
@@ -537,6 +560,7 @@ jobs:
           set -euo pipefail
           for f in \
             release/multibot-windows-x64.zip \
+            release/Multibot-Setup-x64.exe \
             release/SHA256SUMS.txt \
             release/update-manifest.json \
             release/release-notes.md; do
@@ -546,6 +570,7 @@ jobs:
           if gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" \
               release/multibot-windows-x64.zip \
+              release/Multibot-Setup-x64.exe \
               release/SHA256SUMS.txt \
               release/update-manifest.json \
               --repo "$REPO" --clobber
@@ -562,6 +587,7 @@ jobs:
             fi
             gh release create "$RELEASE_TAG" \
               release/multibot-windows-x64.zip \
+              release/Multibot-Setup-x64.exe \
               release/SHA256SUMS.txt \
               release/update-manifest.json \
               --repo "$REPO" \

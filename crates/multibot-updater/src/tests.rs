@@ -447,7 +447,7 @@ fn url_allowlist_credentials_ports_and_local_http_gating() {
     ));
 
     assert!(!is_allowed_https_url_with_local(
-        "https://user:pass@github.com/a",
+        "https://user:pass@github.com/a", // Fake URL-rejection credentials. trufflehog:ignore
         true
     ));
     assert!(!is_allowed_https_url_with_local(
@@ -455,11 +455,11 @@ fn url_allowlist_credentials_ports_and_local_http_gating() {
         true
     ));
     assert!(!is_allowed_https_url_with_local(
-        "https://:pass@github.com/a",
+        "https://:pass@github.com/a", // Fake URL-rejection credentials. trufflehog:ignore
         true
     ));
     assert!(!is_allowed_https_url_with_local(
-        "http://user:pass@127.0.0.1:8080/a",
+        "http://user:pass@127.0.0.1:8080/a", // Fake URL-rejection credentials. trufflehog:ignore
         true
     ));
     assert!(!is_allowed_https_url_with_local(
@@ -1795,6 +1795,78 @@ fn atomic_swapper_happy_path_and_toctou_hash_check() {
     assert_eq!(fs::read(&current_exe).unwrap(), b"new-exe");
     assert_eq!(fs::read(&current_daemon).unwrap(), b"new-daemon");
     assert!(!is_version_rejected(&updates_dir, "0.2.0").unwrap());
+}
+
+#[test]
+fn installed_app_updates_both_siblings_from_manifest_and_preserves_uninstaller() {
+    let dir = TempTestDir::new("per-user-install");
+    let install_dir = dir.path().join("Test User/AppData/Local/Multibot");
+    let updates_dir = dir
+        .path()
+        .join("Test User/AppData/Roaming/Multibot/updates");
+    fs::create_dir_all(&install_dir).unwrap();
+    let current_exe = install_dir.join("multibot.exe");
+    let current_daemon = install_dir.join("multibotd-linux-x86_64");
+    fs::write(&current_exe, b"old-exe").unwrap();
+    fs::write(&current_daemon, b"old-daemon").unwrap();
+    fs::write(install_dir.join("unins000.exe"), b"uninstaller").unwrap();
+
+    let zip_holder = Arc::new(Mutex::new(Vec::new()));
+    let zip_srv = Arc::clone(&zip_holder);
+    let srv =
+        MockHttpServer::start(move |_| MockResponse::ok_bytes(zip_srv.lock().unwrap().clone()));
+    let (zip_bytes, manifest, _) = make_valid_release_fixture(
+        b"new-exe",
+        b"new-daemon",
+        &[],
+        srv.url("/multibot-windows-x64.zip"),
+        "0.2.1",
+    );
+    *zip_holder.lock().unwrap() = zip_bytes;
+    let parsed = parse_release_manifest(&serde_json::to_string(&manifest).unwrap()).unwrap();
+    let sums = parse_sha256sums(&format!(
+        "{}  multibot-windows-x64.zip\r\n{}  Multibot-Setup-x64.exe\r\n",
+        parsed.windows_x64.sha256,
+        sha256_hex(b"installer"),
+    ))
+    .unwrap();
+    assert_eq!(sums[WINDOWS_ZIP_ASSET_NAME], parsed.windows_x64.sha256);
+    let client = UpdateClient::new(
+        UpdateClientConfig::for_endpoint(srv.url("/latest"), "0.1.0", true).unwrap(),
+    );
+    let staged =
+        download_and_stage_update(&client, &ReleaseInfo::from(parsed), &updates_dir, |_, _| {})
+            .unwrap();
+    let platform = TestPlatform {
+        current_exe: current_exe.clone(),
+        updates_dir: updates_dir.clone(),
+        preserved_args: vec!["--gpu=software".into()],
+        swapper: DefaultFileSwapper,
+        launcher: MockLauncher::ok(4242, true),
+    };
+    let result = AtomicSwapper::new(500)
+        .apply_staged_update(&platform, &staged)
+        .unwrap();
+    assert_eq!(result.launched_pid, 4242);
+    assert_eq!(result.launch_args, vec!["--gpu=software", UPDATE_READY_ARG]);
+    assert_eq!(
+        result.outcome.backup_exe.parent(),
+        Some(install_dir.as_path())
+    );
+    assert_eq!(
+        result.outcome.backup_daemon.as_ref().unwrap().parent(),
+        Some(install_dir.as_path())
+    );
+    assert_eq!(fs::read(&current_exe).unwrap(), b"new-exe");
+    assert_eq!(fs::read(&current_daemon).unwrap(), b"new-daemon");
+    cleanup_old_update_artifacts(&install_dir, &updates_dir).unwrap();
+    assert!(!staged.staging_dir.exists());
+    assert!(!result.outcome.backup_exe.exists());
+    assert!(!result.outcome.backup_daemon.unwrap().exists());
+    assert_eq!(
+        fs::read(install_dir.join("unins000.exe")).unwrap(),
+        b"uninstaller"
+    );
 }
 
 #[test]

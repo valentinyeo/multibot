@@ -4730,6 +4730,7 @@ impl MultibotView {
                             .truncate()
                             .child(title)
                     })
+                    .when_some(self.render_update_pill(cx), |el, pill| el.child(pill))
                     .when(
                         self.main_surface == MainSurface::Chat
                             && self.selected_session.as_ref().is_some_and(|s| s.working),
@@ -4816,17 +4817,14 @@ impl MultibotView {
             match &self.update_ui.state {
                 UpdateState::Available(_) | UpdateState::ReadyToRestart(_) => 1,
                 UpdateState::Downloading { .. } => 2,
-                UpdateState::Verifying { .. } => 3,
+                UpdateState::Verifying { .. } | UpdateState::Applying { .. } => 3,
                 UpdateState::Error {
                     retryable: false, ..
                 } => 4,
                 UpdateState::Error {
                     retryable: true, ..
                 } => 5,
-                UpdateState::Idle
-                | UpdateState::Checking
-                | UpdateState::UpToDate
-                | UpdateState::Applying { .. } => 0,
+                UpdateState::Idle | UpdateState::Checking | UpdateState::UpToDate => 0,
             }
         };
         let answered_question_count = self.chat_state.answered_prompts.len()

@@ -693,6 +693,10 @@ impl MultibotView {
             );
         }
 
+        if let Some(pill) = self.render_update_pill(cx) {
+            split_row = split_row.child(pill);
+        }
+
         // 2. Filter Bar (workspace splits stay; the search bar only mounts on demand)
         let unread_only = self.sidebar_state.unread_only;
         let filter_bar = self.inbox_state.is_search_visible().then(|| {
