@@ -87,6 +87,7 @@ pub fn bind_multibot_keys(cx: &mut App) {
         KeyBinding::new("ctrl-n", NewWindow, None),
         KeyBinding::new("f1", OpenShortcuts, None),
         KeyBinding::new("escape", CloseOverlay, None),
+        // Ctrl+D is captured in Chat View before the composer; terminal Ctrl+D stays local.
         KeyBinding::new("ctrl-shift-space", VoiceDictation, None),
         KeyBinding::new("ctrl-tab", NextSession, None),
         KeyBinding::new("ctrl-shift-tab", PrevSession, None),

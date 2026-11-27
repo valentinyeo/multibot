@@ -196,7 +196,7 @@ The search bar stays hidden so the Inbox opens clean. Ctrl+F or / opens and focu
 | Alt+E | Move active tab to Waiting until it gets a blue dot |
 | Alt+Z | Undo the most recent move to Waiting |
 | Ctrl+K -&gt; Restore Waiting | Restore waiting live sessions in this workspace |
-| Ctrl+D in Chat View | Start/stop dictation; Enter stops recording into the composer; Escape discards the recording |
+| Ctrl+D in Chat View | Start/stop dictation, including while typing in the composer; Ctrl+Shift+D still copies the latest code block; AltGr is untouched |
 | Ctrl+Shift+Space / Enter | Start/stop dictation; Enter is stop-only while recording; Escape discards the recording |
 
 ### Spawn / Windows

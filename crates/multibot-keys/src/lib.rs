@@ -613,7 +613,7 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         gpui_key: "ctrl-d",
         category: ShortcutCategory::Chat,
         description: "Start / stop dictation in Chat View",
-        wired: false,
+        wired: true,
     },
     ShortcutSpec {
         id: "voice.read_newest",
@@ -846,6 +846,17 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         wired: false,
     },
 ];
+
+/// Chat capture handles Ctrl+D before text editing, without claiming AltGr or copy-code.
+pub fn is_inline_dictation_chord(
+    control: bool,
+    shift: bool,
+    alt: bool,
+    platform: bool,
+    key: &str,
+) -> bool {
+    control && !shift && !alt && !platform && key.eq_ignore_ascii_case("d")
+}
 
 pub fn by_id(id: &str) -> Option<&'static ShortcutSpec> {
     SHORTCUTS.iter().find(|s| s.id == id)
@@ -1190,6 +1201,38 @@ mod tests {
     }
 
     #[test]
+    fn inline_dictation_rejects_shift_altgr_and_platform_modifiers() {
+        for control in [false, true] {
+            for shift in [false, true] {
+                for alt in [false, true] {
+                    for platform in [false, true] {
+                        for key in ["d", "D", "space", "x"] {
+                            assert_eq!(
+                                is_inline_dictation_chord(control, shift, alt, platform, key),
+                                control && !shift && !alt && !platform && matches!(key, "d" | "D"),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dictation_and_copy_code_keep_distinct_wired_chords() {
+        for (key, id) in [
+            ("ctrl-d", "chat.dictation_inline"),
+            ("ctrl-shift-space", "chat.dictation"),
+            ("ctrl-shift-d", "chat.copy_code"),
+        ] {
+            let shortcuts: Vec<_> = SHORTCUTS.iter().filter(|s| s.gpui_key == key).collect();
+            assert_eq!(shortcuts.len(), 1, "conflicting shortcut: {key}");
+            assert_eq!(shortcuts[0].id, id);
+            assert!(shortcuts[0].wired, "shortcut must be wired: {key}");
+        }
+    }
+
+    #[test]
     fn slice_4_shortcuts_are_registered() {
         let expected: &[(&str, &str)] = &[
             ("chat.find", "ctrl-f"),
@@ -1332,12 +1375,13 @@ mod tests {
             "chat.commands",
             "view.chat_terminal_toggle",
             "chat.dictation",
+            "chat.dictation_inline",
         ];
         for &id in wired_slice34_ids {
             let spec = by_id(id).unwrap_or_else(|| panic!("missing shortcut {id}"));
             assert!(spec.wired, "expected {id} ({}) to be wired: true", spec.gpui_key);
         }
-        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 63);
+        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 64);
         assert!(!by_id("browser.close_tab").unwrap().wired);
         assert!(!by_id("chat.steer").unwrap().wired);
         assert!(by_gpui_key("ctrl-shift-j").is_none());

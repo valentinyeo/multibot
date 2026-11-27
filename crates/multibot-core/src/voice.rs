@@ -60,26 +60,94 @@ impl VoiceSettings {
         ))
     }
 
-    pub fn import_legacy_readonly(&mut self, dir: &Path) {
-        if !self.api_key.trim().is_empty() {
-            return;
+    // Resolve at use time: synced keys can change while Multibot is running.
+    // Keep detected keys out of saved settings and the manual-override input.
+    pub fn resolved(&self) -> (Self, Option<VoiceKeySource>) {
+        self.resolve_with_sources(
+            || std::env::var("DEEPGRAM_API_KEY").ok(),
+            || {
+                #[cfg(target_os = "windows")]
+                {
+                    windows_environment_key()
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    None
+                }
+            },
+            || legacy_config_key(&crate::zigshel_import::legacy_zigshel_dir()),
+        )
+    }
+
+    fn resolve_with_sources(
+        &self,
+        process_environment: impl FnOnce() -> Option<String>,
+        windows_environment: impl FnOnce() -> Option<String>,
+        legacy_config: impl FnOnce() -> Option<String>,
+    ) -> (Self, Option<VoiceKeySource>) {
+        let mut resolved = self.clone();
+        resolved.api_key = normalize_api_key(&self.api_key);
+        if !resolved.api_key.is_empty() {
+            return (resolved, Some(VoiceKeySource::Manual));
         }
-        if let Ok(text) = std::fs::read_to_string(dir.join("settings.json"))
-            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&text)
-            && let Some(key) = value.get("deepgram_api_key").and_then(|v| v.as_str())
-        {
-            self.api_key = key.trim().to_owned();
+        let candidate = |key: Option<String>, source| {
+            key.map(|key| normalize_api_key(&key))
+                .filter(|key| !key.is_empty())
+                .map(|key| (key, source))
+        };
+        let detected = candidate(process_environment(), VoiceKeySource::ProcessEnvironment)
+            .or_else(|| candidate(windows_environment(), VoiceKeySource::WindowsEnvironment))
+            .or_else(|| candidate(legacy_config(), VoiceKeySource::LegacyConfig));
+        if let Some((key, source)) = detected {
+            resolved.api_key = key;
+            return (resolved, Some(source));
         }
-        // Current Multiprompt stores its key in HKCU\Environment, not ZigShell.
-        #[cfg(target_os = "windows")]
-        if self.api_key.is_empty() {
-            self.api_key = legacy_registry_key().unwrap_or_default();
+        (resolved, None)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceKeySource {
+    Manual,
+    ProcessEnvironment,
+    WindowsEnvironment,
+    LegacyConfig,
+}
+
+impl VoiceKeySource {
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Manual => "Using your Multibot API key override",
+            Self::ProcessEnvironment => "Using DEEPGRAM_API_KEY from the process environment",
+            Self::WindowsEnvironment => "Using synced DEEPGRAM_API_KEY from Windows environment",
+            Self::LegacyConfig => "Using the legacy ZigShell API key (read-only)",
         }
     }
 }
 
+pub fn normalize_api_key(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    // Legacy deepgram_key.zig accepts a bounded 40-digit hex key in pasted text.
+    for (i, key) in bytes.windows(40).enumerate() {
+        if key.iter().all(u8::is_ascii_hexdigit)
+            && (i == 0 || !bytes[i - 1].is_ascii_hexdigit())
+            && (i + 40 == bytes.len() || !bytes[i + 40].is_ascii_hexdigit())
+        {
+            return raw[i..i + 40].to_ascii_lowercase();
+        }
+    }
+    raw.trim_matches(|c: char| !c.is_ascii_graphic() || matches!(c, '\'' | '"'))
+        .to_owned()
+}
+
+fn legacy_config_key(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("settings.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.get("deepgram_api_key")?.as_str().map(str::to_owned)
+}
+
 #[cfg(target_os = "windows")]
-fn legacy_registry_key() -> Option<String> {
+fn windows_environment_key() -> Option<String> {
     use std::ffi::c_void;
     #[link(name = "advapi32")]
     unsafe extern "system" {
@@ -354,6 +422,76 @@ mod tests {
     }
 
     #[test]
+    fn key_resolution_priority_and_empty_sources() {
+        let config = VoiceSettings {
+            api_key: "  'own-key'  ".into(),
+            ..Default::default()
+        };
+        let (resolved, source) = config.resolve_with_sources(
+            || panic!("manual key must win"),
+            || panic!("manual key must win"),
+            || panic!("manual key must win"),
+        );
+        assert_eq!(resolved.api_key, "own-key");
+        assert_eq!(source, Some(VoiceKeySource::Manual));
+
+        let config = VoiceSettings::default();
+        let (resolved, source) = config.resolve_with_sources(
+            || Some(" \"process-key\"\n".into()),
+            || panic!("process environment must win"),
+            || panic!("process environment must win"),
+        );
+        assert_eq!(resolved.api_key, "process-key");
+        assert_eq!(source, Some(VoiceKeySource::ProcessEnvironment));
+        let (resolved, source) = config.resolve_with_sources(
+            || Some(" \"\" ".into()),
+            || Some(" 'registry-key' ".into()),
+            || panic!("Windows environment must beat legacy config"),
+        );
+        assert_eq!(resolved.api_key, "registry-key");
+        assert_eq!(source, Some(VoiceKeySource::WindowsEnvironment));
+        assert_eq!(
+            source.unwrap().hint(),
+            "Using synced DEEPGRAM_API_KEY from Windows environment"
+        );
+        assert!(!source.unwrap().hint().contains(&resolved.api_key));
+        let (resolved, source) = config.resolve_with_sources(
+            || None,
+            || Some(" \t ".into()),
+            || Some("legacy-key".into()),
+        );
+        assert_eq!(resolved.api_key, "legacy-key");
+        assert_eq!(source, Some(VoiceKeySource::LegacyConfig));
+        assert!(config.api_key.is_empty());
+        assert!(
+            !serde_json::to_string(&config)
+                .unwrap()
+                .contains("legacy-key")
+        );
+        let (resolved, source) = config.resolve_with_sources(|| None, || None, || None);
+        assert!(resolved.api_key.is_empty());
+        assert_eq!(source, None);
+    }
+
+    #[test]
+    fn normalizes_quotes_whitespace_and_bounded_legacy_hex_keys() {
+        assert_eq!(normalize_api_key(" \t'\"opaque-key\"'\r\n"), "opaque-key");
+        let upper = "ABCDEF0123456789ABCDEF0123456789ABCDEF01";
+        assert_eq!(upper.len(), 40);
+        assert_eq!(
+            normalize_api_key(&format!("key: '{upper}'")),
+            upper.to_ascii_lowercase()
+        );
+        let oversized = "A".repeat(41);
+        assert_eq!(normalize_api_key(&oversized), oversized);
+        let config = VoiceSettings {
+            api_key: normalize_api_key("'not a key'"),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn legacy_import_is_read_only_and_never_overrides_own_key() {
         let dir = std::env::temp_dir().join(format!("multibot-voice-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -361,11 +499,16 @@ mod tests {
         let original = r#"{"deepgram_api_key":"legacy-key"}"#;
         std::fs::write(&path, original).unwrap();
         let mut config = VoiceSettings::default();
-        config.import_legacy_readonly(&dir);
-        assert_eq!(config.api_key, "legacy-key");
+        let (resolved, source) =
+            config.resolve_with_sources(|| None, || None, || legacy_config_key(&dir));
+        assert_eq!(resolved.api_key, "legacy-key");
+        assert_eq!(source, Some(VoiceKeySource::LegacyConfig));
+        assert!(config.api_key.is_empty());
         config.api_key = "own-key".into();
-        config.import_legacy_readonly(&dir);
-        assert_eq!(config.api_key, "own-key");
+        let (resolved, source) =
+            config.resolve_with_sources(|| None, || None, || legacy_config_key(&dir));
+        assert_eq!(resolved.api_key, "own-key");
+        assert_eq!(source, Some(VoiceKeySource::Manual));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         std::fs::remove_dir_all(dir).unwrap();
     }

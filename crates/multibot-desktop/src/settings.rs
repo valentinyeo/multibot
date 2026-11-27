@@ -283,19 +283,29 @@ impl MultibotView {
         let mut content = v_flex().gap_5().w_full();
         match self.settings_tab {
             SettingsTab::Voice => {
+                let draft = multibot_core::voice::VoiceSettings {
+                    api_key: self.deepgram_key_input.read(cx).value().to_string(),
+                    language: self.deepgram_language_input.read(cx).value().to_string(),
+                };
+                let (_, source) = draft.resolved();
+                let source_hint = source.map_or(
+                    "No API key detected. Enter an override or set DEEPGRAM_API_KEY.",
+                    |source| source.hint(),
+                );
                 content = content.child(v_flex().gap_3().p_4().rounded(RADIUS_BUBBLE)
                     .bg(theme::bg_surface()).border_1().border_color(theme::border_subtle())
                     .child(div().text_sm().child("Voice dictation · Deepgram"))
                     .child(div().text_xs().text_color(theme::text_secondary())
-                        .child("Dictation sends audio to Deepgram. Ctrl+Shift+Space toggles the mic; Esc stops and cancels pending text."))
-                    .child(div().text_xs().child("API key (stored in Multibot settings)"))
+                        .child("Dictation sends audio to Deepgram. Ctrl+D or Ctrl+Shift+Space toggles the mic; Esc cancels."))
+                    .child(div().text_xs().child("API key override (optional, stored only in Multibot)"))
                     .child(Input::new(&self.deepgram_key_input).mask_toggle().id("deepgram-api-key"))
+                    .child(div().id("deepgram-key-source").text_xs().text_color(theme::text_secondary()).child(source_hint))
                     .child(div().text_xs().child("Language code"))
                     .child(Input::new(&self.deepgram_language_input).id("deepgram-language"))
                     .child(Button::new("save-deepgram-settings").label("Save dictation settings")
                         .on_click(cx.listener(|this, _, _, cx| {
                             let config = multibot_core::voice::VoiceSettings {
-                                api_key: this.deepgram_key_input.read(cx).value().trim().to_owned(),
+                                api_key: multibot_core::voice::normalize_api_key(this.deepgram_key_input.read(cx).value().as_str()),
                                 language: this.deepgram_language_input.read(cx).value().trim().to_owned(),
                             };
                             if !config.api_key.is_empty() {

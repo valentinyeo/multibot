@@ -6730,11 +6730,51 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn dictation_shortcut_and_mic_report_missing_key_without_changing_draft(cx: &mut TestAppContext) {
+    fn focused_composer_ctrl_d_dictates_and_shift_d_still_copies_code(cx: &mut TestAppContext) {
         let (handle, view) = open_test_view_with_entity(cx);
         cx.update_window(handle, |_, window, cx| {
             view.update(cx, |v, cx| {
-                v.settings.voice.api_key.clear();
+                // An invalid manual override makes this independent of host credentials/audio.
+                v.settings.voice.api_key = "invalid key".into();
+                v.messages = vec![ChatMessage {
+                    role: MessageRole::Assistant,
+                    text: "```rust\nlet answer = 42;\n```".into(),
+                    ..Default::default()
+                }];
+                v.prompt_input.update(cx, |input, cx| {
+                    input.set_value("Unsent draft", window, cx);
+                    input.focus(window, cx);
+                });
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.press("ctrl-d", cx);
+            assert!(view.read(cx).notice.as_deref().unwrap().contains("API key"));
+            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "Unsent draft");
+            view.update(cx, |v, _| {
+                v.notice = None;
+                v.voice.phase.start();
+            });
+            window.press("ctrl-shift-d", cx);
+            assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some("let answer = 42;"));
+            assert_eq!(view.read(cx).voice.phase, multibot_core::voice::DictationPhase::Listening);
+            window.press("ctrl-alt-d", cx);
+            assert_eq!(view.read(cx).voice.phase, multibot_core::voice::DictationPhase::Listening);
+            window.press("ctrl-d", cx);
+            assert_eq!(view.read(cx).voice.phase, multibot_core::voice::DictationPhase::Finishing);
+            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "Unsent draft");
+            view.update(cx, |v, _| v.voice.phase.start());
+            window.press("ctrl-shift-space", cx);
+            assert_eq!(view.read(cx).voice.phase, multibot_core::voice::DictationPhase::Finishing);
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn dictation_shortcut_and_mic_report_invalid_key_without_changing_draft(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.settings.voice.api_key = "invalid key".into();
                 v.prompt_input.update(cx, |input, cx| input.set_value("Unsent draft", window, cx));
             });
             window.press("ctrl-shift-space", cx);

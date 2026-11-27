@@ -199,9 +199,7 @@ impl MultibotSettings {
     }
 
     pub fn load() -> Self {
-        let mut settings = Self::load_from(&Self::settings_path()).unwrap_or_default();
-        settings.voice.import_legacy_readonly(&crate::zigshel_import::legacy_zigshel_dir());
-        settings
+        Self::load_from(&Self::settings_path()).unwrap_or_default()
     }
 
     pub fn load_from(path: &Path) -> Result<Self> {

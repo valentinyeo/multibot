@@ -44,7 +44,7 @@ impl MultibotView {
         if self.main_surface != crate::state::MainSurface::Chat {
             return;
         }
-        let config = self.settings.voice.clone();
+        let (config, _) = self.settings.voice.resolved();
         if let Err(err) = config.validate() {
             self.notice = Some(err.to_string());
             cx.notify();

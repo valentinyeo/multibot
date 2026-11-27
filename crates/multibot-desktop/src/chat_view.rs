@@ -2850,6 +2850,20 @@ impl MultibotView {
             return;
         }
         let ks = &ev.keystroke;
+        if multibot_keys::is_inline_dictation_chord(
+            ks.modifiers.control,
+            ks.modifiers.shift,
+            ks.modifiers.alt,
+            ks.modifiers.platform,
+            &ks.key,
+        ) {
+            if !ev.is_held {
+                self.toggle_dictation(window, cx);
+            }
+            cx.stop_propagation();
+            window.prevent_default();
+            return;
+        }
         let is_shift_only_g = ks.key.eq_ignore_ascii_case("g")
             && ks.modifiers.shift
             && !ks.modifiers.control
@@ -5241,7 +5255,7 @@ impl MultibotView {
                             .text_color(if self.voice.phase == multibot_core::voice::DictationPhase::Listening {
                                 gpui_kit::rgb(0xEF4444).into()
                             } else { theme::text_secondary() })
-                            .accessibility_label("Voice dictation").tooltip("Start / stop dictation · Ctrl+Shift+Space · Esc cancels")
+                            .accessibility_label("Voice dictation").tooltip("Start / stop dictation · Ctrl+D / Ctrl+Shift+Space · Esc cancels")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.toggle_dictation(window, cx);
                             })))
