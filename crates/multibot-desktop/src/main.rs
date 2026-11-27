@@ -24,7 +24,7 @@ mod voice;
 
 use app::{
     ArchiveSession, BrowseCommands, CaptureBrowserPane, CloseOverlay, CopyLatestCodeBlock,
-    DeleteSession, FindInChat, FocusBrowserPane, FontZoomIn, FontZoomOut, FontZoomReset, GoLeader,
+    DeleteSession, FindInChat, FocusBrowserPane, FontZoomIn, FontZoomOut, FontZoomReset,
     InboxNext, InboxNextSplit, InboxPrev, InboxPrevSplit, JumpSession1, JumpSession2, JumpSession3,
     JumpSession4, JumpSession5, JumpSession6, JumpSession7, JumpSession8, JumpSession9, JumpWorkspace1,
     JumpWorkspace2, JumpWorkspace3, JumpWorkspace4, JumpWorkspace5, JumpWorkspace6, JumpWorkspace7,
@@ -126,7 +126,6 @@ pub fn bind_multibot_keys(cx: &mut App) {
         KeyBinding::new("alt-shift-e", OpenDone, None),
         KeyBinding::new("alt-shift-h", OpenHibernated, None),
         KeyBinding::new("alt-shift-d", OpenDissolved, None),
-        KeyBinding::new("alt-g", GoLeader, None),
         KeyBinding::new("tab", ToggleHibernateMode, Some("HibernatePicker")),
         KeyBinding::new("ctrl-h", RemindSession, None),
         KeyBinding::new("alt-h", RemindSession, None),

@@ -229,16 +229,16 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
     },
     ShortcutSpec {
         id: "session.remind_me",
-        display: "Ctrl+H",
-        gpui_key: "ctrl-h",
+        display: "Alt+H",
+        gpui_key: "alt-h",
         category: ShortcutCategory::Navigation,
         description: "Hibernate session (Wake on reply or Stay hidden)",
         wired: true,
     },
     ShortcutSpec {
-        id: "session.remind_me_alt",
-        display: "Alt+H",
-        gpui_key: "alt-h",
+        id: "session.remind_me_fallback",
+        display: "Ctrl+H",
+        gpui_key: "ctrl-h",
         category: ShortcutCategory::Navigation,
         description: "Hibernate session (Wake on reply or Stay hidden)",
         wired: true,
@@ -340,14 +340,6 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         gpui_key: "alt-shift-d",
         category: ShortcutCategory::Inbox,
         description: "Open Dissolved view",
-        wired: true,
-    },
-    ShortcutSpec {
-        id: "inbox.go",
-        display: "Alt+G",
-        gpui_key: "alt-g",
-        category: ShortcutCategory::Inbox,
-        description: "Go to view: I Inbox, E Done, H Hibernated, D Dissolved; Esc cancels",
         wired: true,
     },
     // =========================================================================
@@ -1098,7 +1090,7 @@ mod tests {
             }
         }
 
-        assert_eq!(SHORTCUTS.len(), 101);
+        assert_eq!(SHORTCUTS.len(), 100);
     }
 
     #[test]
@@ -1251,12 +1243,21 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_views_and_go_leader_have_distinct_wired_global_chords() {
+    fn lifecycle_views_have_distinct_single_chords_without_a_leader() {
+        assert!(!SHORTCUTS.iter().any(|s| s.gpui_key == "alt-g"));
+        assert_eq!(
+            SHORTCUTS
+                .iter()
+                .find(|s| s.id == "session.remind_me")
+                .unwrap()
+                .display,
+            "Alt+H"
+        );
+        assert!(SHORTCUTS.iter().any(|s| s.gpui_key == "ctrl-h" && s.wired));
         for (id, key) in [
             ("inbox.done", "alt-shift-e"),
             ("inbox.hibernated", "alt-shift-h"),
             ("inbox.dissolved", "alt-shift-d"),
-            ("inbox.go", "alt-g"),
         ] {
             let bindings: Vec<_> = SHORTCUTS.iter().filter(|s| s.gpui_key == key).collect();
             assert_eq!(bindings.len(), 1);
@@ -1326,7 +1327,7 @@ mod tests {
             "voice.read_prev",
             "voice.read_next",
             "session.remind_me",
-            "session.remind_me_alt",
+            "session.remind_me_fallback",
             "snippets.open",
             "snippets.open_alt",
             "room.new",
@@ -1401,7 +1402,7 @@ mod tests {
             "session.mark_unread",
             "session.waiting",
             "session.remind_me",
-            "session.remind_me_alt",
+            "session.remind_me_fallback",
             "session.undo_waiting",
             "session.move_up",
             "session.move_down",
@@ -1437,7 +1438,7 @@ mod tests {
             assert_eq!(spec.gpui_key, key);
             assert!(spec.wired);
         }
-        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 71);
+        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 70);
         assert!(!by_id("browser.close_tab").unwrap().wired);
         assert!(!by_id("chat.steer").unwrap().wired);
         assert!(by_gpui_key("ctrl-shift-j").is_none());

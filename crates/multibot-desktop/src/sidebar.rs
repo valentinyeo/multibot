@@ -976,6 +976,21 @@ impl MultibotView {
                         cx.notify();
                     })),
             );
+        if store
+            .workspace_by_id(&self.sidebar_state.active_workspace_id)
+            .is_some()
+        {
+            ws_menu = ws_menu.child(
+                Button::new("workspace-dissolve")
+                    .small()
+                    .w_full()
+                    .label("Dissolve workspace")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.sidebar_state.workspace_menu_open = false;
+                        this.request_dissolve_workspace(window, cx);
+                    })),
+            );
+        }
         let ws_strip = v_flex()
             .w_full()
             .relative()

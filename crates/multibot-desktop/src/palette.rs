@@ -20,7 +20,7 @@ use gpui_kit::{
 use multibot_core::SidebarMode;
 use multibot_core::workspaces::{
     PaletteCategory, PaletteCommandSpec, PaletteMode, PaletteRow, PaletteStats,
-    STARRED_WORKSPACE_ID, now_unix_ms, rank_palette,
+    DEFAULT_WORKSPACE_NAME, STARRED_WORKSPACE_ID, now_unix_ms, rank_palette,
 };
 use multibot_keys::{ALL_CATEGORIES, by_category};
 use multibot_proto::{AgentKind, ClientRequest};
@@ -42,6 +42,7 @@ pub(crate) struct PaletteState {
     pub reminder_target: Option<ReminderTarget>,
     pub hibernate_wake_on_reply: bool,
     pub directory_picker: Option<SessionDirectoryPicker>,
+    pub dissolve_workspace_id: Option<String>,
     pub selected_index: usize,
     pub tab_context_session_key: Option<String>,
     pub input_sub: Option<Subscription>,
@@ -60,6 +61,7 @@ impl MultibotView {
         self.palette_state.tab_context_session_key = None;
         self.palette_state.reminder_target = None;
         self.palette_state.directory_picker = None;
+        self.palette_state.dissolve_workspace_id = None;
         self.palette_state.selected_index = 0;
         self.palette_state.scroll_handle.scroll_to_item(0);
         self.ensure_palette_input_subscription(window, cx);
@@ -67,6 +69,31 @@ impl MultibotView {
             state.set_value("", window, cx);
             state.focus(window, cx);
         });
+        cx.notify();
+    }
+
+    pub(crate) fn request_dissolve_workspace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.sidebar_state.active_workspace_id.clone();
+        if self
+            .sidebar_state
+            .workspace_store
+            .workspace_by_id(&id)
+            .is_none()
+        {
+            self.notice = Some("Choose a workspace before dissolving it.".into());
+            cx.notify();
+            return;
+        }
+        if self.workspace_live_session_keys(&id).is_empty() {
+            self.dissolve_workspace(&id, cx);
+            return;
+        }
+        self.open_palette(window, cx);
+        self.palette_state.dissolve_workspace_id = Some(id);
         cx.notify();
     }
 
@@ -84,6 +111,7 @@ impl MultibotView {
         self.active_modal = ActiveModal::Palette;
         self.palette_state.reminder_target = None;
         self.palette_state.directory_picker = None;
+        self.palette_state.dissolve_workspace_id = None;
         self.palette_state.tab_context_session_key = Some(session_key);
         self.palette_state.selected_index = 0;
         self.palette_state.scroll_handle.scroll_to_item(0);
@@ -125,6 +153,7 @@ impl MultibotView {
         self.palette_state.hibernate_wake_on_reply = true;
         self.palette_state.reminder_target = Some(target);
         self.palette_state.directory_picker = None;
+        self.palette_state.dissolve_workspace_id = None;
     }
 
     fn ensure_palette_input_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -221,7 +250,7 @@ impl MultibotView {
             PaletteCommandSpec {
                 id: "pal-cmd-remind".into(),
                 label: "Hibernate".into(),
-                chord: "Ctrl+H".into(),
+                chord: "Alt+H".into(),
                 category: PaletteCategory::Sessions,
                 destructive: false,
                 aliases: vec!["reminder".into()],
@@ -380,6 +409,16 @@ impl MultibotView {
                 category: PaletteCategory::WorkspacesAndWindows,
                 destructive: false,
                 aliases: vec!["snooze".into()],
+                tab_context: false,
+                global: true,
+            },
+            PaletteCommandSpec {
+                id: "workspace.dissolve".into(),
+                label: "Dissolve workspace".into(),
+                chord: String::new(),
+                category: PaletteCategory::WorkspacesAndWindows,
+                destructive: true,
+                aliases: vec!["stop workspace agents".into()],
                 tab_context: false,
                 global: true,
             },
@@ -777,6 +816,17 @@ impl MultibotView {
     }
 
     pub(crate) fn build_palette_rows(&self, query: &str, now_ms: i64) -> Vec<PaletteRow> {
+        if self.palette_state.dissolve_workspace_id.is_some() {
+            return vec![PaletteRow::Command {
+                id: "workspace.dissolve.confirm".into(),
+                label: "Dissolve workspace and stop agents".into(),
+                chord: "Enter · Esc cancels".into(),
+                category: PaletteCategory::WorkspacesAndWindows,
+                destructive: true,
+                match_rank: 0,
+                frecency: 0,
+            }];
+        }
         if let Some(picker) = &self.palette_state.directory_picker {
             let query = query.trim().to_lowercase();
             return picker
@@ -906,6 +956,14 @@ impl MultibotView {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        if let Some(id) = self.palette_state.dissolve_workspace_id.take() {
+            self.active_modal = ActiveModal::None;
+            if matches!(row, PaletteRow::Command { ref id, .. } if id == "workspace.dissolve.confirm") {
+                self.dissolve_workspace(&id, cx);
+            }
+            cx.notify();
+            return;
+        }
         if let Some(picker) = self.palette_state.directory_picker.take() {
             if let PaletteRow::Command { id, .. } = row
                 && let Some(idx) = id
@@ -984,6 +1042,7 @@ impl MultibotView {
         self.palette_state.tab_context_session_key = None;
         self.palette_state.reminder_target = None;
         self.palette_state.directory_picker = None;
+        self.palette_state.dissolve_workspace_id = None;
 
         match row {
             PaletteRow::Header(_) => {}
@@ -1222,19 +1281,46 @@ impl MultibotView {
                         }
                         return;
                     }
+                    "workspace.dissolve" => {
+                        if let Some(window) = window {
+                            self.request_dissolve_workspace(window, cx);
+                        }
+                        return;
+                    }
                     "workspace.delete" => {
                         let cur = self.sidebar_state.active_workspace_id.clone();
-                        let fallback = self
-                            .sidebar_state
-                            .workspace_store
-                            .visible_workspaces(now_ms)
+                        let keys: Vec<_> = self
+                            .session_inputs()
                             .into_iter()
-                            .find(|w| w.id != cur)
-                            .map(|w| w.id.clone());
+                            .filter(|input| {
+                                self.sidebar_state
+                                    .workspace_store
+                                    .effective_workspace_id(&input.key)
+                                    == cur
+                            })
+                            .map(|input| input.key)
+                            .collect();
+                        for key in keys {
+                            self.sidebar_state
+                                .workspace_store
+                                .assign_session_workspace(&key, &cur);
+                        }
+                        let store = &mut self.sidebar_state.workspace_store;
+                        let general = store
+                            .workspaces
+                            .iter()
+                            .find(|w| w.id != cur && !w.archived && w.name == DEFAULT_WORKSPACE_NAME)
+                            .map(|w| w.id.clone())
+                            .or_else(|| {
+                                store
+                                    .create_workspace(DEFAULT_WORKSPACE_NAME, None)
+                                    .ok()
+                                    .map(|w| w.id)
+                            });
                         if self
                             .sidebar_state
                             .workspace_store
-                            .delete_workspace(&cur, fallback.as_deref())
+                            .delete_workspace(&cur, general.as_deref())
                             .is_ok()
                         {
                             self.sidebar_state.active_workspace_id =
@@ -1533,6 +1619,7 @@ impl MultibotView {
             self.palette_state.tab_context_session_key = None;
             self.palette_state.reminder_target = None;
             self.palette_state.directory_picker = None;
+            self.palette_state.dissolve_workspace_id = None;
             self.palette_state.selected_index = 0;
             self.palette_state.scroll_handle.scroll_to_item(0);
             cx.notify();
@@ -1599,6 +1686,7 @@ impl MultibotView {
                 self.palette_state.tab_context_session_key = None;
                 self.palette_state.reminder_target = None;
                 self.palette_state.directory_picker = None;
+                self.palette_state.dissolve_workspace_id = None;
                 self.focus_active_surface_default(window, cx);
                 cx.stop_propagation();
                 cx.notify();
@@ -1924,6 +2012,21 @@ impl MultibotView {
             context_banner
         };
 
+        let context_banner = if let Some(id) = &self.palette_state.dissolve_workspace_id {
+            let name = self
+                .sidebar_state
+                .workspace_store
+                .workspace_by_id(id)
+                .map(|w| w.name.as_str())
+                .unwrap_or("workspace");
+            Some(format!(
+                "Dissolve {name} and stop {} live agents? Chat logs stay in Dissolved.",
+                self.workspace_live_session_keys(id).len()
+            ))
+        } else {
+            context_banner
+        };
+
         div()
             .id("palette-backdrop")
             .absolute()
@@ -1940,6 +2043,7 @@ impl MultibotView {
                     this.palette_state.tab_context_session_key = None;
                     this.palette_state.reminder_target = None;
                     this.palette_state.directory_picker = None;
+                    this.palette_state.dissolve_workspace_id = None;
                     this.focus_active_surface_default(window, cx);
                     cx.notify();
                 }),
@@ -1963,6 +2067,7 @@ impl MultibotView {
                         this.palette_state.tab_context_session_key = None;
                         this.palette_state.reminder_target = None;
                         this.palette_state.directory_picker = None;
+                        this.palette_state.dissolve_workspace_id = None;
                         this.active_modal = ActiveModal::None;
                         this.focus_active_surface_default(window, cx);
                         cx.notify();
@@ -2031,6 +2136,7 @@ impl MultibotView {
                         this.palette_state.tab_context_session_key = None;
                         this.palette_state.reminder_target = None;
                         this.palette_state.directory_picker = None;
+                        this.palette_state.dissolve_workspace_id = None;
                         this.active_modal = ActiveModal::None;
                         this.focus_active_surface_default(window, cx);
                         cx.stop_propagation();
@@ -2246,6 +2352,7 @@ impl MultibotView {
             .child(
                 v_flex()
                     .id("shortcuts-modal")
+                    .test_support()
                     .w(px(640.0))
                     .max_h(px(580.0))
                     .rounded(RADIUS_MODAL)
@@ -2318,6 +2425,252 @@ mod tests {
             })
             .unwrap()
         })
+    }
+
+    #[gpui_kit::test]
+    fn dissolve_workspace_confirms_stops_agents_keeps_split_and_restores_on_reactivate(
+        cx: &mut TestAppContext,
+    ) {
+        use multibot_core::workspaces::{InboxSplit, SessionLifecycle};
+        let (handle, view) = open_view(cx);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        cx.update_window(handle, |_, window, cx| {
+            let workspace_id = view.update(cx, |v, _| {
+                v.daemon_tx = Some(tx);
+                let workspace = v.sidebar_state.workspace_store.create_workspace("Project", None).unwrap();
+                v.sidebar_state.active_workspace_id = workspace.id.clone();
+                v.sessions = (0..5).map(|i| SessionSummary {
+                    id: format!("workspace-{i}"), title: format!("Chat {i}"),
+                    agent: AgentKind::Claude,
+                    archived: i == 3, archive_kill_process: i == 3,
+                    ..Default::default()
+                }).collect();
+                for session in &v.sessions[..4] {
+                    let key = v.session_key_for(session);
+                    v.sidebar_state.workspace_store.assign_session_workspace(&key, &workspace.id);
+                }
+                let done = v.sessions[1].clone();
+                let hibernated = v.sessions[2].clone();
+                let key = v.session_key_for(&done);
+                v.sidebar_state.workspace_store.archive_to_waiting_session(&key, now_unix_ms(), &done);
+                let key = v.session_key_for(&hibernated);
+                v.sidebar_state.workspace_store.hibernate_session(&key, &hibernated, Some(now_unix_ms() + 100000), None, true);
+                workspace.id
+            });
+            window.render_frame(cx);
+            window.press("ctrl-k", cx);
+            window.input("Dissolve workspace", cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert!(window.find("workspace.dissolve.confirm").visible());
+            assert!(rx.try_recv().is_err(), "confirmation must not stop agents");
+            assert!(!view.read(cx).sidebar_state.workspace_store.workspace_by_id(&workspace_id).unwrap().archived);
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(rx.try_recv().is_err());
+            window.press("ctrl-k", cx);
+            window.input("Dissolve workspace", cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            let mut stopped = Vec::new();
+            while let Ok(request) = rx.try_recv() {
+                match request {
+                    ClientRequest::ArchiveSession { session_id, kill_process: true, .. } => stopped.push(session_id),
+                    other => panic!("unexpected request: {other:?}"),
+                }
+            }
+            stopped.sort();
+            assert_eq!(stopped, ["workspace-0", "workspace-1", "workspace-2"]);
+            view.read_with(cx, |v, _| {
+                assert!(!v.sidebar_state.workspace_store.visible_workspaces(now_unix_ms()).iter().any(|w| w.id == workspace_id));
+                assert!(v.sessions[..4].iter().all(|s| s.archived && s.archive_kill_process));
+                assert!(!v.sessions[4].archived);
+            });
+            window.press("alt-i", cx);
+            window.render_frame(cx);
+            assert!(!view.read(cx).inbox_visible_splits(now_unix_ms()).contains(&InboxSplit::Workspace(workspace_id.clone())));
+            window.press("alt-shift-d", cx);
+            window.render_frame(cx);
+            assert!(view.read(cx).inbox_visible_splits(now_unix_ms()).contains(&InboxSplit::Workspace(workspace_id.clone())));
+            assert!(window.find("inbox-split-ws-0").visible());
+            window.click("inbox-split-ws-0", cx);
+            window.render_frame(cx);
+            view.read_with(cx, |v, _| {
+                assert_eq!(v.inbox_state.active_split, InboxSplit::Workspace(workspace_id.clone()));
+                assert_eq!(v.compute_inbox_rows(now_unix_ms()).len(), 4);
+            });
+            view.update(cx, |v, cx| {
+                let key = v.session_key_for(&v.sessions[0]);
+                assert!(v.reactivate_session_key(&key, cx));
+                assert!(v.sidebar_state.workspace_store.visible_workspaces(now_unix_ms()).iter().any(|w| w.id == workspace_id));
+                assert_eq!(v.sidebar_state.workspace_store.effective_workspace_id(&key), workspace_id);
+                assert_eq!(v.sidebar_state.workspace_store.session_lifecycle(&key, &v.sessions[0], now_unix_ms()), SessionLifecycle::Active);
+            });
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::UnarchiveSession { session_id }) if session_id == "workspace-0"));
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn workspace_dissolve_requires_all_hosts_and_routes_stops_to_each_host(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = open_view(cx);
+        let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+        cx.update_window(handle, |_, window, cx| {
+            let workspace_id = view.update(cx, |v, _| {
+                let workspace = v.sidebar_state.workspace_store.create_workspace("Two servers", None).unwrap();
+                v.host_sessions = ["a", "b"].into_iter().map(|host| (host.into(), SessionSummary {
+                    id: "same-id".into(), agent: AgentKind::Claude, ..Default::default()
+                })).collect();
+                v.sessions = v.host_sessions.iter().map(|(_, s)| s.clone()).collect();
+                let keys: Vec<_> = v.session_inputs().into_iter().map(|input| input.key).collect();
+                for key in keys {
+                    v.sidebar_state.workspace_store.assign_session_workspace(&key, &workspace.id);
+                }
+                v.host_txs.insert("a".into(), tx_a);
+                workspace.id
+            });
+            view.update(cx, |v, cx| v.dissolve_workspace(&workspace_id, cx));
+            assert!(rx_a.try_recv().is_err(), "no partial stop when a server is disconnected");
+            assert!(!view.read(cx).sidebar_state.workspace_store.workspace_by_id(&workspace_id).unwrap().archived);
+            view.update(cx, |v, cx| {
+                v.host_txs.insert("b".into(), tx_b);
+                v.dissolve_workspace(&workspace_id, cx);
+            });
+            for rx in [&mut rx_a, &mut rx_b] {
+                assert!(matches!(rx.try_recv(), Ok(ClientRequest::ArchiveSession { session_id, kill_process: true, .. }) if session_id == "same-id"));
+                assert!(rx.try_recv().is_err());
+            }
+            assert!(view.read(cx).sidebar_state.workspace_store.workspace_by_id(&workspace_id).unwrap().archived);
+            window.render_frame(cx);
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn workspace_delete_is_safe_and_empty_dissolve_needs_no_confirmation(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, _| {
+                v.daemon_tx = Some(tx);
+                let other = v
+                    .sidebar_state
+                    .workspace_store
+                    .create_workspace("Other project", None)
+                    .unwrap();
+                v.sidebar_state.workspace_store.workspaces[0].position = 10;
+                assert_eq!(
+                    v.sidebar_state.workspace_store.default_workspace_id(),
+                    other.id
+                );
+                let workspace = v
+                    .sidebar_state
+                    .workspace_store
+                    .create_workspace("Delete me", None)
+                    .unwrap();
+                v.sidebar_state.active_workspace_id = workspace.id.clone();
+                let session = SessionSummary {
+                    id: "live".into(),
+                    agent: AgentKind::Claude,
+                    ..Default::default()
+                };
+                let key = v.session_key_for(&session);
+                v.sidebar_state
+                    .workspace_store
+                    .assign_session_workspace(&key, &workspace.id);
+                v.sessions = vec![session];
+            });
+            window.render_frame(cx);
+            window.press("ctrl-k", cx);
+            window.input("Delete workspace", cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert!(rx.try_recv().is_err(), "delete must not stop any agent");
+            view.read_with(cx, |v, _| {
+                assert!(!v.sessions[0].archived);
+                let key = v.session_key_for(&v.sessions[0]);
+                let store = &v.sidebar_state.workspace_store;
+                assert_eq!(
+                    store
+                        .workspace_by_id(&store.effective_workspace_id(&key))
+                        .unwrap()
+                        .name,
+                    "General"
+                );
+                assert!(!store.workspaces.iter().any(|w| w.name == "Delete me"));
+            });
+            let empty_id = view.update(cx, |v, _| {
+                let workspace = v
+                    .sidebar_state
+                    .workspace_store
+                    .create_workspace("Empty", None)
+                    .unwrap();
+                v.sidebar_state.active_workspace_id = workspace.id.clone();
+                workspace.id
+            });
+            window.press("ctrl-k", cx);
+            window.input("Dissolve workspace", cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::None);
+            assert!(
+                view.read(cx)
+                    .sidebar_state
+                    .workspace_store
+                    .workspace_by_id(&empty_id)
+                    .unwrap()
+                    .archived
+            );
+            assert!(rx.try_recv().is_err());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn hibernate_displays_alt_h_and_accepts_ctrl_h_fallback(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, _| {
+                let session = SessionSummary {
+                    id: "hibernate".into(),
+                    agent: AgentKind::Claude,
+                    ..Default::default()
+                };
+                v.sessions = vec![session.clone()];
+                v.selected_session = Some(session);
+                assert_eq!(
+                    v.build_palette_command_catalog(now_unix_ms())
+                        .iter()
+                        .find(|c| c.label == "Hibernate")
+                        .unwrap()
+                        .chord,
+                    "Alt+H"
+                );
+            });
+            window.render_frame(cx);
+            for chord in ["alt-h", "ctrl-h"] {
+                window.press(chord, cx);
+                window.render_frame(cx);
+                assert!(window.find("pal-reminder-0").visible());
+                window.press("escape", cx);
+                window.render_frame(cx);
+            }
+            window.press("f1", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::Shortcuts);
+            assert!(window.find("shortcuts-modal").visible());
+            let spec = multibot_keys::by_id("session.remind_me").unwrap();
+            assert_eq!(spec.display, "Alt+H");
+            assert!(
+                !multibot_keys::SHORTCUTS
+                    .iter()
+                    .any(|s| s.gpui_key == "alt-g")
+            );
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]

@@ -8,6 +8,8 @@ This file is embedded in Multibot so Changelog works offline.
 ## Unreleased
 
 - Dock Chrome or Edge beside each chat with Alt+A, switch focus with Alt+Q, and attach a browser screenshot with Ctrl+Shift+S.
+- Dissolve a workspace to stop its agents and keep chats grouped in Dissolved; reactivating a chat restores its workspace. Delete workspace still keeps agents running and moves chats to General.
+- Open lifecycle views with single chords or headline tabs, without an Alt+G leader. Hibernate now shows Alt+H first; Ctrl+H still works.
 - Keep shell discovery working when the tmux server starts alongside Multibot.
 - Reduce server memory use when reading Pi and Cursor chats with long replies or images.
 - Open Changelog from Ctrl+K to read the full release history, even offline.

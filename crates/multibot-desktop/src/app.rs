@@ -107,7 +107,6 @@ actions!(
         OpenDone,
         OpenHibernated,
         OpenDissolved,
-        GoLeader,
         ToggleHibernateMode,
         // Slice 3 — Workspaces & views (16 actions)
         ToggleFavorite,
@@ -5306,22 +5305,6 @@ impl Render for MultibotView {
             .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, _, cx| {
                 this.handle_modifiers_changed(ev, cx);
             }))
-            .capture_action(cx.listener(|this, _: &CloseOverlay, _, cx| {
-                if this.inbox_state.go_leader {
-                    this.inbox_state.go_leader = false;
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-            }))
-            .capture_action(
-                cx.listener(|this, _: &gpui_kit::component::input::Escape, _, cx| {
-                    if this.inbox_state.go_leader {
-                        this.inbox_state.go_leader = false;
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }),
-            )
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 if this.handle_lifecycle_keydown(ev, window, cx) {
                     return;
@@ -5383,7 +5366,6 @@ impl Render for MultibotView {
                 this.set_main_surface(MainSurface::Inbox);
                 this.inbox_state.select_all_split();
                 this.inbox_state.lifecycle = multibot_core::workspaces::SessionLifecycle::Active;
-                this.inbox_state.go_leader = false;
                 this.focus_inbox(window, cx);
                 cx.notify();
             }))
@@ -5407,10 +5389,6 @@ impl Render for MultibotView {
                     window,
                     cx,
                 );
-            }))
-            .on_action(cx.listener(|this, _: &GoLeader, _, cx| {
-                this.inbox_state.go_leader = true;
-                cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleInbox, window, cx| {
                 if this.table_modal_state.is_open() {
@@ -5512,6 +5490,7 @@ impl Render for MultibotView {
                     this.active_modal = ActiveModal::None;
                     this.palette_state.tab_context_session_key = None;
                     this.palette_state.reminder_target = None;
+                    this.palette_state.dissolve_workspace_id = None;
                     this.focus_active_surface_default(window, cx);
                 } else if this.sidebar_state.workspace_menu_open {
                     this.sidebar_state.workspace_menu_open = false;
@@ -6144,24 +6123,6 @@ impl Render for MultibotView {
                 el.child(self.render_changelog_modal(cx))
             })
             .when_some(self.render_table_modal(cx), |el, modal| el.child(modal))
-            .when(self.inbox_state.go_leader, |el| {
-                el.child(
-                    div()
-                        .id("go-leader-hint")
-                        .test_support()
-                        .absolute()
-                        .bottom(px(20.0))
-                        .left(px(40.0))
-                        .px_4()
-                        .py_2()
-                        .rounded(theme::RADIUS_CHIP)
-                        .bg(theme::bg_surface())
-                        .border_1()
-                        .border_color(theme::border_subtle())
-                        .text_sm()
-                        .child("Go to: I Inbox  E Done  H Hibernated  D Dissolved"),
-                )
-            })
     }
 }
 
@@ -6290,7 +6251,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn lifecycle_global_views_and_go_leader_do_not_type_into_composer(cx: &mut TestAppContext) {
+    fn lifecycle_single_chords_and_removed_leader_preserve_composer(cx: &mut TestAppContext) {
         use multibot_core::workspaces::SessionLifecycle;
         let (handle, view) = open_test_view_with_entity(cx);
         cx.update_window(handle, |_, window, cx| {
@@ -6332,30 +6293,6 @@ mod tests {
                     assert!(window.find(id).visible());
                 }
             }
-            for (key, lifecycle) in [
-                ("i", SessionLifecycle::Active),
-                ("e", SessionLifecycle::Done),
-                ("h", SessionLifecycle::Hibernated),
-                ("d", SessionLifecycle::Dissolved),
-            ] {
-                view.update(cx, |v, cx| {
-                    v.set_main_surface(MainSurface::Chat);
-                    let focus = v.prompt_input.read(cx).focus_handle(cx);
-                    window.focus(&focus, cx);
-                });
-                window.render_frame(cx);
-                window.press("alt-g", cx);
-                window.render_frame(cx);
-                assert!(window.find("go-leader-hint").visible());
-                window.press(key, cx);
-                window.render_frame(cx);
-                assert_eq!(view.read(cx).inbox_state.lifecycle, lifecycle);
-                assert!(!view.read(cx).inbox_state.go_leader);
-                assert_eq!(
-                    view.read(cx).prompt_input.read(cx).value().as_ref(),
-                    "draft"
-                );
-            }
             view.update(cx, |v, cx| {
                 v.set_main_surface(MainSurface::Chat);
                 let focus = v.prompt_input.read(cx).focus_handle(cx);
@@ -6363,12 +6300,12 @@ mod tests {
             });
             window.render_frame(cx);
             window.press("alt-g", cx);
-            window.press("escape", cx);
+            window.press("e", cx);
             window.render_frame(cx);
             assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
             assert_eq!(
                 view.read(cx).prompt_input.read(cx).value().as_ref(),
-                "draft"
+                "drafte"
             );
             window.press("alt-i", cx);
             window.render_frame(cx);
@@ -6376,7 +6313,7 @@ mod tests {
             window.render_frame(cx);
             window.press("e", cx);
             window.render_frame(cx);
-            assert_eq!(view.read(cx).inbox_state.lifecycle, SessionLifecycle::Done);
+            assert_eq!(view.read(cx).inbox_state.lifecycle, SessionLifecycle::Active);
         })
         .unwrap();
     }

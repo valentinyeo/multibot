@@ -171,8 +171,6 @@ Inbox has four headline tabs above the same workspace splits. The sidebar lists 
 | --- | --- |
 | Alt+I | Open Inbox |
 | Alt+Shift+E / H / D | Open Done / Hibernated / Dissolved |
-| Alt+G then I / E / H / D | Go to Inbox / Done / Hibernated / Dissolved from anywhere, including the composer; Esc cancels |
-| Bare G then I / E / H / D in Inbox | Switch headline view |
 | Alt+E / Ctrl+Shift+E | Mark Done; in Done, move back to Inbox |
 | Alt+Z | Undo last Done |
 | Ctrl+K | View: Inbox, View: Done, View: Hibernated, View: Dissolved, Done, Hibernate, Dissolve, Reactivate, Move to Inbox |
@@ -264,9 +262,10 @@ The search bar stays hidden so the Inbox opens clean. Ctrl+F or / opens and focu
 | Ctrl+K -&gt; Set workspace folder | Declare this workspace folder from the repo list; saved for next time |
 | Ctrl+K -&gt; Move workspace to server | Point this workspace default folder at the same path on another account server |
 | Ctrl+K -&gt; New tab on server | Open one workspace tab on another account server without moving the workspace |
+| Ctrl+K -&gt; Dissolve workspace | Stop all live workspace agents after confirmation; keep chats grouped under the workspace in Dissolved. Reactivating a chat restores the workspace. |
+| Ctrl+K -&gt; Delete workspace | Remove the workspace folder and move chats to General without stopping agents. |
 | Ctrl+K Hibernate | Hibernate the selected chat until a chosen time |
-| Ctrl+H / Alt+H / bare H in Inbox | Hibernate: 15 minutes, 1 hour, 3 hours or Tomorrow 9am. Tab toggles Wake on reply (default) / Stay hidden. Type an optional note, then Up/Down and Enter |
-| Alt+H | Same reminder picker as Ctrl+H; remote sessions keep running |
+| Alt+H / bare H in Inbox (Ctrl+H fallback) | Hibernate: 15 minutes, 1 hour, 3 hours or Tomorrow 9am. Tab toggles Wake on reply (default) / Stay hidden. Type an optional note, then Up/Down and Enter |
 | Inbox: Due reminder · Dismiss | Due reminders rise above other chats, including in Unread Only, until dismissed; snoozed workspaces remain quiet until wake |
 | Ctrl+V (in Ctrl+K) | Paste into the palette search |
 | Browser pane focused | Ctrl+C / Ctrl+V / Ctrl+K pass through to the page |

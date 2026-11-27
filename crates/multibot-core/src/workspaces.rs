@@ -1357,6 +1357,37 @@ impl WorkspaceStore {
         Ok(())
     }
 
+    pub fn dissolve_workspace(
+        &mut self,
+        id: &str,
+        session_keys: &[String],
+        now_ms: i64,
+    ) -> std::result::Result<(), WorkspaceError> {
+        if self.workspace_by_id(id).is_none() {
+            return Err(WorkspaceError::NotFound(id.to_string()));
+        }
+        let keys: HashSet<String> = self
+            .session_meta
+            .keys()
+            .chain(session_keys.iter())
+            .filter(|key| self.effective_workspace_id(key) == id)
+            .cloned()
+            .collect();
+        for key in keys {
+            self.assign_session_workspace(&key, id);
+            self.dissolve_session(&key, now_ms);
+        }
+        // Keep a landing workspace without restoring the one being dissolved.
+        if !self
+            .workspaces
+            .iter()
+            .any(|w| w.id != id && !w.archived && !w.snoozed)
+        {
+            self.create_workspace(DEFAULT_WORKSPACE_NAME, None)?;
+        }
+        self.archive_workspace(id)
+    }
+
     pub fn restore_workspace(&mut self, id: &str) -> std::result::Result<(), WorkspaceError> {
         let ws = self
             .workspaces
@@ -2264,6 +2295,28 @@ impl WorkspaceStore {
         splits
     }
 
+    pub fn lifecycle_inbox_splits(
+        &self,
+        lifecycle: SessionLifecycle,
+        now_ms: i64,
+    ) -> Vec<InboxSplit> {
+        let mut splits = self.visible_inbox_splits(now_ms);
+        if lifecycle == SessionLifecycle::Dissolved {
+            let mut hidden: Vec<_> = self
+                .workspaces
+                .iter()
+                .filter(|w| w.archived || w.is_snoozed_at(now_ms))
+                .collect();
+            hidden.sort_by_key(|w| w.position);
+            splits.extend(
+                hidden
+                    .into_iter()
+                    .map(|w| InboxSplit::Workspace(w.id.clone())),
+            );
+        }
+        splits
+    }
+
     /// Inbox split bar set: every split with `>= 1` session in the current Inbox query, plus
     /// `All`, which always stays visible so the Inbox keeps a live tab at `0` total sessions.
     ///
@@ -2660,7 +2713,9 @@ impl WorkspaceStore {
             let eff_ws_id = self.effective_workspace_id(&input.key);
             let (ws_pos, ws_name) = match ws_lookup.get(eff_ws_id.as_str()) {
                 Some((rank, ws)) => {
-                    if ws.archived || ws.is_snoozed_at(now_ms) {
+                    if lifecycle != SessionLifecycle::Dissolved
+                        && (ws.archived || ws.is_snoozed_at(now_ms))
+                    {
                         continue;
                     }
                     (*rank, ws.name.clone())
@@ -3464,6 +3519,112 @@ mod tests {
             host,
             summary,
         }
+    }
+
+    #[test]
+    fn dissolved_workspace_preserves_all_chats_and_its_named_split_after_reload() {
+        let mut store = WorkspaceStore::new();
+        let workspace = store.create_workspace("Project", None).unwrap();
+        let sessions: Vec<_> = (0..3)
+            .map(|i| {
+                make_session(
+                    &format!("workspace-{i}"),
+                    AgentKind::Claude,
+                    "Chat",
+                    100,
+                    false,
+                    false,
+                )
+            })
+            .collect();
+        let inputs: Vec<_> = sessions.iter().map(|s| make_input("h", s)).collect();
+        let keys: Vec<_> = inputs.iter().map(|i| i.key.clone()).collect();
+        for key in &keys {
+            store.assign_session_workspace(key, &workspace.id);
+        }
+        store.assign_session_workspace("offline-chat", &workspace.id);
+        store.archive_to_waiting_session(&keys[1], 100, &sessions[1]);
+        store.hibernate_session(&keys[2], &sessions[2], Some(5000), None, true);
+        store
+            .dissolve_workspace(&workspace.id, &keys, 1000)
+            .unwrap();
+        let store: WorkspaceStore =
+            serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
+        assert!(
+            !store
+                .visible_workspaces(1000)
+                .iter()
+                .any(|w| w.id == workspace.id)
+        );
+        assert!(store.session_meta["offline-chat"].dissolved_at_ms.is_some());
+        for lifecycle in [
+            SessionLifecycle::Active,
+            SessionLifecycle::Done,
+            SessionLifecycle::Hibernated,
+        ] {
+            assert!(
+                store
+                    .query_lifecycle(lifecycle, &InboxSplit::All, &inputs, false, "", 1000)
+                    .is_empty()
+            );
+            assert!(
+                !store
+                    .lifecycle_inbox_splits(lifecycle, 1000)
+                    .contains(&InboxSplit::Workspace(workspace.id.clone()))
+            );
+        }
+        let split = InboxSplit::Workspace(workspace.id.clone());
+        assert!(
+            store
+                .lifecycle_inbox_splits(SessionLifecycle::Dissolved, 1000)
+                .contains(&split)
+        );
+        let rows = store.query_lifecycle(
+            SessionLifecycle::Dissolved,
+            &split,
+            &inputs,
+            false,
+            "",
+            1000,
+        );
+        assert_eq!(rows.len(), 3);
+        for row in rows {
+            assert_eq!(store.effective_workspace_id(&row.session_key), workspace.id);
+        }
+    }
+
+    #[test]
+    fn dissolving_general_keeps_unassigned_chats_there_and_creates_a_new_landing_workspace() {
+        let mut store = WorkspaceStore::new();
+        let session = make_session("general-chat", AgentKind::Claude, "Chat", 100, false, false);
+        let input = make_input("h", &session);
+        store
+            .dissolve_workspace(DEFAULT_WORKSPACE_ID, &[input.key.clone()], 1000)
+            .unwrap();
+        assert!(
+            store
+                .workspace_by_id(DEFAULT_WORKSPACE_ID)
+                .unwrap()
+                .archived
+        );
+        assert_ne!(store.default_workspace_id(), DEFAULT_WORKSPACE_ID);
+        assert_eq!(
+            store.effective_workspace_id(&input.key),
+            DEFAULT_WORKSPACE_ID
+        );
+        assert_eq!(
+            store
+                .query_lifecycle(
+                    SessionLifecycle::Dissolved,
+                    &InboxSplit::Workspace(DEFAULT_WORKSPACE_ID.into()),
+                    &[input],
+                    false,
+                    "",
+                    1000
+                )
+                .len(),
+            1
+        );
     }
 
     #[test]
