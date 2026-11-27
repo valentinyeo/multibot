@@ -207,6 +207,21 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
 }
 
+/// Normalizes a workspace name that arrives from outside Multibot (the server-side
+/// `multiprompt` state). Blank names are rejected so an import cannot create a nameless
+/// workspace.
+///
+/// `Other` is deliberately allowed: the legacy app ships a workspace with that name, and the
+/// ZigShell import already recreates it verbatim. `RESERVED_OTHER_NAME` only guards the
+/// user-facing create and rename commands.
+pub fn canonical_workspace_name(raw: &str) -> std::result::Result<String, WorkspaceError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(WorkspaceError::EmptyName);
+    }
+    Ok(truncate_chars(trimmed, MAX_WORKSPACE_NAME_CHARS))
+}
+
 /// Canonical `F2` / `/rename` title normalization:
 /// trims whitespace, ignores empty/blank input (`None`), caps at 63 Unicode chars.
 pub fn canonicalize_session_title(raw: &str) -> Option<String> {
@@ -688,6 +703,94 @@ impl WorkspaceStore {
 
     pub fn save(&self) -> Result<()> {
         self.save_to(&MultibotSettings::workspaces_path())
+    }
+
+    /// Applies the workspace names the legacy `multiprompt` server recorded for live sessions.
+    ///
+    /// `hints` pairs each live session key with the server-side workspace name for that chat.
+    /// The workspace is created (or matched by name) on first sight, so a session lands in the
+    /// workspace it belongs to instead of the catch-all bucket. A session the user already put
+    /// in some workspace keeps its explicit choice: only sessions without any workspace yet are
+    /// assigned, exactly like the legacy ZigShell import.
+    ///
+    /// Returns the number of sessions whose workspace changed.
+    pub fn apply_server_workspace_hints<S: AsRef<str>>(&mut self, hints: &[(String, S)]) -> usize {
+        let mut assigned = 0;
+        for (session_key, name) in hints {
+            let Ok(name) = canonical_workspace_name(name.as_ref()) else {
+                continue;
+            };
+            let explicit = self
+                .session_meta
+                .get(session_key)
+                .and_then(|m| m.workspace_id.as_deref())
+                .is_some_and(|id| self.workspaces.iter().any(|w| w.id == id));
+            if explicit {
+                continue;
+            }
+            let workspace_id = self.ensure_named_workspace(&name);
+            let meta = self
+                .session_meta
+                .entry(session_key.clone())
+                .or_default();
+            if meta.workspace_id.as_deref() != Some(workspace_id.as_str()) {
+                meta.workspace_id = Some(workspace_id);
+                meta.group_id = None;
+                assigned += 1;
+            }
+        }
+        if assigned > 0 {
+            self.prune_empty_groups();
+        }
+        assigned
+    }
+
+    /// Returns the id of the workspace named `name`, creating it when no name matches.
+    fn ensure_named_workspace(&mut self, name: &str) -> String {
+        if let Some(existing) = self
+            .workspaces
+            .iter()
+            .find(|w| w.name.eq_ignore_ascii_case(name))
+        {
+            return existing.id.clone();
+        }
+        let position = self.workspaces.len();
+        let id = self.generate_unique_workspace_id(name);
+        self.workspaces.push(Workspace {
+            id: id.clone(),
+            name: truncate_chars(name, MAX_WORKSPACE_NAME_CHARS),
+            color: None,
+            archived: false,
+            snoozed: false,
+            snoozed_until_ms: None,
+            position,
+            last_active_session: None,
+        });
+        id
+    }
+
+    /// Reconciles a live session list against everything Multibot knows about where those
+    /// sessions belong: legacy ZigShell assignments first (across host and agent key variants),
+    /// then the workspace names the server recorded for each chat.
+    ///
+    /// The legacy assignment wins when both exist, because the user curated it by hand.
+    /// Returns the number of sessions whose workspace or metadata changed.
+    pub fn reconcile_live_sessions<'a, I>(&mut self, sessions: I) -> usize
+    where
+        I: IntoIterator<Item = (&'a str, &'a SessionSummary)>,
+    {
+        let mut live_keys: Vec<String> = Vec::new();
+        let mut hints: Vec<(String, String)> = Vec::new();
+        for (host, summary) in sessions {
+            let key = canonical_session_key(host, summary.agent, &summary.id);
+            if let Some(workspace) = summary.workspace.as_deref() {
+                hints.push((key.clone(), workspace.to_string()));
+            }
+            live_keys.push(key);
+        }
+        let mut changed = self.reconcile_live_session_keys(&live_keys);
+        changed += self.apply_server_workspace_hints(&hints);
+        changed
     }
 
     /// Restores imported state when host aliases or legacy agent guesses differ from live keys.
@@ -3303,6 +3406,231 @@ mod tests {
         );
         assert!(store.is_favorite(&live));
         assert_eq!(store.reconcile_live_session_keys(&[live]), 0);
+    }
+
+    fn server_summary(id: &str, workspace: Option<&str>) -> SessionSummary {
+        SessionSummary {
+            id: id.to_string(),
+            agent: AgentKind::Claude,
+            title: format!("Live {id}"),
+            source_path: format!("/tmp/{id}.jsonl"),
+            updated_at_ms: 5,
+            workspace: workspace.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn server_workspace_hint_creates_and_reuses_the_named_workspace() {
+        let mut store = WorkspaceStore::new();
+        let yeo = store
+            .apply_server_workspace_hints(&[("vps:claude:sid-1".into(), "Yeo UX")]);
+        assert_eq!(yeo, 1);
+        assert_eq!(store.workspaces.len(), 2); // General + Yeo UX
+        let created = store
+            .workspaces
+            .iter()
+            .find(|w| w.name == "Yeo UX")
+            .unwrap()
+            .id
+            .clone();
+        assert_eq!(
+            store.session_meta["vps:claude:sid-1"].workspace_id.as_deref(),
+            Some(created.as_str())
+        );
+
+        // A second session in the same named workspace reuses it and keeps positions stable.
+        assert_eq!(
+            store.apply_server_workspace_hints(&[
+                ("vps:claude:sid-2".into(), "  yeo ux  "),
+                ("vps:codex:sid-3".into(), "HT Product"),
+            ]),
+            2
+        );
+        assert_eq!(
+            store.session_meta["vps:claude:sid-2"].workspace_id.as_deref(),
+            Some(created.as_str())
+        );
+        let names: Vec<&str> = store.workspaces.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, vec!["General", "Yeo UX", "HT Product"]);
+        // Idempotent on refresh.
+        assert_eq!(
+            store.apply_server_workspace_hints(&[("vps:claude:sid-1".into(), "Yeo UX")]),
+            0
+        );
+    }
+
+    #[test]
+    fn manual_workspace_move_beats_the_server_hint() {
+        let mut store = WorkspaceStore::new();
+        let mine = store.create_workspace("Mine", None).unwrap();
+        store.assign_session_workspace("vps:claude:sid-1", &mine.id);
+        assert_eq!(
+            store.apply_server_workspace_hints(&[("vps:claude:sid-1".into(), "Yeo UX")]),
+            0
+        );
+        assert_eq!(
+            store.session_meta["vps:claude:sid-1"].workspace_id.as_deref(),
+            Some(mine.id.as_str())
+        );
+        assert!(store.workspaces.iter().all(|w| w.name != "Yeo UX"));
+    }
+
+    #[test]
+    fn server_hint_rejects_blank_names_and_recovers_from_dangling_ones() {
+        let mut store = WorkspaceStore::new();
+        assert_eq!(
+            store.apply_server_workspace_hints(&[("a:claude:sid-2".into(), "   ")]),
+            0
+        );
+
+        // `Other` is a real workspace in the legacy app, so the server name recreates it
+        // rather than silently dropping those chats into the catch-all bucket.
+        assert_eq!(
+            store.apply_server_workspace_hints(&[("a:claude:sid-1".into(), "Other")]),
+            1
+        );
+        let other = store
+            .workspaces
+            .iter()
+            .find(|w| w.name == "Other")
+            .unwrap()
+            .id
+            .clone();
+        assert_eq!(
+            store.session_meta["a:claude:sid-1"].workspace_id.as_deref(),
+            Some(other.as_str())
+        );
+
+        // A workspace the user deleted must not keep swallowing the session: a stale
+        // `workspace_id` is not an explicit choice, so the hint applies again.
+        store.session_meta.insert(
+            "a:claude:sid-3".into(),
+            SessionMeta {
+                workspace_id: Some("deleted-workspace".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            store.apply_server_workspace_hints(&[("a:claude:sid-3".into(), "Yeo UX")]),
+            1
+        );
+        let yeo = store
+            .workspaces
+            .iter()
+            .find(|w| w.name == "Yeo UX")
+            .unwrap()
+            .id
+            .clone();
+        assert_eq!(
+            store.session_meta["a:claude:sid-3"].workspace_id.as_deref(),
+            Some(yeo.as_str())
+        );
+    }
+
+    #[test]
+    fn reconcile_live_sessions_combines_legacy_import_with_server_hints() {
+        let sid_imported = "c0a80101-1234-4567-89ab-0123456789ab";
+        let sid_server_only = "d1b90202-2345-5678-9abc-1234567890cd";
+        let mut store = WorkspaceStore::new();
+        let legacy = store.create_workspace("Legacy", None).unwrap();
+        store.assign_session_workspace(&format!("vps0:claude:{sid_imported}"), &legacy.id);
+
+        let imported_live = server_summary(sid_imported, Some("Server Says"));
+        let server_only = server_summary(sid_server_only, Some("Yeo UX"));
+        assert_eq!(
+            store.reconcile_live_sessions([
+                ("VPS Hetzner", &imported_live),
+                ("VPS Hetzner", &server_only),
+            ]),
+            2
+        );
+
+        let imported_key = canonical_session_key("VPS Hetzner", AgentKind::Claude, sid_imported);
+        // The hand-curated legacy assignment wins over the server's name.
+        assert_eq!(
+            store.session_meta[&imported_key].workspace_id.as_deref(),
+            Some(legacy.id.as_str())
+        );
+        let server_key =
+            canonical_session_key("VPS Hetzner", AgentKind::Claude, sid_server_only);
+        let yeo = store
+            .workspaces
+            .iter()
+            .find(|w| w.name == "Yeo UX")
+            .unwrap()
+            .id
+            .clone();
+        assert_eq!(
+            store.session_meta[&server_key].workspace_id.as_deref(),
+            Some(yeo.as_str())
+        );
+        assert!(store.workspaces.iter().all(|w| w.name != "Server Says"));
+
+        // Stable across refreshes and across a host alias change.
+        assert_eq!(
+            store.reconcile_live_sessions([
+                ("VPS Hetzner", &imported_live),
+                ("VPS Hetzner", &server_only),
+            ]),
+            0
+        );
+    }
+
+    #[test]
+    fn inbox_groups_sessions_under_the_workspace_the_server_recorded() {
+        let now = 1_000_000;
+        let mut store = WorkspaceStore::new();
+        let yeo = server_summary("sid-yeo", Some("Yeo UX"));
+        let product = server_summary("sid-product", Some("HT Product"));
+        store.reconcile_live_sessions([("vps", &yeo), ("vps", &product)]);
+
+        let inputs = vec![
+            SessionInput {
+                key: canonical_session_key("vps", AgentKind::Claude, "sid-yeo"),
+                host: "vps",
+                summary: &yeo,
+            },
+            SessionInput {
+                key: canonical_session_key("vps", AgentKind::Claude, "sid-product"),
+                host: "vps",
+                summary: &product,
+            },
+        ];
+
+        // Split order follows workspace position: General, Yeo UX, HT Product.
+        let splits = store.inbox_splits_with_sessions(&inputs, false, "", now);
+        let workspace_names: Vec<String> = splits
+            .iter()
+            .filter_map(|split| match split {
+                InboxSplit::Workspace(id) => store.workspace_by_id(id).map(|w| w.name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(workspace_names, vec!["Yeo UX", "HT Product"]);
+
+        let yeo_id = store
+            .workspaces
+            .iter()
+            .find(|w| w.name == "Yeo UX")
+            .unwrap()
+            .id
+            .clone();
+        let yeo_rows =
+            store.query_inbox(&InboxSplit::Workspace(yeo_id), &inputs, false, "", now);
+        assert_eq!(yeo_rows.len(), 1);
+        assert_eq!(yeo_rows[0].session_id, "sid-yeo");
+        assert_eq!(yeo_rows[0].workspace_name, "Yeo UX");
+
+        // The catch-all bucket holds neither session.
+        let general_rows = store.query_inbox(
+            &InboxSplit::Workspace(DEFAULT_WORKSPACE_ID.to_string()),
+            &inputs,
+            false,
+            "",
+            now,
+        );
+        assert!(general_rows.is_empty());
     }
 
     #[test]

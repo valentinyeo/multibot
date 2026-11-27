@@ -233,6 +233,11 @@ pub struct SessionSummary {
     pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Workspace name recorded by the server-side session metadata (`multiprompt`
+    /// `chat-names.json`). The desktop maps this name onto a local workspace so a live
+    /// session lands where the server says it belongs instead of the catch-all bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 impl Default for SessionSummary {
@@ -253,6 +258,7 @@ impl Default for SessionSummary {
             needs_attention: false,
             archived: false,
             model: None,
+            workspace: None,
         }
     }
 }
@@ -902,6 +908,7 @@ mod tests {
             needs_attention: true,
             archived: false,
             model: Some("claude-opus".into()),
+            workspace: Some("Yeo UX".into()),
         };
 
         let events = vec![

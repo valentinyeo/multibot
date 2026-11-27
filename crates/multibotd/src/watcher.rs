@@ -443,10 +443,13 @@ impl WatchManager {
                             let metadata = MetadataStore::load(&home_c);
                             let archive = ArchiveStore::load(&home_c);
                             let active_ids = pm_c.active_session_ids();
+                            let server_workspaces =
+                                crate::server_workspaces::ServerWorkspaceIndex::load_default_cached();
                             let ctx = DiscoveryContext {
                                 active_session_ids: &active_ids,
                                 metadata: &metadata,
                                 archive: &archive,
+                                server_workspaces: &server_workspaces,
                             };
                             for (path, agent) in targets {
                                 if !path.is_file() {
@@ -637,10 +640,13 @@ fn emit_session_updated(
     let metadata = MetadataStore::load(home);
     let archive = ArchiveStore::load(home);
     let active_ids = process_mgr.active_session_ids();
+    let server_workspaces =
+        crate::server_workspaces::ServerWorkspaceIndex::load_default_cached();
     let ctx = DiscoveryContext {
         active_session_ids: &active_ids,
         metadata: &metadata,
         archive: &archive,
+        server_workspaces: &server_workspaces,
     };
     let mtime_ms = path
         .metadata()

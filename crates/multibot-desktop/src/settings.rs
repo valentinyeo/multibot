@@ -18,6 +18,7 @@ use gpui_kit::{
 use multibot_core::zigshel_import::{import_zigshel_bundle_readonly, merge_zigshel_bundle};
 use multibot_core::{MultibotSettings, SshHostConfig};
 use multibot_gpu::GpuPreference;
+use multibot_proto::SessionSummary;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SettingsTab {
@@ -172,10 +173,14 @@ impl MultibotView {
 
         let hosts_added = self.settings.merge_hosts(bundle.hosts.clone());
         let merge_stats = merge_zigshel_bundle(&mut self.sidebar_state.workspace_store, &bundle);
-        let live_keys: Vec<_> = self.session_inputs().into_iter().map(|s| s.key).collect();
-        self.sidebar_state
-            .workspace_store
-            .reconcile_live_session_keys(&live_keys);
+        let live: Vec<(String, SessionSummary)> = self
+            .session_inputs()
+            .into_iter()
+            .map(|input| (input.host.to_string(), input.summary.clone()))
+            .collect();
+        self.sidebar_state.workspace_store.reconcile_live_sessions(
+            live.iter().map(|(host, summary)| (host.as_str(), summary)),
+        );
 
         self.sync_settings_to_shared(cx);
         self.sync_workspace_to_shared(cx);

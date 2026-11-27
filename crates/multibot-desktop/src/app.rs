@@ -2392,17 +2392,13 @@ impl MultibotView {
                         store.host_connections.get_mut(host_label).unwrap().sessions =
                             sessions.clone();
                         store.rebuild_merged_sessions();
-                        let live_keys: Vec<_> = store
-                            .host_sessions
-                            .iter()
-                            .map(|(host, s)| canonical_session_key(host, s.agent, &s.id))
-                            .collect();
-                        if store
-                            .workspace_store
-                            .reconcile_live_session_keys(&live_keys)
-                            > 0
-                            && store.persist_to_disk
-                        {
+                        let changed = store.workspace_store.reconcile_live_sessions(
+                            store
+                                .host_sessions
+                                .iter()
+                                .map(|(host, summary)| (host.as_str(), summary)),
+                        );
+                        if changed > 0 && store.persist_to_disk {
                             let _ = store.workspace_store.save();
                         }
                         store.bump_revision();
@@ -2771,16 +2767,10 @@ impl MultibotView {
                         let store = cx.global_mut::<SharedAppStore>();
                         store.sessions = sessions.clone();
                         let host = store.connected_host.as_deref().unwrap_or("local");
-                        let live_keys: Vec<_> = sessions
-                            .iter()
-                            .map(|s| canonical_session_key(host, s.agent, &s.id))
-                            .collect();
-                        if store
-                            .workspace_store
-                            .reconcile_live_session_keys(&live_keys)
-                            > 0
-                            && store.persist_to_disk
-                        {
+                        let changed = store.workspace_store.reconcile_live_sessions(
+                            sessions.iter().map(|summary| (host, summary)),
+                        );
+                        if changed > 0 && store.persist_to_disk {
                             let _ = store.workspace_store.save();
                         }
                         store.bump_revision();
@@ -3197,17 +3187,18 @@ impl MultibotView {
                 }
                 ServerEvent::Sessions { sessions } => {
                     self.sessions = sessions;
-                    let live_keys: Vec<_> = self
+                    let live: Vec<(String, multibot_proto::SessionSummary)> = self
                         .sessions
                         .iter()
-                        .map(|s| self.session_key_for(s))
+                        .map(|s| (self.host_for_summary(s), s.clone()))
                         .collect();
-                    if self
+                    let changed = self
                         .sidebar_state
                         .workspace_store
-                        .reconcile_live_session_keys(&live_keys)
-                        > 0
-                    {
+                        .reconcile_live_sessions(
+                            live.iter().map(|(host, s)| (host.as_str(), s)),
+                        );
+                    if changed > 0 {
                         self.persist_workspace_store_if_enabled();
                         self.sync_workspace_to_shared(cx);
                     }
@@ -7664,6 +7655,78 @@ mod tests {
                         Some(ws.id.as_str())
                     );
                     assert!(shared.is_favorite(&live));
+                }
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn server_workspace_hint_lands_in_app_and_view_paths_and_keeps_manual_moves(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, _window, cx| {
+            view.update(cx, |v, cx| {
+                let sid = "e2f2f8d3-b2de-4c17-9727-d3beef065f6d";
+                let mut summary = make_session(sid, AgentKind::Claude, "HT Product Lead", false);
+                summary.workspace = Some("HT Product".into());
+                v.connected_host = Some("VPS Hetzner".into());
+                for app_scoped in [false, true] {
+                    // Fresh store per path so the second iteration starts unassigned.
+                    v.sidebar_state.workspace_store = WorkspaceStore::new();
+                    v.sync_workspace_to_shared(cx);
+                    let event = UiBridgeEvent::Server(ServerEvent::Sessions {
+                        sessions: vec![summary.clone()],
+                    });
+                    if app_scoped {
+                        let connection_gen = cx.global::<SharedAppStore>().connection_gen;
+                        assert!(MultibotView::apply_daemon_bridge_event_to_app(
+                            connection_gen,
+                            event,
+                            &v.runtime,
+                            cx
+                        ));
+                        v.sync_from_shared_store(cx);
+                    } else {
+                        v.handle_bridge_event(event, cx);
+                    }
+
+                    let key = canonical_session_key("VPS Hetzner", AgentKind::Claude, sid);
+                    let place = |store: &WorkspaceStore| {
+                        let ws_id = store.session_meta[&key].workspace_id.clone().unwrap();
+                        store.workspace_by_id(&ws_id).unwrap().name.clone()
+                    };
+                    assert_eq!(place(&v.sidebar_state.workspace_store), "HT Product");
+                    assert_eq!(place(&cx.global::<SharedAppStore>().workspace_store), "HT Product");
+
+                    // The user moves the session somewhere else; the next refresh must
+                    // not drag it back to the server's workspace.
+                    let mine = v
+                        .sidebar_state
+                        .workspace_store
+                        .create_workspace("Mine", None)
+                        .unwrap();
+                    v.sidebar_state
+                        .workspace_store
+                        .assign_session_workspace(&key, &mine.id);
+                    v.sync_workspace_to_shared(cx);
+                    let event = UiBridgeEvent::Server(ServerEvent::Sessions {
+                        sessions: vec![summary.clone()],
+                    });
+                    if app_scoped {
+                        let connection_gen = cx.global::<SharedAppStore>().connection_gen;
+                        assert!(MultibotView::apply_daemon_bridge_event_to_app(
+                            connection_gen,
+                            event,
+                            &v.runtime,
+                            cx
+                        ));
+                        v.sync_from_shared_store(cx);
+                    } else {
+                        v.handle_bridge_event(event, cx);
+                    }
+                    assert_eq!(place(&v.sidebar_state.workspace_store), "Mine");
                 }
             });
         })

@@ -41,6 +41,30 @@ async fn multibotd_stdio_full_wire_roundtrip() {
     let workdir = home.join("repo");
     fs::create_dir_all(&workdir).unwrap();
 
+    // Seed the legacy `multiprompt` server state this host keeps read-only: a chat named
+    // `claude-s1` belongs to "Yeo UX", and a Codex chat whose transcript id only appears in
+    // `agent-host` state must resolve through its tmux key too.
+    let legacy = home.join(".local/state/multiprompt");
+    fs::create_dir_all(legacy.join("agent-host")).unwrap();
+    fs::write(
+        legacy.join("chat-names.json"),
+        concat!(
+            r#"{"live-aaaaaaa":{"name":"Claude chat","sid":"claude-s1","workspace":"Yeo UX"},"#,
+            r#""live-bbbbbbb":{"name":"Codex chat","sid":"provider-sid-not-on-disk","workspace":"HT Product"}}"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        legacy.join("agent-host/deadbeef.config.json"),
+        r#"{"provider":"codex","sid":"provider-sid-not-on-disk","tmux":"live-bbbbbbb"}"#,
+    )
+    .unwrap();
+    fs::write(
+        legacy.join("agent-host/deadbeef.state.json"),
+        r#"{"sid":"provider-sid-not-on-disk","native_session":"codex-s1","tmux":"live-bbbbbbb"}"#,
+    )
+    .unwrap();
+
     // Seed Claude, Codex, and Antigravity fixtures inside isolated HOME
     let claude_dir = home.join(".claude/projects/-repo");
     fs::create_dir_all(&claude_dir).unwrap();
@@ -137,7 +161,8 @@ async fn multibotd_stdio_full_wire_roundtrip() {
         other => panic!("expected Pong, got {other:?}"),
     }
 
-    // 3. ListSessions -> all 3 agents discovered with rich metadata
+    // 3. ListSessions -> all 3 agents discovered with rich metadata, each carrying the
+    //    workspace the legacy server recorded for that chat.
     send_req(&mut stdin, &ClientRequest::ListSessions { limit: Some(20) }).await;
     match next_ev(&mut reader).await {
         ServerEvent::Sessions { sessions } => {
@@ -145,8 +170,15 @@ async fn multibotd_stdio_full_wire_roundtrip() {
             let claude = sessions.iter().find(|s| s.agent == AgentKind::Claude).unwrap();
             assert_eq!(claude.model.as_deref(), Some("Opus 4.6"));
             assert_eq!(claude.last_assistant_id.as_deref(), Some("a1"));
-            assert!(sessions.iter().any(|s| s.agent == AgentKind::Codex));
-            assert!(sessions.iter().any(|s| s.agent == AgentKind::Antigravity));
+            assert_eq!(claude.workspace.as_deref(), Some("Yeo UX"));
+            let codex = sessions.iter().find(|s| s.agent == AgentKind::Codex).unwrap();
+            assert_eq!(codex.workspace.as_deref(), Some("HT Product"));
+            // A chat with no recorded workspace stays unresolvable instead of being guessed.
+            let agy = sessions
+                .iter()
+                .find(|s| s.agent == AgentKind::Antigravity)
+                .unwrap();
+            assert_eq!(agy.workspace, None);
         }
         other => panic!("expected Sessions, got {other:?}"),
     }

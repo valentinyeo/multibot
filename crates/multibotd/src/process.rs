@@ -797,13 +797,16 @@ impl ProcessManager {
         }
 
         let summary = SessionSummary {
-            id: session_id,
+            id: session_id.clone(),
             agent,
             title: clean_title,
             cwd: Some(cwd),
             source_path: source_path.to_string_lossy().to_string(),
             updated_at_ms: ts,
             working,
+            workspace: crate::server_workspaces::ServerWorkspaceIndex::load_default_cached()
+                .workspace_for(&session_id)
+                .map(str::to_string),
             ..Default::default()
         };
         let _ = self.out_tx.send(ServerEvent::SessionSpawned { session: summary });
@@ -842,10 +845,13 @@ impl ProcessManager {
 
         let archive = ArchiveStore::load(&self.home);
         let active_ids = self.active_session_ids();
+        let server_workspaces =
+            crate::server_workspaces::ServerWorkspaceIndex::load_default_cached();
         let ctx = DiscoveryContext {
             active_session_ids: &active_ids,
             metadata: &meta,
             archive: &archive,
+            server_workspaces: &server_workspaces,
         };
 
         let path = Path::new(&source_path);
@@ -867,6 +873,9 @@ impl ProcessManager {
                 updated_at_ms: now_ms(),
                 working: active_ids.contains(&session_id),
                 archived: archive.is_archived(&session_id),
+                workspace: server_workspaces
+                    .workspace_for(&session_id)
+                    .map(str::to_string),
                 ..Default::default()
             }
         };

@@ -2,6 +2,7 @@ mod commands;
 mod process;
 mod providers;
 mod search;
+mod server_workspaces;
 mod watcher;
 
 use anyhow::Result;
@@ -141,10 +142,13 @@ async fn async_main(
                 let _ = disk_tx.send(Box::new(move || {
                     let metadata = MetadataStore::load(&home_c);
                     let archive = ArchiveStore::load(&home_c);
+                    let server_workspaces =
+                        crate::server_workspaces::ServerWorkspaceIndex::load_default_cached();
                     let ctx = DiscoveryContext {
                         active_session_ids: &active_ids,
                         metadata: &metadata,
                         archive: &archive,
+                        server_workspaces: &server_workspaces,
                     };
                     let sessions = discover_all_sessions_with_ctx(&home_c, lim, &ctx);
                     let _ = tx.send(ServerEvent::Sessions { sessions });

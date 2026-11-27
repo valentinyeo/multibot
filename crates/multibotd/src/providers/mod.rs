@@ -7,6 +7,7 @@ use multibot_proto::{
     AgentKind, ChatMessage, DiffBlock, MessageBlock, MessageRole, PromptOption, PromptQuestion,
     SessionSummary, TodoItem, TodoStatus,
 };
+use crate::server_workspaces::ServerWorkspaceIndex;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -212,10 +213,15 @@ impl ArchiveStore {
 }
 
 /// Context passed into discovery/summarization to combine transcript state with daemon state.
+///
+/// `server_workspaces` carries the workspace the legacy `multiprompt` server recorded for a
+/// chat, so a live session can be surfaced with the workspace it belongs to instead of
+/// landing in the desktop's catch-all bucket.
 pub struct DiscoveryContext<'a> {
     pub active_session_ids: &'a HashSet<String>,
     pub metadata: &'a MetadataStore,
     pub archive: &'a ArchiveStore,
+    pub server_workspaces: &'a ServerWorkspaceIndex,
 }
 
 pub trait AgentProvider: Send + Sync {
@@ -250,10 +256,12 @@ pub fn discover_all_sessions(home: &Path, limit: usize) -> Vec<SessionSummary> {
     let metadata = MetadataStore::load(home);
     let archive = ArchiveStore::load(home);
     let active = HashSet::new();
+    let server_workspaces = ServerWorkspaceIndex::default();
     let ctx = DiscoveryContext {
         active_session_ids: &active,
         metadata: &metadata,
         archive: &archive,
+        server_workspaces: &server_workspaces,
     };
     discover_all_sessions_with_ctx(home, limit, &ctx)
 }
@@ -317,6 +325,10 @@ pub fn discover_all_sessions_with_ctx(
                 updated_at_ms: meta.updated_at_ms,
                 working: ctx.active_session_ids.contains(sid),
                 archived: ctx.archive.is_archived(sid),
+                workspace: ctx
+                    .server_workspaces
+                    .workspace_for(sid)
+                    .map(str::to_string),
                 ..Default::default()
             });
             seen_ids.insert((agent, sid.clone()));
@@ -414,6 +426,10 @@ pub fn summarize_session(
         needs_attention: tail.has_pending_question,
         archived: ctx.archive.is_archived(&id),
         model: tail.model.or(header.model),
+        workspace: ctx
+            .server_workspaces
+            .workspace_for(&id)
+            .map(str::to_string),
     }
 }
 
@@ -3884,10 +3900,12 @@ mod tests {
         let meta = MetadataStore::default();
         let archive = ArchiveStore::default();
         let active = HashSet::new();
+        let server_workspaces = ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &active,
             metadata: &meta,
             archive: &archive,
+            server_workspaces: &server_workspaces,
         };
         let now = now_ms();
 
@@ -4281,10 +4299,12 @@ mod tests {
         let meta = MetadataStore::default();
         let archive = ArchiveStore::default();
         let active = HashSet::new();
+        let server_workspaces = ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &active,
             metadata: &meta,
             archive: &archive,
+            server_workspaces: &server_workspaces,
         };
         let now = now_ms();
         let b64_2m = "T".repeat(2 * 1024 * 1024);
@@ -4465,10 +4485,12 @@ mod tests {
         let meta = MetadataStore::default();
         let archive = ArchiveStore::default();
         let active = HashSet::new();
+        let server_workspaces = ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &active,
             metadata: &meta,
             archive: &archive,
+            server_workspaces: &server_workspaces,
         };
         let s_ct = summarize_session(&ClaudeProvider, &p_ct, now_ms(), &ctx);
         assert_eq!(s_ct.title, "Title [image omitted] end");
