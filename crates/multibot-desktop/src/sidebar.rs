@@ -2103,6 +2103,65 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn sidebar_clicks_and_ctrl_digits_select_in_place(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            for workspace_id in [ALL_WORKSPACES_ID, DEFAULT_WORKSPACE_ID] {
+                for auto_sort in [true, false] {
+                    let keys = view.update(cx, |v, cx| {
+                        v.sidebar_state.workspace_store = WorkspaceStore::new();
+                        v.sidebar_state.workspace_store.auto_sort = auto_sort;
+                        v.sidebar_state.active_workspace_id = workspace_id.to_string();
+                        v.sessions = (0..9)
+                            .map(|i| SessionSummary {
+                                id: format!("select-{i}"),
+                                title: format!("Session {i}"),
+                                agent: AgentKind::Claude,
+                                updated_at_ms: 10_000 - i as i64,
+                                needs_attention: true,
+                                ..Default::default()
+                            })
+                            .collect();
+                        let keys: Vec<_> =
+                            v.sessions.iter().map(|s| v.session_key_for(s)).collect();
+                        v.select_session(v.sessions[0].clone(), cx);
+                        keys
+                    });
+                    window.render_frame(cx);
+
+                    for click in [true, false] {
+                        for index in (0..9).rev() {
+                            if click {
+                                window.click(format!("session-{index}"), cx);
+                            } else {
+                                window.press(&format!("ctrl-{}", index + 1), cx);
+                            }
+                            window.render_frame(cx);
+                            view.read_with(cx, |v, _| {
+                                let session = v.selected_session.as_ref().unwrap();
+                                let active = v.session_key_for(session);
+                                assert_eq!(active, keys[index]);
+                                let store = &v.sidebar_state.workspace_store;
+                                let layout = store.compute_sidebar_layout(
+                                    workspace_id,
+                                    &v.session_inputs(),
+                                    false,
+                                    now_unix_ms(),
+                                );
+                                assert_eq!(layout.flat_display_order, keys);
+                                assert_eq!(layout.ctrl_digit_order, keys);
+                                assert_eq!(store.recent_views[0].session_key, active);
+                                assert!(!store.is_session_unread(&active, session));
+                            });
+                        }
+                    }
+                }
+            }
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
     fn ctrl_tab_cycles_every_visible_session_without_reordering(cx: &mut TestAppContext) {
         let (handle, view) = open_view(cx);
         cx.update_window(handle, |_, window, cx| {

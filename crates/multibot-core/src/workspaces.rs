@@ -1752,8 +1752,9 @@ impl WorkspaceStore {
                 }
             });
             let muted = meta.map(|m| m.muted).unwrap_or(false);
+            // Passive visits feed Recents/Frequent, not sidebar activity order.
             let used_ms = meta
-                .map(|m| m.last_used_ms)
+                .and_then(|m| m.last_input_ms)
                 .unwrap_or(0)
                 .max(input.summary.updated_at_ms);
 
@@ -4274,6 +4275,54 @@ mod tests {
         assert_eq!(unread_layout.resolve_ctrl_digit(1), Some(k(1).as_str()));
         assert_eq!(unread_layout.resolve_ctrl_digit(2), Some(k(3).as_str()));
         assert_eq!(unread_layout.resolve_ctrl_digit(3), None);
+    }
+
+    #[test]
+    fn sidebar_order_ignores_views_and_dwell_but_tracks_message_input() {
+        let sessions: Vec<_> = (0..12)
+            .map(|i| {
+                make_session(
+                    &format!("s{i}"),
+                    AgentKind::Claude,
+                    "Chat",
+                    100 - i,
+                    true,
+                    false,
+                )
+            })
+            .collect();
+        let inputs: Vec<_> = sessions.iter().map(|s| make_input("h", s)).collect();
+        let keys: Vec<_> = inputs.iter().map(|s| s.key.clone()).collect();
+        for workspace_id in [ALL_WORKSPACES_ID, DEFAULT_WORKSPACE_ID] {
+            for auto_sort in [true, false] {
+                let mut store = WorkspaceStore::new();
+                store.auto_sort = auto_sort;
+                for (i, key) in keys.iter().enumerate() {
+                    store
+                        .session_meta
+                        .entry(key.clone())
+                        .or_default()
+                        .manual_order = Some(i);
+                }
+                for (i, key) in keys.iter().enumerate().rev() {
+                    store.record_session_view(key, 1000 + i as i64);
+                    store.record_frequent_visit(key, 2000 + i as i64);
+                    store.mark_session_read(key, &sessions[i]);
+                    let layout = store.compute_sidebar_layout(workspace_id, &inputs, false, 3000);
+                    assert_eq!(layout.flat_display_order, keys);
+                    assert_eq!(layout.ctrl_digit_order, keys);
+                    assert_eq!(store.recent_views[0].session_key, *key);
+                    assert!(!store.is_session_unread(key, &sessions[i]));
+                }
+                store.record_session_input(&keys[11], 4000);
+                let layout = store.compute_sidebar_layout(workspace_id, &inputs, false, 4000);
+                if workspace_id == ALL_WORKSPACES_ID || auto_sort {
+                    assert_eq!(layout.ctrl_digit_order[0], keys[11]);
+                } else {
+                    assert_eq!(layout.ctrl_digit_order, keys);
+                }
+            }
+        }
     }
 
     #[test]
