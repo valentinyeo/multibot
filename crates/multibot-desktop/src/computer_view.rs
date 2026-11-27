@@ -212,13 +212,19 @@ fn looks_like_bare_scheme(text: &str) -> bool {
 }
 
 /// The host part of a URL authority, dropping any `user:password@` prefix and port.
+///
+/// A bracketed IPv6 literal keeps its brackets and everything inside them, so
+/// `http://[::1]:6080` reports `[::1]` and not `[`.
 fn authority_host(authority: &str) -> &str {
     let after_credentials = authority.rsplit('@').next().unwrap_or(authority);
-    let host = after_credentials
-        .split(':')
-        .next()
-        .unwrap_or(after_credentials);
-    host.trim()
+    let trimmed = after_credentials.trim();
+    if let Some(rest) = trimmed.strip_prefix('[')
+        && let Some(end) = rest.find(']')
+    {
+        // Include both brackets: `[` + the literal + `]`.
+        return &trimmed[..end + 2];
+    }
+    trimmed.split(':').next().unwrap_or(trimmed)
 }
 
 /// Resolves the WebView2 user-data-dir.
@@ -1184,6 +1190,8 @@ mod tests {
             expect_ok("https://user:pw@vnc.example.com").host(),
             "vnc.example.com"
         );
+        assert_eq!(expect_ok("http://[::1]:6080").host(), "[::1]");
+        assert_eq!(expect_ok("http://user@[fe80::1]:80/x").host(), "[fe80::1]");
     }
 
     #[test]
