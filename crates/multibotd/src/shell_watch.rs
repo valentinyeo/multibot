@@ -64,6 +64,7 @@ pub fn start(
         }
         let mut watched_dir = false;
         let mut previous = Vec::new();
+        let mut attach_retries = 0;
         loop {
             if !watched_dir && dir.is_dir() {
                 watched_dir = watcher.watch(&dir, RecursiveMode::NonRecursive).is_ok();
@@ -135,9 +136,15 @@ pub fn start(
                     }
                     let Ok(shells) = rx.await else { return };
                     previous = shells;
-                    // A server may have started after attach failed, or destroyed the
-                    // session our observer used. Reattach while any shells remain.
-                    if lines.is_none() && !previous.is_empty() {
+                    // Directory/socket creation can precede a usable server. Retry EOFs
+                    // too, but return to event-only waiting after a bounded startup grace.
+                    if lines.is_none()
+                        && (dir.is_dir() || !previous.is_empty())
+                        && attach_retries < 5
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(25 << attach_retries))
+                            .await;
+                        attach_retries += 1;
                         break;
                     }
                 }
@@ -145,13 +152,15 @@ pub fn start(
                     wake = wakes.recv() => {
                         if wake.is_none() { return; }
                         while wakes.try_recv().is_ok() {}
+                        attach_retries = 0;
                         if lines.is_none() { break; }
                         refresh = true;
                     }
                     line = async { lines.as_mut().unwrap().next_line().await }, if lines.is_some() => {
                         match line {
                             Ok(Some(line)) => {
-                                refresh = line.starts_with("%sessions-changed") || line.starts_with("%session-renamed")
+                                if line.starts_with("%session-changed ") { attach_retries = 0; }
+                                refresh = line.starts_with("%session-changed ") || line.starts_with("%sessions-changed") || line.starts_with("%session-renamed")
                                     || line.starts_with("%window-pane-changed") || line.starts_with("%session-window-changed");
                             }
                             _ => { lines = None; drop(child.take()); refresh = true; }

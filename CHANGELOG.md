@@ -7,6 +7,7 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 
+- Keep shell discovery working when the tmux server starts alongside Multibot.
 - Reduce server memory use when reading Pi and Cursor chats with long replies or images.
 - Open Changelog from Ctrl+K to read the full release history, even offline.
 - Discover live tmux server shells and use the built-in Windows terminal. Escape stays with the terminal while it is visible.
