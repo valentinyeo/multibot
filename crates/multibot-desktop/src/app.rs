@@ -1,4 +1,5 @@
 use crate::chat_view::{ChatViewState, FailedSend};
+use crate::icons::{self, lucide_icon};
 use crate::inbox::InboxState;
 use crate::palette::PaletteState;
 use crate::sidebar::{InlineRenameState, RenameKeyOutcome, SidebarState};
@@ -4874,7 +4875,7 @@ impl MultibotView {
                     .child({
                         Button::new("toggle-inbox")
                             .xsmall()
-                            .icon(gpui_kit::component::Icon::default().data(theme::INBOX_ICON))
+                            .icon(lucide_icon(icons::INBOX, 16.0))
                             .accessibility_label("Inbox")
                             .tooltip("Inbox · Alt+I")
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -4906,7 +4907,7 @@ impl MultibotView {
                     .child(
                         Button::new("chat-menu")
                             .xsmall()
-                            .icon(gpui_kit::component::Icon::default().data(theme::MENU_ICON))
+                            .icon(lucide_icon(icons::MORE_HORIZONTAL, 16.0))
                             .accessibility_label("Chat menu")
                             .tooltip("Chat menu")
                             .on_click(cx.listener(|this, _, window, cx| {

@@ -1,4 +1,5 @@
 use crate::app::{CloseOverlay, InboxNextSplit, InboxPrevSplit, MultibotView};
+use crate::icons::{self, lucide_icon};
 use crate::sidebar::{InlineRenameState, RenameKeyOutcome};
 use crate::state::{ActiveModal, MainSurface};
 use crate::theme::{self, RADIUS_BUBBLE, RADIUS_CHIP, RADIUS_ROW};
@@ -607,7 +608,7 @@ impl MultibotView {
             .selected_row
             .min(filtered_rows.len().saturating_sub(1));
 
-        // 1. Canonical Workspace Splits Row (Frequent, All, ★ Favorites, per-workspace)
+        // 1. Canonical Workspace Splits Row (Frequent, All, Favorites, per-workspace)
         let mut split_row = h_flex().flex_wrap().gap_1p5().items_center();
         let mut ws_split_counter = 0usize;
         for split in splits {
@@ -632,7 +633,7 @@ impl MultibotView {
                 ),
                 InboxSplit::Favorites => (
                     SharedString::from("inbox-split-favorites"),
-                    format!("★ Favorites  {count}"),
+                    format!("Favorites  {count}"),
                 ),
                 InboxSplit::Workspace(wid) => {
                     let idx = ws_split_counter;
@@ -650,6 +651,7 @@ impl MultibotView {
                 }
             };
 
+            let favorite = split == InboxSplit::Favorites;
             let split_clone = split.clone();
             split_row = split_row.child(
                 div()
@@ -689,6 +691,10 @@ impl MultibotView {
                             cx.notify();
                         }),
                     )
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .when(favorite, |el| el.child(lucide_icon(icons::STAR_FILLED, 14.0)))
                     .child(label),
             );
         }

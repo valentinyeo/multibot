@@ -1,4 +1,5 @@
 use crate::app::{CloseOverlay, MultibotView};
+use crate::icons::{self, lucide_icon};
 use crate::state::{ActiveModal, MainSurface};
 use crate::theme::{self, RADIUS_CHIP, RADIUS_ROW};
 use gpui_kit::{
@@ -987,7 +988,7 @@ impl MultibotView {
                     .rounded(RADIUS_CHIP)
                     .label(active_label)
                     .child(div().flex_1())
-                    .child(gpui_kit::component::Icon::default().data(theme::CHEVRON_ICON))
+                    .child(lucide_icon(icons::CHEVRON_DOWN, 12.0))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.sidebar_state.rename = None;
                         this.sidebar_state.workspace_menu_open =
@@ -1110,13 +1111,8 @@ impl MultibotView {
                                         .gap_1()
                                         .items_center()
                                         .when(row.favorite, |el| {
-                                            el.child(
-                                                div()
-                                                    .w(px(5.0))
-                                                    .h(px(5.0))
-                                                    .rounded(RADIUS_CHIP)
-                                                    .bg(theme::accent_amber()),
-                                            )
+                                            el.child(lucide_icon(icons::STAR_FILLED, 14.0)
+                                                .text_color(theme::accent_amber()))
                                         })
                                         .when(row.working, |el| {
                                             el.child(
@@ -1198,7 +1194,10 @@ impl MultibotView {
                                         div()
                                             .text_xs()
                                             .text_color(theme::text_muted())
-                                            .child(if collapsed { "▸" } else { "▾" }),
+                                            .child(lucide_icon(
+                                                if collapsed { icons::CHEVRON_RIGHT } else { icons::CHEVRON_DOWN },
+                                                12.0,
+                                            )),
                                     )
                                     .when_some(dot_color, |el, col| {
                                         el.child(
@@ -1273,15 +1272,16 @@ impl MultibotView {
                                 cx.notify();
                             }),
                         )
-                        .child(div().text_xs().text_color(theme::text_muted()).child(
+                        .child(div().text_color(theme::text_muted()).child(lucide_icon(
                             if self.sidebar_state.recents_collapsed
                                 || self.sidebar_state.workspace_store.recents_section_collapsed
                             {
-                                "▸"
+                                icons::CHEVRON_RIGHT
                             } else {
-                                "▾"
+                                icons::CHEVRON_DOWN
                             },
-                        )),
+                            12.0,
+                        ))),
                 )
             },
         );
@@ -1435,7 +1435,11 @@ impl MultibotView {
                                 this.toggle_unread_only(cx);
                             }),
                         )
-                        .child("UNREAD ONLY · ×"),
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child("UNREAD ONLY")
+                        .child(lucide_icon(icons::X, 12.0)),
                 )
             })
             .child(
@@ -1627,13 +1631,8 @@ impl MultibotView {
                             .items_center()
                             .gap_1()
                             .when(row.favorite, |el| {
-                                el.child(
-                                    div()
-                                        .w(px(6.0))
-                                        .h(px(6.0))
-                                        .rounded(RADIUS_CHIP)
-                                        .bg(theme::accent_amber()),
-                                )
+                                el.child(lucide_icon(icons::STAR_FILLED, 14.0)
+                                    .text_color(theme::accent_amber()))
                             })
                             .when(row.working, |el| {
                                 el.child(
@@ -1746,7 +1745,7 @@ impl MultibotView {
                         cx.notify();
                     }),
                 )
-                .child("★"),
+                .child(lucide_icon(icons::STAR_FILLED, 14.0)),
         );
 
         for (idx, ws) in self
@@ -1908,7 +1907,9 @@ impl MultibotView {
             .child(
                 Button::new("open-palette-btn")
                     .xsmall()
-                    .label("⌘K")
+                    .icon(lucide_icon(icons::COMMAND, 16.0))
+                    .label("K")
+                    .accessibility_label("Command palette")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_palette(window, cx);
                     })),

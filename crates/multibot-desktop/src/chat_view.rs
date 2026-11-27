@@ -1,4 +1,5 @@
 use crate::app::{CloseOverlay, MultibotView};
+use crate::icons::{self, lucide_icon};
 use crate::slash_picker::SlashKeyOutcome;
 use crate::state::{ActiveModal, MainSurface, SharedAppStore};
 use crate::table_modal::{TableSource, extract_tables_from_markdown};
@@ -2249,7 +2250,8 @@ impl MultibotView {
             row = row.child(
                 Button::new(format!("composer-model-{index}"))
                     .small()
-                    .label(format!("{}{label}", if selected { "✓ " } else { "" }))
+                    .label(label)
+                    .when(selected, |b| b.icon(lucide_icon(icons::CHECK, 14.0)))
                     .selected(selected)
                     .toggled(selected)
                     .when(selected, |b| b.primary())
@@ -2283,7 +2285,8 @@ impl MultibotView {
             row = row.child(
                 Button::new(format!("composer-effort-{index}"))
                     .small()
-                    .label(format!("{}{label}", if selected { "✓ " } else { "" }))
+                    .label(label)
+                    .when(selected, |b| b.icon(lucide_icon(icons::CHECK, 14.0)))
                     .selected(selected)
                     .toggled(selected)
                     .when(selected, |b| b.primary())
@@ -2313,7 +2316,8 @@ impl MultibotView {
             row = row.child(
                 Button::new(format!("composer-permission-{index}"))
                     .small()
-                    .label(format!("{}{label}", if selected { "✓ " } else { "" }))
+                    .label(label)
+                    .when(selected, |b| b.icon(lucide_icon(icons::CHECK, 14.0)))
                     .selected(selected)
                     .toggled(selected)
                     .when(selected, |b| b.primary())
@@ -3355,7 +3359,7 @@ impl MultibotView {
                                 .child(lang),
                         )
                     })
-                    .child(Button::new(btn_id).xsmall().label("Copy").on_click(
+                    .child(Button::new(btn_id).xsmall().icon(lucide_icon(icons::COPY, 14.0)).label("Copy").on_click(
                         move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
                             let _ = weak.update(cx, |view, cx| {
@@ -3495,7 +3499,10 @@ impl MultibotView {
                                 div()
                                     .text_xs()
                                     .text_color(theme::text_muted())
-                                    .child(if is_expanded { "▾" } else { "▸" }),
+                                    .child(lucide_icon(
+                                        if is_expanded { icons::CHEVRON_DOWN } else { icons::CHEVRON_RIGHT },
+                                        12.0,
+                                    )),
                             ),
                     ),
             );
@@ -4019,9 +4026,13 @@ impl MultibotView {
                                 this.toggle_todo_drawer(cx);
                             }),
                         )
-                        .child(format!(
-                            "{done} of {total} done {}",
-                            if drawer_open { "▾" } else { "▸" }
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(format!("{done} of {total} done"))
+                        .child(lucide_icon(
+                            if drawer_open { icons::CHEVRON_DOWN } else { icons::CHEVRON_RIGHT },
+                            12.0,
                         )),
                 ),
             );
@@ -4041,16 +4052,16 @@ impl MultibotView {
                 .border_color(theme::border_subtle());
 
             for item in todos {
-                let (glyph, color) = match item.status {
-                    TodoStatus::Completed => ("✓", theme::accent_green()),
-                    TodoStatus::InProgress => ("▸", theme::accent_amber()),
-                    TodoStatus::Pending => ("○", theme::text_muted()),
+                let (icon, color) = match item.status {
+                    TodoStatus::Completed => (icons::CHECK_CIRCLE, theme::accent_green()),
+                    TodoStatus::InProgress => (icons::CHEVRON_RIGHT, theme::accent_amber()),
+                    TodoStatus::Pending => (icons::CIRCLE, theme::text_muted()),
                 };
                 list = list.child(
                     h_flex()
                         .gap_2()
                         .items_center()
-                        .child(div().text_xs().text_color(color).child(glyph))
+                        .child(lucide_icon(icon, 14.0).text_color(color))
                         .child(
                             div()
                                 .text_xs()
@@ -4143,7 +4154,8 @@ impl MultibotView {
                                 .child(
                                     Button::new("chat-find-close")
                                         .xsmall()
-                                        .label("×")
+                                        .icon(lucide_icon(icons::X, 12.0))
+                                        .accessibility_label("Close find bar")
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.chat_state.close_find();
                                             this.focus_active_surface_default(window, cx);
@@ -4374,7 +4386,11 @@ impl MultibotView {
                                     }
                                 }),
                             )
-                            .child(format!("↩ {}", pq.preview)),
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(lucide_icon(icons::CORNER_DOWN_LEFT, 14.0))
+                            .child(div().min_w_0().truncate().child(pq.preview.clone())),
                     );
                 }
 
@@ -4760,7 +4776,7 @@ impl MultibotView {
             }
         }
 
-        // Hard Parity Invariant: busy state = ONLY 3 ticking dots (● ● ●).
+        // Hard Parity Invariant: busy state = ONLY 3 ticking dots.
         if is_working {
             let dot = |idx: u8| {
                 div()
@@ -4770,7 +4786,7 @@ impl MultibotView {
                     } else {
                         theme::text_muted()
                     })
-                    .child("●")
+                    .child(lucide_icon(icons::DOT, 12.0))
             };
             msg_col = msg_col.child(
                 h_flex()
@@ -5076,11 +5092,11 @@ impl MultibotView {
                                     .hover(|s| s.bg(theme::bg_hover()))
                                     .cursor_pointer()
                                     .on_click(cx.listener(|this, _, _, cx| this.jump_to_newest(cx)))
-                                    .child(if count > 0 {
-                                        format!("↓ {count} new")
-                                    } else {
-                                        "↓".into()
-                                    }),
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(lucide_icon(icons::ARROW_DOWN, 14.0))
+                                    .when(count > 0, |el| el.child(format!("{count} new"))),
                             )
                         },
                     ),
@@ -5145,7 +5161,7 @@ impl MultibotView {
                                                 this.clear_reply_quote(cx);
                                             }),
                                         )
-                                        .child("×"),
+                                        .child(lucide_icon(icons::X, 12.0)),
                                 ),
                         ),
                 )
@@ -5197,7 +5213,7 @@ impl MultibotView {
                                             }
                                         }),
                                     )
-                                    .child("×"),
+                                    .child(lucide_icon(icons::X, 12.0)),
                             ),
                     );
                 }
@@ -5248,7 +5264,7 @@ impl MultibotView {
                                         cx.notify();
                                     }),
                                 )
-                                .child("+"),
+                                .child(lucide_icon(icons::PLUS, 16.0)),
                         )
                         .when(!options_summary.is_empty(), |el| el.child(
                             div().id("composer-options-summary").test_support().text_xs()
@@ -5262,7 +5278,7 @@ impl MultibotView {
                             ),
                         )
                         .child(Button::new("composer-voice").small()
-                            .icon(gpui_kit::component::Icon::default().data(theme::MIC_ICON))
+                            .icon(lucide_icon(icons::MIC, 16.0))
                             .text_color(if self.voice.phase == multibot_core::voice::DictationPhase::Listening {
                                 gpui_kit::rgb(0xEF4444).into()
                             } else { theme::text_secondary() })
@@ -5278,6 +5294,10 @@ impl MultibotView {
                             Button::new("send-prompt")
                                 .small()
                                 .primary()
+                                .icon(lucide_icon(
+                                    if is_working { icons::SQUARE } else { icons::ARROW_UP },
+                                    16.0,
+                                ))
                                 .label(if is_working { "Stop" } else { "Send" })
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     if this.selected_session.as_ref().is_some_and(|s| s.working) {

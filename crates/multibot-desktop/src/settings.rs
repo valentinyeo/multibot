@@ -1,4 +1,5 @@
 use crate::app::MultibotView;
+use crate::icons::{self, lucide_icon};
 use crate::theme::{self, RADIUS_BUBBLE};
 use gpui_kit::base::{Disableable, FocusTrapElement};
 use gpui_kit::{
@@ -751,15 +752,17 @@ impl MultibotView {
                                             ),
                                     )
                                     .child(
-                                        Button::new("settings-close").xsmall().label("×").on_click(
-                                            cx.listener(|this, _, window, cx| {
+                                        Button::new("settings-close")
+                                            .xsmall()
+                                            .icon(lucide_icon(icons::X, 12.0))
+                                            .accessibility_label("Close settings")
+                                            .on_click(cx.listener(|this, _, window, cx| {
                                                 this.set_main_surface(
                                                     crate::state::MainSurface::Chat,
                                                 );
                                                 this.focus_active_surface_default(window, cx);
                                                 cx.notify();
-                                            }),
-                                        ),
+                                            })),
                                     ),
                             )
                             .child(

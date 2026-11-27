@@ -7,6 +7,7 @@ mod account;
 mod app;
 mod chat_view;
 mod computer_view;
+mod icons;
 mod inbox;
 mod palette;
 mod settings;

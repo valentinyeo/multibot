@@ -842,7 +842,7 @@ impl MultibotView {
                                     div()
                                         .text_xs()
                                         .text_color(theme::text_muted())
-                                        .child("↑↓ select · Tab/Enter insert · Esc close"),
+                                        .child("Up/Down select · Tab/Enter insert · Esc close"),
                                 ),
                         )
                         .child(list),

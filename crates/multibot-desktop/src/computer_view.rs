@@ -19,6 +19,7 @@
 //! Hard Invariant #3: no new chord. `Ctrl+K → "Toggle Computer View"` is the entry
 //! point, with the same row in the chat `...` menu.
 
+use crate::icons::{self, lucide_icon};
 use std::path::{Path, PathBuf};
 
 use gpui_kit::{
@@ -1020,6 +1021,7 @@ impl crate::app::MultibotView {
             .child(
                 Button::new("computer-reload")
                     .xsmall()
+                    .icon(lucide_icon(icons::REFRESH_CW, 16.0))
                     .label("Reload")
                     .accessibility_label("Reload Computer View")
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1029,6 +1031,7 @@ impl crate::app::MultibotView {
             .child(
                 Button::new("computer-external")
                     .xsmall()
+                    .icon(lucide_icon(icons::EXTERNAL_LINK, 16.0))
                     .label("Browser")
                     .accessibility_label("Open in external browser")
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1038,6 +1041,7 @@ impl crate::app::MultibotView {
             .child(
                 Button::new("computer-close")
                     .xsmall()
+                    .icon(lucide_icon(icons::X, 12.0))
                     .label("Close")
                     .accessibility_label("Close Computer View")
                     .on_click(cx.listener(|this, _, _, cx| {

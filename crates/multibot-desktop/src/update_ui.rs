@@ -1,4 +1,5 @@
 use crate::app::MultibotView;
+use crate::icons::{self, lucide_icon};
 use crate::state::{PaletteEntry, SharedAppStore};
 use crate::theme::{self, RADIUS_CHIP, RADIUS_ROW};
 use gpui_kit::{
@@ -211,7 +212,7 @@ impl UpdateUiState {
     pub(crate) fn formatted_card_strings(&self) -> Vec<String> {
         match &self.state {
             UpdateState::Available(info) => {
-                let mut out = vec![Self::ready_headline(&info.version), "×".to_string()];
+                let mut out = vec![Self::ready_headline(&info.version)];
                 for note in self.visible_notes(&info.notes) {
                     out.push(format!("• {note}"));
                 }
@@ -233,7 +234,7 @@ impl UpdateUiState {
                 out
             }
             UpdateState::ReadyToRestart(staged) => {
-                let mut out = vec![Self::ready_headline(&staged.version), "×".to_string()];
+                let mut out = vec![Self::ready_headline(&staged.version)];
                 for note in self.visible_notes(&staged.notes) {
                     out.push(format!("• {note}"));
                 }
@@ -272,7 +273,6 @@ impl UpdateUiState {
             UpdateState::Error { message, retryable } => {
                 let mut out = vec![
                     "Update failed".to_string(),
-                    "×".to_string(),
                     Self::error_detail(message),
                 ];
                 if *retryable {
@@ -543,7 +543,8 @@ impl MultibotView {
                             .xsmall()
                             .ghost()
                             .rounded(RADIUS_CHIP)
-                            .label("×")
+                            .icon(lucide_icon(icons::X, 12.0))
+                            .accessibility_label("Dismiss update")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.dismiss_current_update(cx);
                                 this.focus_active_surface_default(window, cx);
@@ -836,7 +837,8 @@ impl MultibotView {
                                     .xsmall()
                                     .ghost()
                                     .rounded(RADIUS_CHIP)
-                                    .label("×")
+                                    .icon(lucide_icon(icons::X, 12.0))
+                                    .accessibility_label("Dismiss update")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.dismiss_current_update(cx);
                                         this.focus_active_surface_default(window, cx);
@@ -1353,7 +1355,7 @@ mod tests {
             window.render_frame(cx);
             assert!(window.try_find("update-card").is_some());
 
-            // Clicking the × button also dismisses and persists "0.1.6".
+            // Clicking the close button also dismisses and persists "0.1.6".
             window.click("update-dismiss-x", cx);
             window.render_frame(cx);
             assert!(window.try_find("update-card").is_none());

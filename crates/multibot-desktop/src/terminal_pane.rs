@@ -15,6 +15,7 @@
 //!   path can escape into the remote command line.
 //! * Local/offline mode spawns the user's login shell in the same portable PTY.
 
+use crate::icons::{self, lucide_icon};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::{Cell, Flags};
@@ -1323,6 +1324,7 @@ impl crate::app::MultibotView {
                     .child(
                         Button::new("terminal-clear")
                             .xsmall()
+                            .icon(lucide_icon(icons::TRASH_2, 16.0))
                             .label("Clear")
                             .accessibility_label("Clear terminal")
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -1332,6 +1334,7 @@ impl crate::app::MultibotView {
                     .child(
                         Button::new("terminal-reconnect")
                             .xsmall()
+                            .icon(lucide_icon(icons::REFRESH_CW, 16.0))
                             .label("Reconnect")
                             .accessibility_label("Reconnect terminal")
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -1341,6 +1344,7 @@ impl crate::app::MultibotView {
                     .child(
                         Button::new("terminal-close")
                             .xsmall()
+                            .icon(lucide_icon(icons::X, 12.0))
                             .label("Close")
                             .accessibility_label("Close terminal")
                             .on_click(cx.listener(|this, _, _, cx| {

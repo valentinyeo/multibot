@@ -4590,6 +4590,7 @@ dependencies = [
  "multibot-updater",
  "portable-pty",
  "raw-window-handle",
+ "roxmltree 0.20.0",
  "sysinfo 0.35.2",
  "tokio",
  "windows-sys 0.61.2",

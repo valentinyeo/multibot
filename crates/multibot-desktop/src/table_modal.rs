@@ -1,4 +1,5 @@
 use crate::app::MultibotView;
+use crate::icons::{self, lucide_icon};
 use crate::theme::{self, RADIUS_CHIP, RADIUS_MODAL, RADIUS_ROW};
 use gpui_kit::{
     AnyElement, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
@@ -1058,7 +1059,7 @@ impl MultibotView {
 
         let scroll_badge = if can_scroll_x || can_scroll_y {
             Some(format!(
-                "x:{} y:{} · ←→↑↓ / Shift+Wheel",
+                "x:{} y:{} · Arrow keys / Shift+Wheel",
                 scroll.x, scroll.y
             ))
         } else {
@@ -1183,7 +1184,7 @@ impl MultibotView {
                                                 cx.notify();
                                             }),
                                         )
-                                        .child("×"),
+                                        .child(lucide_icon(icons::X, 12.0)),
                                 ),
                         )
                         .child(

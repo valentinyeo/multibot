@@ -331,7 +331,7 @@ impl MultibotView {
             // Workspaces and windows
             PaletteCommandSpec {
                 id: "pal-cmd-ws-starred".into(),
-                label: "Switch to Starred workspace (★)".into(),
+                label: "Switch to Starred workspace".into(),
                 chord: "Alt+1".into(),
                 category: PaletteCategory::WorkspacesAndWindows,
                 destructive: false,
@@ -1863,15 +1863,15 @@ impl MultibotView {
             });
         let context_banner = match &self.palette_state.reminder_target {
             Some(ReminderTarget::Session(_)) => {
-                Some("Remind Me · optional note below · ↑/↓ then Enter".into())
+                Some("Remind Me · optional note below · Up/Down then Enter".into())
             }
-            Some(ReminderTarget::Workspace(_)) => Some("Snooze workspace · ↑/↓ then Enter".into()),
+            Some(ReminderTarget::Workspace(_)) => Some("Snooze workspace · Up/Down then Enter".into()),
             None => context_banner,
         };
 
         let context_banner = if let Some(picker) = &self.palette_state.directory_picker {
             Some(format!(
-                "New {} session · Choose a directory · ↑/↓ then Enter",
+                "New {} session · Choose a directory · Up/Down then Enter",
                 picker.agent.label()
             ))
         } else {
