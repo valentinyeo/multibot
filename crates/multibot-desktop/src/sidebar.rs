@@ -6,7 +6,7 @@ use gpui_kit::{
     Context, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent,
     Modifiers, ModifiersChangedEvent, MouseButton, ParentElement, Role, SharedString,
     StatefulInteractiveElement, Styled, TestSupportExt, Window,
-    component::{Selectable, Sizable, button::Button, h_flex, label::Label, v_flex},
+    component::{Sizable, button::Button, h_flex, label::Label, v_flex},
     div,
     prelude::FluentBuilder,
     px, rgb,
@@ -139,7 +139,6 @@ pub(crate) struct SidebarState {
     pub active_workspace_view: WorkspaceView,
     pub unread_only: bool,
     pub recents_collapsed: bool,
-    pub workspace_menu_open: bool,
     pub dev_stats_expanded: bool,
     pub show_jump_badges: bool,
     pub previous_session_key: Option<String>,
@@ -158,7 +157,6 @@ impl Default for SidebarState {
             active_workspace_view: WorkspaceView::All,
             unread_only: false,
             recents_collapsed: false,
-            workspace_menu_open: false,
             dev_stats_expanded: false,
             show_jump_badges: false,
             previous_session_key: None,
@@ -612,7 +610,6 @@ impl MultibotView {
         {
             self.sidebar_state.active_workspace_id = ws_id;
             self.sidebar_state.active_workspace_view = WorkspaceView::All;
-            self.sidebar_state.workspace_menu_open = false;
             self.sidebar_state.rename = None;
             self.cleanup_unmounted_surface_state();
             cx.notify();
@@ -640,7 +637,6 @@ impl MultibotView {
         );
         self.sidebar_state.active_workspace_id = next;
         self.sidebar_state.active_workspace_view = WorkspaceView::All;
-        self.sidebar_state.workspace_menu_open = false;
         self.sidebar_state.rename = None;
         self.cleanup_unmounted_surface_state();
         cx.notify();
@@ -651,7 +647,6 @@ impl MultibotView {
             self.sidebar_state.active_workspace_id = ALL_WORKSPACES_ID.to_string();
         }
         self.sidebar_state.active_workspace_view = view;
-        self.sidebar_state.workspace_menu_open = false;
         self.sidebar_state.rename = None;
         self.cleanup_unmounted_surface_state();
         cx.notify();
@@ -884,146 +879,31 @@ impl MultibotView {
 
         let in_starred = self.sidebar_state.active_workspace_id == STARRED_WORKSPACE_ID;
 
-        let mut ws_menu = v_flex()
-            .id("workspace-menu")
-            .test_support()
-            .w_full()
-            .max_h(px(420.0))
-            .overflow_y_scroll()
-            .gap_1()
-            .p_2()
-            .rounded(RADIUS_ROW)
-            .bg(theme::bg_surface())
-            .border_1()
-            .border_color(theme::border_subtle());
         let store = &self.sidebar_state.workspace_store;
-        let mut choices = vec![
-            (
-                "All".to_string(),
-                ALL_WORKSPACES_ID.to_string(),
-                WorkspaceView::All,
-            ),
-            (
-                "Frequent".to_string(),
-                ALL_WORKSPACES_ID.to_string(),
-                WorkspaceView::Frequent,
-            ),
-            (
-                "Favorites".to_string(),
-                ALL_WORKSPACES_ID.to_string(),
-                WorkspaceView::Favorites,
-            ),
-        ];
-        choices.extend(
-            store
-                .visible_workspaces(now)
-                .into_iter()
-                .map(|ws| (ws.name.clone(), ws.id.clone(), WorkspaceView::All)),
-        );
-        let mut active_label = if in_starred {
-            "Favorites".to_string()
+        let active_label = if self.sidebar_state.active_workspace_id == ALL_WORKSPACES_ID {
+            match self.sidebar_state.active_workspace_view {
+                WorkspaceView::All => "All",
+                WorkspaceView::Frequent => "Frequent",
+                WorkspaceView::Favorites => "Favorites",
+            }
+        } else if in_starred {
+            "Favorites"
         } else {
             store
                 .workspace_by_id(&self.sidebar_state.active_workspace_id)
-                .map(|ws| ws.name.clone())
-                .unwrap_or_else(|| "All".to_string())
+                .map(|ws| ws.name.as_str())
+                .unwrap_or("All")
         };
-        for (idx, (name, ws_id, view)) in choices.into_iter().enumerate() {
-            let selected = self.sidebar_state.active_workspace_id == ws_id
-                && self.sidebar_state.active_workspace_view == view;
-            if selected {
-                active_label = name.clone();
-            }
-            let count = store
-                .compute_sidebar_layout_with_options(&ws_id, view, &inputs, false, None, now)
-                .flat_display_order
-                .len();
-            ws_menu = ws_menu.child(
-                Button::new(SharedString::from(format!("workspace-option-{idx}")))
-                    .small()
-                    .w_full()
-                    .accessibility_label(format!("{name}, {count} sessions"))
-                    .label(name)
-                    .selected(selected)
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme::text_muted())
-                            .child(count.to_string()),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.sidebar_state.active_workspace_id = ws_id.clone();
-                        this.sidebar_state.active_workspace_view = view;
-                        this.sidebar_state.workspace_menu_open = false;
-                        this.sidebar_state.rename = None;
-                        this.cleanup_unmounted_surface_state();
-                        this.focus_active_surface_default(window, cx);
-                        cx.notify();
-                    })),
-            );
-        }
-        ws_menu = ws_menu
-            .child(div().h(px(1.0)).my_1().bg(theme::border_subtle()))
-            .child(
-                Button::new("workspace-new")
-                    .small()
-                    .w_full()
-                    .label("New workspace")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.sidebar_state.workspace_menu_open = false;
-                        this.sidebar_state.new_workspace_draft = Some(String::new());
-                        this.focus_sidebar(window, cx);
-                        cx.notify();
-                    })),
-            );
-        if store
-            .workspace_by_id(&self.sidebar_state.active_workspace_id)
-            .is_some()
-        {
-            ws_menu = ws_menu.child(
-                Button::new("workspace-dissolve")
-                    .small()
-                    .w_full()
-                    .label("Dissolve workspace")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.sidebar_state.workspace_menu_open = false;
-                        this.request_dissolve_workspace(window, cx);
-                    })),
-            );
-        }
-        let ws_strip = v_flex()
+        let ws_strip = Button::new("workspace-switcher")
             .w_full()
-            .relative()
-            .child(
-                Button::new("workspace-dropdown")
-                    .w_full()
-                    .rounded(RADIUS_CHIP)
-                    .label(active_label)
-                    .child(div().flex_1())
-                    .child(lucide_icon(icons::CHEVRON_DOWN, 12.0))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.sidebar_state.rename = None;
-                        this.sidebar_state.workspace_menu_open =
-                            !this.sidebar_state.workspace_menu_open;
-                        this.focus_sidebar(window, cx);
-                        cx.notify();
-                    })),
-            )
-            .when(self.sidebar_state.workspace_menu_open, |el| {
-                el.child(
-                    gpui_kit::deferred(
-                        div()
-                            .absolute()
-                            .top(px(40.0))
-                            .left_0()
-                            .w_full()
-                            .occlude()
-                            .child(ws_menu),
-                    )
-                    .with_priority(1),
-                )
-            });
+            .rounded(RADIUS_CHIP)
+            .label(active_label.to_string())
+            .tooltip("Switch workspace (Alt+Shift+W)")
+            .child(div().flex_1())
+            .child(lucide_icon(icons::CHEVRON_DOWN, 12.0))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.open_workspace_switcher(window, cx);
+            }));
 
         // Sessions scroll contents: Pinned Grid -> Groups -> Recents
         let mut sessions_content = v_flex().gap_2();
@@ -1335,11 +1215,7 @@ impl MultibotView {
                     cx.propagate();
                     return;
                 }
-                if this.sidebar_state.workspace_menu_open {
-                    this.sidebar_state.workspace_menu_open = false;
-                    this.focus_active_surface_default(window, cx);
-                    cx.notify();
-                } else if this.is_sidebar_rename_mounted() {
+                if this.is_sidebar_rename_mounted() {
                     this.sidebar_state.rename = None;
                     this.focus_active_surface_default(window, cx);
                     cx.notify();
@@ -2158,16 +2034,13 @@ mod tests {
             window.render_frame(cx);
             assert!(window.try_find("sidebar-unread-only-pill").is_none());
 
-            // Switch to Starred workspace and create a new workspace
-            window.click("workspace-dropdown", cx);
+            // Switch to Favorites and create a new workspace
+            window.click("workspace-switcher", cx);
             window.render_frame(cx);
-            window.click("workspace-option-2", cx);
+            window.click("pal-ws-2", cx);
             window.render_frame(cx);
-            window.click("workspace-dropdown", cx);
-            window.render_frame(cx);
-            window.click("workspace-new", cx);
-            window.render_frame(cx);
-            window.press("w", cx);
+            window.press("ctrl-k", cx);
+            window.input("New workspace", cx);
             window.press("enter", cx);
             window.render_frame(cx);
 
@@ -2282,7 +2155,7 @@ mod tests {
                     assert!(window.find("palette-context-banner").visible());
                     view.read_with(cx, |v, _| {
                         assert_eq!(v.active_modal, ActiveModal::Palette);
-                        assert_eq!(v.palette_state.tab_context_session_key.as_ref(), Some(key));
+                        assert_eq!(v.palette_state.mode.target_session_key(), Some(key.as_str()));
                         assert_eq!(v.selected_session.as_ref().unwrap().id, "s1");
                         let commands = v.build_palette_command_catalog(10000);
                         let rows = v.build_palette_rows("", 10000);

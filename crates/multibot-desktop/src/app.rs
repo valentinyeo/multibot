@@ -68,6 +68,7 @@ actions!(
     [
         // Slice 1 (existing 19 actions)
         OpenPalette,
+        OpenWorkspaces,
         OpenInbox,
         ToggleInbox,
         ToggleSettings,
@@ -1224,7 +1225,6 @@ impl MultibotView {
     /// Transitions `self.main_surface` to `next` and clears any transient inline edit state
     /// that is no longer mounted or would lose focus across the surface transition.
     pub(crate) fn set_main_surface(&mut self, next: MainSurface) {
-        self.sidebar_state.workspace_menu_open = false;
         self.chat_state.composer_menu_open = false;
         if self.main_surface != next {
             #[cfg(windows)]
@@ -5391,6 +5391,9 @@ impl Render for MultibotView {
                 }
                 this.open_palette(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenWorkspaces, window, cx| {
+                this.open_workspace_switcher(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &OpenInbox, window, cx| {
                 if this.table_modal_state.is_open() {
                     this.table_modal_state.close();
@@ -5528,12 +5531,9 @@ impl Render for MultibotView {
                 } else if this.active_modal != ActiveModal::None {
                     // 2. Modal dialogs (Command Palette / F1 Shortcuts)
                     this.active_modal = ActiveModal::None;
-                    this.palette_state.tab_context_session_key = None;
+                    this.palette_state.mode = multibot_core::workspaces::PaletteMode::Global;
                     this.palette_state.reminder_target = None;
                     this.palette_state.dissolve_workspace_id = None;
-                    this.focus_active_surface_default(window, cx);
-                } else if this.sidebar_state.workspace_menu_open {
-                    this.sidebar_state.workspace_menu_open = false;
                     this.focus_active_surface_default(window, cx);
                 } else if this.chat_state.composer_menu_open {
                     this.chat_state.composer_menu_open = false;
@@ -7518,7 +7518,7 @@ mod tests {
                 );
             }
             for id in [
-                "workspace-dropdown",
+                "workspace-switcher",
                 "gpu-status-card",
                 "header-title-pill",
                 "toggle-inbox",
@@ -7557,7 +7557,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn wave1_workspace_dropdown_filters_all_favorites_and_named_workspace(cx: &mut TestAppContext) {
+    fn workspace_header_palette_filters_all_favorites_and_named_workspace(cx: &mut TestAppContext) {
         let (handle, view) = open_test_view_with_entity(cx);
         cx.update_window(handle, |_, window, cx| {
             view.update(cx, |v, cx| {
@@ -7587,23 +7587,22 @@ mod tests {
             assert!(window.try_find("session-0").is_some());
             assert!(window.try_find("session-1").is_some());
             assert!(window.try_find("workspace-menu").is_none());
-            window.click("workspace-dropdown", cx);
+            window.click("workspace-switcher", cx);
             window.render_frame(cx);
-            assert!(window.try_find("workspace-menu").is_some());
-            assert!(window.try_find("workspace-new").is_some());
-            assert_eq!(
-                window.find("workspace-option-0").label(),
-                Some("All, 2 sessions")
-            );
-            assert_eq!(
-                window.find("workspace-option-1").label(),
-                Some("Frequent, 1 sessions")
-            );
-            assert_eq!(
-                window.find("workspace-option-2").label(),
-                Some("Favorites, 1 sessions")
-            );
-            window.click("workspace-option-1", cx);
+            assert!(window.try_find("workspace-menu").is_none());
+            assert!(window.try_find("workspace-new").is_none());
+            assert!(window.try_find("workspace-option-0").is_none());
+            assert_eq!(view.read(cx).active_modal, ActiveModal::Palette);
+            let rows = view.read(cx).build_palette_rows("", now_unix_ms());
+            let names: Vec<_> = rows
+                .iter()
+                .map(|row| match row {
+                    multibot_core::workspaces::PaletteRow::Workspace { name, .. } => name.as_str(),
+                    other => panic!("workspace submenu contains {other:?}"),
+                })
+                .collect();
+            assert_eq!(&names[..3], &["All", "Frequent", "Favorites"]);
+            window.click("pal-ws-1", cx);
             window.render_frame(cx);
             assert_eq!(
                 view.read(cx).sidebar_state.active_workspace_view,
@@ -7611,9 +7610,9 @@ mod tests {
             );
             assert!(window.try_find("session-0").is_some());
             assert!(window.try_find("session-1").is_none());
-            window.click("workspace-dropdown", cx);
+            window.click("workspace-switcher", cx);
             window.render_frame(cx);
-            window.click("workspace-option-2", cx);
+            window.click("pal-ws-2", cx);
             window.render_frame(cx);
             assert_eq!(
                 view.read(cx).sidebar_state.active_workspace_view,
@@ -7622,9 +7621,9 @@ mod tests {
             assert!(window.try_find("workspace-menu").is_none());
             assert!(window.try_find("session-0").is_some());
             assert!(window.try_find("session-1").is_none());
-            window.click("workspace-dropdown", cx);
+            window.click("workspace-switcher", cx);
             window.render_frame(cx);
-            window.click("workspace-option-4", cx);
+            window.click("pal-ws-4", cx);
             window.render_frame(cx);
             assert_eq!(
                 view.read(cx)
@@ -7653,12 +7652,12 @@ mod tests {
             );
             assert!(window.try_find("session-0").is_some());
             assert!(window.try_find("session-1").is_none());
-            window.click("workspace-dropdown", cx);
+            window.click("workspace-switcher", cx);
             window.render_frame(cx);
-            window.click("workspace-option-0", cx);
+            window.click("pal-ws-0", cx);
             window.render_frame(cx);
             assert!(window.try_find("session-1").is_some());
-            window.click("workspace-dropdown", cx);
+            window.click("workspace-switcher", cx);
             window.render_frame(cx);
             window.press("escape", cx);
             window.render_frame(cx);
@@ -11320,12 +11319,9 @@ mod tests {
                 cx.notify();
             });
             window.render_frame(cx);
-            // Click #ws-pill-new (+) in Window 1 -> creates Workspace 2
-            window.click("workspace-dropdown", cx);
-            window.render_frame(cx);
-            window.click("workspace-new", cx);
-            window.render_frame(cx);
-            window.press("w", cx);
+            // Create Workspace 2 through the main palette in Window 1
+            window.press("ctrl-k", cx);
+            window.input("New workspace", cx);
             window.press("enter", cx);
             window.render_frame(cx);
             assert_eq!(
@@ -11348,7 +11344,7 @@ mod tests {
                 assert_eq!(
                     view2.read(cx).sidebar_state.workspace_store.workspaces.len(),
                     2,
-                    "Window 2 must receive Workspace 2 created via #ws-pill-new in Window 1"
+                    "Window 2 must receive Workspace 2 created via the palette in Window 1"
                 );
                 let key = view2.read(cx).session_key_for(&sess);
                 view2.update(cx, |v, cx| {

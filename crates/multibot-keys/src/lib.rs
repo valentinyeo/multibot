@@ -343,8 +343,16 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         wired: true,
     },
     // =========================================================================
-    // Workspaces (16 entries)
+    // Workspaces (17 entries)
     // =========================================================================
+    ShortcutSpec {
+        id: "workspace.switcher",
+        display: "Alt+Shift+W",
+        gpui_key: "alt-shift-w",
+        category: ShortcutCategory::Workspaces,
+        description: "Open Workspaces submenu in the command palette",
+        wired: true,
+    },
     ShortcutSpec {
         id: "workspace.favorite",
         display: "Alt+S",
@@ -1090,7 +1098,22 @@ mod tests {
             }
         }
 
-        assert_eq!(SHORTCUTS.len(), 100);
+        assert_eq!(SHORTCUTS.len(), 101);
+    }
+
+    #[test]
+    fn workspace_switcher_has_a_dedicated_non_conflicting_chord() {
+        let spec = by_id("workspace.switcher").unwrap();
+        assert_eq!(spec.gpui_key, "alt-shift-w");
+        assert_eq!(spec.display, "Alt+Shift+W");
+        assert!(spec.wired);
+        assert_eq!(spec.category, ShortcutCategory::Workspaces);
+        assert_eq!(by_gpui_key("alt-w").unwrap().id, "browser.open_url_tab");
+        assert_eq!(
+            by_gpui_key("ctrl-shift-o").unwrap().id,
+            "browser.toggle_alt"
+        );
+        assert_eq!(by_gpui_key("alt-o").unwrap().id, "chat.perm_always");
     }
 
     #[test]
@@ -1441,7 +1464,7 @@ mod tests {
         let fullscreen = by_id("view.fullscreen").unwrap();
         assert_eq!(fullscreen.gpui_key, "ctrl-shift-f");
         assert!(fullscreen.wired);
-        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 71);
+        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 72);
         assert!(!by_id("browser.close_tab").unwrap().wired);
         assert!(!by_id("chat.steer").unwrap().wired);
         assert!(by_gpui_key("ctrl-shift-j").is_none());

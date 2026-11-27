@@ -3032,10 +3032,23 @@ pub struct PaletteCommandSpec {
     pub global: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum PaletteMode {
+    #[default]
     Global,
-    TabContext { target_session_key: String },
+    Workspaces,
+    TabContext {
+        target_session_key: String,
+    },
+}
+
+impl PaletteMode {
+    pub fn target_session_key(&self) -> Option<&str> {
+        match self {
+            Self::TabContext { target_session_key } => Some(target_session_key),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3061,6 +3074,7 @@ pub enum PaletteRow {
     },
     Workspace {
         workspace_id: String,
+        view: WorkspaceView,
         name: String,
         archived: bool,
         match_rank: u8,
@@ -3105,6 +3119,39 @@ pub fn rank_palette(
     let del_query = is_del_session_query(&q_lower);
 
     match mode {
+        PaletteMode::Workspaces => {
+            let choices = [
+                (ALL_WORKSPACES_ID, "All", WorkspaceView::All),
+                (ALL_WORKSPACES_ID, "Frequent", WorkspaceView::Frequent),
+                (ALL_WORKSPACES_ID, "Favorites", WorkspaceView::Favorites),
+            ];
+            let mut rows: Vec<_> = choices
+                .into_iter()
+                .chain(
+                    store
+                        .visible_workspaces(now_ms)
+                        .into_iter()
+                        .map(|ws| (ws.id.as_str(), ws.name.as_str(), WorkspaceView::All)),
+                )
+                .filter_map(|(id, name, view)| {
+                    let match_rank = palette_text_match_rank(name, q_trimmed);
+                    (q_trimmed.is_empty() || match_rank > 0).then(|| PaletteRow::Workspace {
+                        workspace_id: id.to_string(),
+                        view,
+                        name: name.to_string(),
+                        archived: false,
+                        match_rank,
+                    })
+                })
+                .collect();
+            if !q_trimmed.is_empty() {
+                rows.sort_by_key(|row| match row {
+                    PaletteRow::Workspace { match_rank, .. } => std::cmp::Reverse(*match_rank),
+                    _ => unreachable!(),
+                });
+            }
+            rows
+        }
         PaletteMode::TabContext { .. } => {
             let mut entries: Vec<(&PaletteCommandSpec, u8, u16, PaletteUsage, bool)> = commands
                 .iter()
@@ -3462,6 +3509,7 @@ pub fn rank_palette(
                     label_lower: ws.name.to_lowercase(),
                     row: PaletteRow::Workspace {
                         workspace_id: ws.id.clone(),
+                        view: WorkspaceView::All,
                         name: ws.name.clone(),
                         archived: ws.archived,
                         match_rank: rank,
@@ -5817,6 +5865,126 @@ mod tests {
         let safe_pos = sess_ids.iter().position(|&id| id == "unused.safe").unwrap();
         let dest_pos = sess_ids.iter().position(|&id| id == "unused.dest").unwrap();
         assert!(safe_pos < dest_pos);
+    }
+
+    #[test]
+    fn palette_workspaces_mode_lists_only_visible_workspaces_and_virtual_views() {
+        let mut store = WorkspaceStore::new();
+        let active = store.create_workspace("Product", None).unwrap();
+        let archived = store.create_workspace("Archived", None).unwrap();
+        let snoozed = store.create_workspace("Snoozed", None).unwrap();
+        store
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == archived.id)
+            .unwrap()
+            .archived = true;
+        store
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == snoozed.id)
+            .unwrap()
+            .snoozed_until_ms = Some(2_000);
+        let session = make_session("s1", AgentKind::Claude, "Product", 1_000, false, false);
+        let inputs = [make_input("h", &session)];
+        let commands = [PaletteCommandSpec {
+            id: "cmd".into(),
+            label: "Product".into(),
+            chord: String::new(),
+            category: PaletteCategory::Sessions,
+            destructive: false,
+            aliases: vec![],
+            tab_context: true,
+            global: true,
+        }];
+        let stats = PaletteStats::default();
+        let rank = |query| {
+            rank_palette(
+                &store,
+                &stats,
+                &inputs,
+                &commands,
+                query,
+                &PaletteMode::Workspaces,
+                None,
+                None,
+                1_000,
+            )
+        };
+        let rows = rank("");
+        let choices: Vec<_> = rows
+            .iter()
+            .map(|r| match r {
+                PaletteRow::Workspace {
+                    workspace_id,
+                    view,
+                    name,
+                    archived,
+                    ..
+                } => {
+                    assert!(!archived);
+                    (workspace_id.as_str(), *view, name.as_str())
+                }
+                other => panic!("unexpected workspace choice: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            &choices[..3],
+            &[
+                (ALL_WORKSPACES_ID, WorkspaceView::All, "All"),
+                (ALL_WORKSPACES_ID, WorkspaceView::Frequent, "Frequent"),
+                (ALL_WORKSPACES_ID, WorkspaceView::Favorites, "Favorites"),
+            ]
+        );
+        let ids: Vec<_> = choices[3..].iter().map(|c| c.0).collect();
+        assert_eq!(
+            ids,
+            store
+                .visible_workspaces(1_000)
+                .iter()
+                .map(|w| w.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            matches!(&rank("pRoDuCt")[..], [PaletteRow::Workspace { workspace_id, view: WorkspaceView::All, .. }] if workspace_id == &active.id)
+        );
+        assert!(rank("Archived").is_empty());
+        assert!(rank("Snoozed").is_empty());
+        assert!(rank("no match").is_empty());
+        assert!(matches!(
+            &rank("frequent")[..],
+            [PaletteRow::Workspace {
+                view: WorkspaceView::Frequent,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn palette_main_search_ranks_sessions_above_equal_matching_workspaces() {
+        let mut store = WorkspaceStore::new();
+        let workspace = store.create_workspace("Product", None).unwrap();
+        let session = make_session("s1", AgentKind::Claude, "Product", 0, false, false);
+        let inputs = [make_input("h", &session)];
+        for query in ["Product", "PROD", "duct"] {
+            let rows = rank_palette(
+                &store,
+                &PaletteStats::default(),
+                &inputs,
+                &[],
+                query,
+                &PaletteMode::Global,
+                None,
+                None,
+                1_000,
+            );
+            assert!(
+                matches!(&rows[0], PaletteRow::Session { session_key, .. } if session_key == &inputs[0].key)
+            );
+            assert!(
+                matches!(&rows[1], PaletteRow::Workspace { workspace_id, .. } if workspace_id == &workspace.id)
+            );
+        }
     }
 
     #[test]

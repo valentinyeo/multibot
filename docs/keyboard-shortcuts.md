@@ -10,6 +10,17 @@ updated: 2026-10-03
 
 # Keyboard shortcuts
 
+## Multibot workspace switcher
+
+| Shortcut | Action |
+| --- | --- |
+| Alt+Shift+W | Open the Workspaces submenu directly in the command palette |
+| Ctrl+K → Workspaces | Open the same submenu, also available by clicking the sidebar workspace header |
+
+The submenu lists All, Frequent, Favorites, and active workspaces. Type to filter, use Up/Down and Enter, or click to switch. Backspace with an empty search returns to the main palette; Esc closes it. There is no sidebar dropdown. Workspace names remain searchable in the main palette, where equally matching sessions appear above workspaces. Sidebar session ordering and Ctrl+Tab cycling are unchanged.
+
+`Alt+Shift+W` is reserved in `crates/multibot-keys/src/lib.rs`. It leaves the browser's `Alt+W` and `Ctrl+Shift+O`, chat's `Alt+O`, and terminal control keys unchanged.
+
 ## Multibot browser pane on Windows
 
 | Shortcut | Action |

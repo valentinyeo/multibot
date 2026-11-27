@@ -44,7 +44,7 @@ pub(crate) struct PaletteState {
     pub directory_picker: Option<SessionDirectoryPicker>,
     pub dissolve_workspace_id: Option<String>,
     pub selected_index: usize,
-    pub tab_context_session_key: Option<String>,
+    pub mode: PaletteMode,
     pub input_sub: Option<Subscription>,
     pub persist_to_disk: bool,
     pub scroll_handle: ScrollHandle,
@@ -58,7 +58,7 @@ impl MultibotView {
         #[cfg(windows)]
         self.hide_browser_pane();
         self.active_modal = ActiveModal::Palette;
-        self.palette_state.tab_context_session_key = None;
+        self.palette_state.mode = PaletteMode::Global;
         self.palette_state.reminder_target = None;
         self.palette_state.directory_picker = None;
         self.palette_state.dissolve_workspace_id = None;
@@ -70,6 +70,12 @@ impl MultibotView {
             state.focus(window, cx);
         });
         cx.notify();
+    }
+
+    pub(crate) fn open_workspace_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_state.rename = None;
+        self.open_palette(window, cx);
+        self.palette_state.mode = PaletteMode::Workspaces;
     }
 
     pub(crate) fn request_dissolve_workspace(
@@ -112,7 +118,9 @@ impl MultibotView {
         self.palette_state.reminder_target = None;
         self.palette_state.directory_picker = None;
         self.palette_state.dissolve_workspace_id = None;
-        self.palette_state.tab_context_session_key = Some(session_key);
+        self.palette_state.mode = PaletteMode::TabContext {
+            target_session_key: session_key,
+        };
         self.palette_state.selected_index = 0;
         self.palette_state.scroll_handle.scroll_to_item(0);
         self.ensure_palette_input_subscription(window, cx);
@@ -372,6 +380,16 @@ impl MultibotView {
                 global: true,
             },
             // Workspaces and windows
+            PaletteCommandSpec {
+                id: "pal-cmd-workspaces".into(),
+                label: "Workspaces".into(),
+                chord: "Alt+Shift+W".into(),
+                category: PaletteCategory::WorkspacesAndWindows,
+                destructive: false,
+                aliases: vec!["switch workspace".into()],
+                tab_context: false,
+                global: true,
+            },
             PaletteCommandSpec {
                 id: "pal-cmd-ws-starred".into(),
                 label: "Switch to Starred workspace".into(),
@@ -886,12 +904,6 @@ impl MultibotView {
             .selected_session
             .as_ref()
             .map(|s| self.session_key_for(s));
-        let mode = match &self.palette_state.tab_context_session_key {
-            Some(target) => PaletteMode::TabContext {
-                target_session_key: target.clone(),
-            },
-            None => PaletteMode::Global,
-        };
 
         rank_palette(
             &self.sidebar_state.workspace_store,
@@ -899,7 +911,7 @@ impl MultibotView {
             &inputs,
             &commands,
             query,
-            &mode,
+            &self.palette_state.mode,
             current_key.as_deref(),
             self.sidebar_state.previous_session_key.as_deref(),
             now_ms,
@@ -1043,13 +1055,17 @@ impl MultibotView {
             return;
         }
 
-        let explicit_tab_target = self.palette_state.tab_context_session_key.clone();
+        let explicit_tab_target = self
+            .palette_state
+            .mode
+            .target_session_key()
+            .map(str::to_string);
         let target_key = explicit_tab_target
             .clone()
             .or_else(|| self.target_triage_session_key());
 
         self.active_modal = ActiveModal::None;
-        self.palette_state.tab_context_session_key = None;
+        self.palette_state.mode = PaletteMode::Global;
         self.palette_state.reminder_target = None;
         self.palette_state.directory_picker = None;
         self.palette_state.dissolve_workspace_id = None;
@@ -1063,6 +1079,7 @@ impl MultibotView {
             }
             PaletteRow::Workspace {
                 workspace_id,
+                view,
                 archived,
                 ..
             } => {
@@ -1076,6 +1093,7 @@ impl MultibotView {
                     .workspace_store
                     .wake_workspace(&workspace_id);
                 self.sidebar_state.active_workspace_id = workspace_id;
+                self.sidebar_state.active_workspace_view = view;
                 self.sidebar_state.rename = None;
                 self.cleanup_unmounted_surface_state();
                 self.persist_workspace_store_if_enabled();
@@ -1116,6 +1134,12 @@ impl MultibotView {
                 }
 
                 match id.as_str() {
+                    "pal-cmd-workspaces" => {
+                        if let Some(window) = window {
+                            self.open_workspace_switcher(window, cx);
+                        }
+                        return;
+                    }
                     "pal-cmd-account-sign-in" | "pal-cmd-account-sign-out" => {
                         self.settings_tab = crate::settings::SettingsTab::Account;
                         self.set_main_surface(MainSurface::Settings);
@@ -1626,10 +1650,10 @@ impl MultibotView {
         cx.notify();
     }
 
-    fn palette_try_exit_tab_context(&mut self, cx: &mut Context<Self>) -> bool {
+    fn palette_try_exit_submenu(&mut self, cx: &mut Context<Self>) -> bool {
         let query = self.palette_input.read(cx).value().to_string();
-        if query.is_empty() && self.palette_state.tab_context_session_key.is_some() {
-            self.palette_state.tab_context_session_key = None;
+        if query.is_empty() && self.palette_state.mode != PaletteMode::Global {
+            self.palette_state.mode = PaletteMode::Global;
             self.palette_state.reminder_target = None;
             self.palette_state.directory_picker = None;
             self.palette_state.dissolve_workspace_id = None;
@@ -1696,7 +1720,7 @@ impl MultibotView {
                     return;
                 }
                 self.active_modal = ActiveModal::None;
-                self.palette_state.tab_context_session_key = None;
+                self.palette_state.mode = PaletteMode::Global;
                 self.palette_state.reminder_target = None;
                 self.palette_state.directory_picker = None;
                 self.palette_state.dissolve_workspace_id = None;
@@ -1704,7 +1728,7 @@ impl MultibotView {
                 cx.stop_propagation();
                 cx.notify();
             }
-            "backspace" if self.palette_try_exit_tab_context(cx) => {
+            "backspace" if self.palette_try_exit_submenu(cx) => {
                 cx.stop_propagation();
             }
             _ => {}
@@ -1987,22 +2011,23 @@ impl MultibotView {
             }
         }
 
-        let context_banner = self
-            .palette_state
-            .tab_context_session_key
-            .as_deref()
-            .map(|key| {
-                let title = self
-                    .find_session_by_key(key)
-                    .map(|s| {
-                        self.sidebar_state
-                            .workspace_store
-                            .effective_title(key, &s.title)
-                            .to_string()
-                    })
-                    .unwrap_or_else(|| key.to_string());
-                format!("Session actions: {title}  (Backspace to exit)")
-            });
+        let context_banner = self.palette_state.mode.target_session_key().map(|key| {
+            let title = self
+                .find_session_by_key(key)
+                .map(|s| {
+                    self.sidebar_state
+                        .workspace_store
+                        .effective_title(key, &s.title)
+                        .to_string()
+                })
+                .unwrap_or_else(|| key.to_string());
+            format!("Session actions: {title}  (Backspace to exit)")
+        });
+        let context_banner = if self.palette_state.mode == PaletteMode::Workspaces {
+            Some("Workspaces · Up/Down then Enter · Backspace to return".into())
+        } else {
+            context_banner
+        };
         let context_banner = match &self.palette_state.reminder_target {
             Some(ReminderTarget::Session(_)) => Some(format!(
                 "Hibernate · {} · Tab toggles · optional note · Up/Down Enter",
@@ -2053,7 +2078,7 @@ impl MultibotView {
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
                     this.active_modal = ActiveModal::None;
-                    this.palette_state.tab_context_session_key = None;
+                    this.palette_state.mode = PaletteMode::Global;
                     this.palette_state.reminder_target = None;
                     this.palette_state.directory_picker = None;
                     this.palette_state.dissolve_workspace_id = None;
@@ -2077,7 +2102,7 @@ impl MultibotView {
                             cx.notify();
                             return;
                         }
-                        this.palette_state.tab_context_session_key = None;
+                        this.palette_state.mode = PaletteMode::Global;
                         this.palette_state.reminder_target = None;
                         this.palette_state.directory_picker = None;
                         this.palette_state.dissolve_workspace_id = None;
@@ -2134,7 +2159,7 @@ impl MultibotView {
                             cx.stop_propagation();
                             return;
                         }
-                        if this.palette_try_exit_tab_context(cx) {
+                        if this.palette_try_exit_submenu(cx) {
                             cx.stop_propagation();
                         }
                     }))
@@ -2146,7 +2171,7 @@ impl MultibotView {
                             cx.notify();
                             return;
                         }
-                        this.palette_state.tab_context_session_key = None;
+                        this.palette_state.mode = PaletteMode::Global;
                         this.palette_state.reminder_target = None;
                         this.palette_state.directory_picker = None;
                         this.palette_state.dissolve_workspace_id = None;
@@ -2860,6 +2885,90 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn workspace_shortcut_opens_only_workspaces_and_switches_with_enter(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("alt-shift-w", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::Palette);
+            let rows = view.read(cx).build_palette_rows("", now_unix_ms());
+            let names: Vec<_> = rows
+                .iter()
+                .map(|row| match row {
+                    PaletteRow::Workspace { name, .. } => name.as_str(),
+                    other => panic!("workspace switcher contains {other:?}"),
+                })
+                .collect();
+            assert_eq!(&names[..3], &["All", "Frequent", "Favorites"]);
+            window.press("down", cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::None);
+            assert_eq!(
+                view.read(cx).sidebar_state.active_workspace_view,
+                multibot_core::workspaces::WorkspaceView::Frequent
+            );
+            assert!(
+                !view.read(cx)
+                    .palette_input
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn workspace_main_palette_entry_and_search_prioritize_same_named_session(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            let workspace_id = view.update(cx, |v, cx| {
+                v.sessions = vec![SessionSummary {
+                    id: "same-name".into(), title: "Shared name".into(),
+                    agent: AgentKind::Claude, ..Default::default()
+                }];
+                let ws = v.sidebar_state.workspace_store.create_workspace("Shared name", None).unwrap();
+                cx.notify();
+                ws.id
+            });
+            window.render_frame(cx);
+            window.press("ctrl-k", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("pal-cmd-workspaces").is_some());
+            window.input("Shared name", cx);
+            window.render_frame(cx);
+            let rows = view.read(cx).build_palette_rows("Shared name", now_unix_ms());
+            let session = rows.iter().position(|r| matches!(r, PaletteRow::Session { .. })).unwrap();
+            let workspace = rows.iter().position(|r| matches!(r, PaletteRow::Workspace { workspace_id: id, .. } if id == &workspace_id)).unwrap();
+            assert!(session < workspace);
+            window.press("ctrl-k", cx);
+            window.input("Workspaces", cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert!(view.read(cx).build_palette_rows("", now_unix_ms()).iter()
+                .all(|r| matches!(r, PaletteRow::Workspace { .. })));
+            assert_eq!(view.read(cx).palette_input.read(cx).value().as_ref(), "");
+            window.input("Shared name", cx);
+            window.render_frame(cx);
+            window.click("pal-ws-0", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).sidebar_state.active_workspace_id, workspace_id);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::None);
+            window.press("alt-shift-w", cx);
+            window.render_frame(cx);
+            window.press("backspace", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("pal-cmd-workspaces").is_some());
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::None);
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
     fn palette_empty_query_keeps_pal_cmd_inbox_visible_and_supports_tab_context(
         cx: &mut TestAppContext,
     ) {
@@ -3102,7 +3211,7 @@ mod tests {
                 assert_eq!(v.palette_state.selected_index, count - 2);
             });
 
-            // Verify CloseOverlay clears tab_context_session_key and closes palette
+            // Verify CloseOverlay clears tab context and closes palette
             view.update(cx, |v, cx| {
                 let k0 = v.session_key_for(&v.sessions[0]);
                 v.open_palette_tab_context(k0, window, cx);
@@ -3112,7 +3221,13 @@ mod tests {
             input_fh.dispatch_action(&CloseOverlay, window, cx);
             window.render_frame(cx);
             let (modal, tab_ctx) = view.read_with(cx, |v, _| {
-                (v.active_modal, v.palette_state.tab_context_session_key.clone())
+                (
+                    v.active_modal,
+                    v.palette_state
+                        .mode
+                        .target_session_key()
+                        .map(str::to_string),
+                )
             });
             assert_eq!(modal, ActiveModal::None);
             assert!(tab_ctx.is_none());
@@ -3188,7 +3303,7 @@ mod tests {
             window.render_frame(cx);
             assert_eq!(view.read(cx).palette_input.read(cx).value().as_ref(), "");
             assert_eq!(
-                view.read(cx).palette_state.tab_context_session_key.as_deref(),
+                view.read(cx).palette_state.mode.target_session_key(),
                 Some(k1.as_str()),
                 "Backspace on non-empty query must delete text without exiting tab-context mode"
             );
@@ -3196,8 +3311,8 @@ mod tests {
             window.press("backspace", cx);
             window.render_frame(cx);
             assert_eq!(
-                view.read(cx).palette_state.tab_context_session_key,
-                None,
+                view.read(cx).palette_state.mode,
+                PaletteMode::Global,
                 "Backspace on empty query must exit tab-context mode"
             );
 

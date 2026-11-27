@@ -12,6 +12,7 @@ This file is embedded in Multibot so Changelog works offline.
 - Keep sidebar developer stats in a tiny indicator; click to expand GPU, memory, CPU and connection details, or press Esc to collapse.
 - Show sidebar section names without collapse arrows; clicking a heading keeps chats visible, and chats follow newest messages without moving on selection.
 - Pin chats above all sections and return unpinned chats to their section, preserving pin choices across imports and in Starred; right-click any chat for its Ctrl+K actions.
+- Switch workspaces with Alt+Shift+W, the sidebar header, or Ctrl+K → Workspaces. The palette replaces the sidebar dropdown; matching sessions stay above workspaces in main search.
 - Dock Chrome or Edge beside each chat with Alt+A, switch focus with Alt+Q, and attach a browser screenshot with Ctrl+Shift+S.
 - Dissolve a workspace to stop its agents and keep chats grouped in Dissolved; reactivating a chat restores its workspace. Delete workspace still keeps agents running and moves chats to General.
 - Open lifecycle views with single chords or headline tabs, without an Alt+G leader. Hibernate now shows Alt+H first; Ctrl+H still works.

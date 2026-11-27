@@ -683,6 +683,22 @@ mod tests {
         assert!(forwarded_shortcut(0x4B, true, true, false).is_none());
     }
     #[test]
+    fn workspace_shortcut_is_forwarded_from_native_terminal_and_browser() {
+        assert_eq!(
+            forwarded_shortcut(0x57, false, true, true),
+            Some("alt-shift-w")
+        );
+        assert_eq!(
+            registered_native_shortcut(0x57, false, true, true)
+                .unwrap()
+                .id,
+            "workspace.switcher"
+        );
+        assert!(forwarded_shortcut(0x57, false, true, false).is_none());
+        assert!(registered_native_shortcut(0x57, true, true, true).is_none());
+    }
+
+    #[test]
     fn windows_command_line_quotes_spaces_quotes_and_trailing_slashes() {
         assert_eq!(windows_quote("a b"), "\"a b\"");
         assert_eq!(windows_quote("a\"b"), "\"a\\\"b\"");
