@@ -2184,22 +2184,16 @@ mod tests {
                 v.main_surface = MainSurface::Inbox;
                 let k1 = v.session_key_for(&v.sessions[0]);
                 v.start_sidebar_rename_with_window(k1, window, cx);
+                v.focus_inbox(window, cx);
             });
             window.render_frame(cx);
-            assert!(view.read_with(cx, |v, _| v.sidebar_state.rename.is_some()));
+            assert!(
+                view.read_with(cx, |v, _| v.sidebar_state.rename.is_none()),
+                "The minimal Inbox hides the sidebar, so no Open-sidebar rename may mount there"
+            );
 
-            // Dispatch CloseOverlay (Escape) while sidebar focus handle is focused
-            let fh = view.read_with(cx, |v, _| v.sidebar_state.focus_handle.clone().unwrap());
-            fh.dispatch_action(&CloseOverlay, window, cx);
-            window.render_frame(cx);
-
-            // Rename is canceled, and Inbox remains open!
-            let (renaming, surface) =
-                view.read_with(cx, |v, _| (v.sidebar_state.rename.is_some(), v.main_surface));
-            assert!(!renaming);
-            assert_eq!(surface, MainSurface::Inbox);
-
-            // Second CloseOverlay propagates to root and closes Inbox
+            // Dispatch CloseOverlay (Escape) while the Inbox owns focus
+            let fh = view.read_with(cx, |v, _| v.inbox_state.focus_handle.clone().unwrap());
             fh.dispatch_action(&CloseOverlay, window, cx);
             window.render_frame(cx);
             assert_eq!(
