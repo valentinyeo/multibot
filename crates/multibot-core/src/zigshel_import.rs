@@ -40,6 +40,8 @@ pub struct ImportedFavorite {
 #[serde(default)]
 pub struct ImportedSession {
     pub session_key: String,
+    pub face: Option<u8>,
+    pub color: Option<String>,
     pub title: Option<String>,
     pub workspace_id: Option<String>,
     pub favorite: bool,
@@ -363,6 +365,12 @@ pub fn import_zigshel_bundle_from_dir(dir: &Path) -> ZigShellImportBundle {
                 }
                 bundle.sessions.push(ImportedSession {
                     session_key: key,
+                    face: obj
+                        .get("face")
+                        .and_then(Value::as_u64)
+                        .filter(|face| *face < 20)
+                        .map(|face| face as u8),
+                    color: parse_zigshel_color(obj.get("color")),
                     title,
                     workspace_id,
                     favorite,
@@ -479,6 +487,12 @@ pub fn merge_zigshel_bundle(
                 meta.workspace_id = Some(ws.id.clone());
                 stats.sessions_assigned += 1;
             }
+        }
+        if meta.face.is_none() {
+            meta.face = session.face;
+        }
+        if meta.color.is_none() {
+            meta.color = session.color;
         }
         meta.pinned |= session.pinned;
         meta.starred_pinned |= session.starred_pinned;
@@ -776,14 +790,15 @@ fn parse_zigshel_color(value: Option<&Value>) -> Option<String> {
     match value? {
         Value::String(s) => {
             let trimmed = s.trim();
-            if trimmed.is_empty() {
-                None
+            let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
+            if hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                Some(format!("#{hex}"))
             } else {
-                Some(trimmed.to_string())
+                None
             }
         }
         Value::Number(n) => {
-            let idx = n.as_u64()? as usize;
+            let idx = usize::from(u8::try_from(n.as_u64()?).ok()?);
             Some(ZIGSHEL_PALETTE_HEX[idx % ZIGSHEL_PALETTE_HEX.len()].to_string())
         }
         _ => None,
@@ -1586,6 +1601,104 @@ mod tests {
     }
 
     #[test]
+    fn imports_custom_faces_and_colors_round_trip() {
+        let root = unique_dir("bot-faces");
+        let legacy = root.join("ZigShell");
+        std::fs::create_dir_all(&legacy).unwrap();
+        let tabs: Vec<Value> = (0..20)
+            .map(|face| serde_json::json!({
+                "csid": format!("face-{face}"),
+                "face": face,
+                "color": if face % 2 == 0 { serde_json::json!(face) } else { serde_json::json!("#A1b2C3") },
+            }))
+            .collect();
+        std::fs::write(
+            legacy.join("session.json"),
+            serde_json::json!({"tabs": tabs}).to_string(),
+        )
+        .unwrap();
+
+        let bundle = import_zigshel_bundle_readonly(Some(&legacy));
+        assert_eq!(bundle.sessions.len(), 20);
+        let bundle: ZigShellImportBundle =
+            serde_json::from_str(&serde_json::to_string(&bundle).unwrap()).unwrap();
+        let mut store = WorkspaceStore::new();
+        merge_zigshel_bundle(&mut store, &bundle);
+        let path = root.join("Multibot").join("workspaces.json");
+        store.save_to(&path).unwrap();
+        let mut loaded = WorkspaceStore::load_from(&path).unwrap();
+        for (face, session) in bundle.sessions.iter().enumerate() {
+            let meta = &loaded.session_meta[&session.session_key];
+            let expected_color = if face % 2 == 0 {
+                ZIGSHEL_PALETTE_HEX[face % ZIGSHEL_PALETTE_HEX.len()]
+            } else {
+                "#A1b2C3"
+            };
+            assert_eq!(session.face, Some(face as u8));
+            assert_eq!(session.color.as_deref(), Some(expected_color));
+            assert_eq!(meta.face, session.face);
+            assert_eq!(meta.color, session.color);
+        }
+        let before = loaded.clone();
+        merge_zigshel_bundle(&mut loaded, &bundle);
+        assert_eq!(loaded, before);
+
+        let key = &bundle.sessions[0].session_key;
+        let meta = loaded.session_meta.get_mut(key).unwrap();
+        meta.face = Some(19);
+        meta.color = Some("#123456".into());
+        merge_zigshel_bundle(&mut loaded, &bundle);
+        assert_eq!(loaded.session_meta[key].face, Some(19));
+        assert_eq!(loaded.session_meta[key].color.as_deref(), Some("#123456"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn custom_face_import_ignores_invalid_missing_and_unknown_fields() {
+        let dir = unique_dir("invalid-bot-faces");
+        let invalid = [
+            serde_json::json!(null),
+            serde_json::json!(-1),
+            serde_json::json!(256),
+            serde_json::json!(1.5),
+            serde_json::json!("invalid"),
+            serde_json::json!(true),
+            serde_json::json!({"face": 3}),
+        ];
+        let mut tabs: Vec<Value> = invalid.iter().enumerate().map(|(i, value)| {
+            serde_json::json!({"csid": format!("bad-{i}"), "face": value, "color": value})
+        }).collect();
+        tabs.push(serde_json::json!({"csid": "missing", "unknown": {"face": 3, "color": 2}}));
+        tabs.push(serde_json::json!({"csid": "too-large", "face": 20}));
+        tabs.push(serde_json::json!({"csid": "bad-hex", "color": "#GG0000"}));
+        std::fs::write(
+            dir.join("session.json"),
+            serde_json::json!({"tabs": tabs}).to_string(),
+        )
+        .unwrap();
+        let bundle = import_zigshel_bundle_readonly(Some(&dir));
+        assert_eq!(bundle.sessions.len(), tabs.len());
+        let mut store = WorkspaceStore::new();
+        merge_zigshel_bundle(&mut store, &bundle);
+        for session in &bundle.sessions {
+            assert_eq!(session.face, None);
+            assert_eq!(session.color, None);
+            assert_eq!(store.session_meta[&session.session_key].face, None);
+            assert_eq!(store.session_meta[&session.session_key].color, None);
+        }
+        let old_session: ImportedSession =
+            serde_json::from_str(r#"{"session_key":"local:claude:old","unknown":true}"#).unwrap();
+        let old_meta: crate::workspaces::SessionMeta =
+            serde_json::from_str(r#"{"pinned":true,"unknown":true}"#).unwrap();
+        assert_eq!(old_session.face, None);
+        assert_eq!(old_session.color, None);
+        assert_eq!(old_meta.face, None);
+        assert_eq!(old_meta.color, None);
+        assert!(old_meta.pinned);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn zigshel_import_strictly_readonly_source_dir_immutable() {
         let dir = unique_dir("immutable");
         let ssh_dir = dir.join("ssh-key");
@@ -1595,7 +1708,7 @@ mod tests {
         std::fs::write(&servers, "v1\nconnected\t1\t22\t1\tvps.test\tu\tvps\t\n").unwrap();
         std::fs::write(
             &session,
-            r#"{"workspaces":[{"name":"Alpha","wid":"alpha"}],"tabs":[{"name":"T","favorite":true,"csid":"c1","tmux_host":0}]}"#,
+            r#"{"workspaces":[{"name":"Alpha","wid":"alpha"}],"tabs":[{"name":"T","favorite":true,"csid":"c1","tmux_host":0,"face":0,"color":2}]}"#,
         )
         .unwrap();
 
@@ -1626,6 +1739,11 @@ mod tests {
         assert_eq!(bundle.hosts.len(), 1);
         assert_eq!(bundle.workspaces.len(), 1);
         assert_eq!(bundle.favorites.len(), 1);
+        let mut store = WorkspaceStore::new();
+        merge_zigshel_bundle(&mut store, &bundle);
+        let meta = &store.session_meta[&bundle.sessions[0].session_key];
+        assert_eq!(meta.face, Some(0));
+        assert_eq!(meta.color.as_deref(), Some("#F59E0B"));
 
         let after_entries = std::fs::read_dir(&dir).unwrap().count();
         let after_ssh_entries = std::fs::read_dir(&ssh_dir).unwrap().count();

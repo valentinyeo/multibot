@@ -294,6 +294,10 @@ pub struct SessionGroup {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SessionMeta {
     #[serde(default)]
+    pub face: Option<u8>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
     pub remind_at_ms: Option<i64>,
     #[serde(default)]
     pub reminder_note: Option<String>,

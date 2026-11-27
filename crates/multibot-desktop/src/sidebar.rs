@@ -160,6 +160,102 @@ fn parse_hex_color(hex: &str) -> Option<Hsla> {
 }
 
 impl MultibotView {
+    fn render_session_badge(&self, row: &SidebarRow, size: f32) -> gpui_kit::Div {
+        let meta = self
+            .sidebar_state
+            .workspace_store
+            .session_meta
+            .get(&row.session_key);
+        let badge = div()
+            .w(px(size))
+            .h(px(size))
+            .flex_shrink_0()
+            .rounded(RADIUS_CHIP)
+            .flex()
+            .items_center()
+            .justify_center();
+        let Some(face) = meta.and_then(|meta| meta.face).filter(|face| *face < 20) else {
+            return badge
+                .bg(Self::agent_color(row.agent))
+                .text_xs()
+                .text_color(theme::bg_canvas())
+                .child(row.agent.glyph());
+        };
+        let accent = meta
+            .and_then(|meta| meta.color.as_deref())
+            .and_then(parse_hex_color)
+            .unwrap_or_else(|| Self::agent_color(row.agent));
+        // Five eye styles crossed with four mouths give twenty asset-free faces.
+        let (eye_width, left_height, right_height, eye_radius) = match face % 5 {
+            0 => (0.12, 0.12, 0.12, 0.0),
+            1 => (0.12, 0.12, 0.12, size),
+            2 => (0.16, 0.06, 0.06, 0.0),
+            3 => (0.12, 0.12, 0.04, size),
+            _ => (0.07, 0.17, 0.17, 0.0),
+        };
+        let mouth_style = face / 5;
+        let mouth_width = if mouth_style == 2 { 0.14 } else { 0.30 } * size;
+        let mouth_height = if mouth_style == 0 { 0.06 } else { 0.14 } * size;
+        let mouth = div()
+            .absolute()
+            .bottom(px(size * 0.08))
+            .left(px((size * 0.70 - mouth_width) / 2.0 - 1.0))
+            .w(px(mouth_width))
+            .h(px(mouth_height))
+            .border_1()
+            .border_color(accent)
+            .when(mouth_style == 0, |el| el.bg(accent))
+            .when(mouth_style == 2, |el| el.rounded(RADIUS_CHIP))
+            .when(mouth_style == 3, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left(px(mouth_width / 3.0))
+                        .h_full()
+                        .w(px(1.0))
+                        .bg(accent),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .right(px(mouth_width / 3.0))
+                        .h_full()
+                        .w(px(1.0))
+                        .bg(accent),
+                )
+            });
+        badge.bg(theme::bg_surface()).child(
+            div()
+                .relative()
+                .w(px(size * 0.70))
+                .h(px(size * 0.62))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(accent)
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(size * 0.12))
+                        .top(px(size * 0.10))
+                        .w(px(size * eye_width))
+                        .h(px(size * left_height))
+                        .rounded(px(eye_radius))
+                        .bg(accent),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .right(px(size * 0.12))
+                        .top(px(size * 0.10))
+                        .w(px(size * eye_width))
+                        .h(px(size * right_height))
+                        .rounded(px(eye_radius))
+                        .bg(accent),
+                )
+                .child(mouth),
+        )
+    }
+
     pub(crate) fn current_host_label(&self) -> &str {
         self.connected_host.as_deref().unwrap_or("local")
     }
@@ -959,19 +1055,7 @@ impl MultibotView {
                                     h_flex()
                                         .items_center()
                                         .gap_1()
-                                        .child(
-                                            div()
-                                                .w(px(34.0))
-                                                .h(px(34.0))
-                                                .rounded(RADIUS_CHIP)
-                                                .bg(Self::agent_color(row.agent))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .text_xs()
-                                                .text_color(theme::bg_canvas())
-                                                .child(row.agent.glyph()),
-                                        )
+                                        .child(self.render_session_badge(row, 34.0))
                                         .when_some(badge, |el, n| {
                                             el.child(
                                                 div()
@@ -1449,19 +1533,7 @@ impl MultibotView {
                 h_flex()
                     .items_center()
                     .gap_2p5()
-                    .child(
-                        div()
-                            .w(px(26.0))
-                            .h(px(26.0))
-                            .rounded(RADIUS_CHIP)
-                            .bg(Self::agent_color(row.agent))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_xs()
-                            .text_color(theme::bg_canvas())
-                            .child(row.agent.glyph()),
-                    )
+                    .child(self.render_session_badge(row, 26.0))
                     .child(
                         v_flex()
                             .flex_1()
@@ -1752,7 +1824,11 @@ impl MultibotView {
                             this.open_palette_tab_context(key_right.clone(), window, cx);
                         }),
                     )
-                    .child(badge.unwrap_or_else(|| row.agent.glyph().to_string()))
+                    .child(if let Some(digit) = badge {
+                        div().child(digit)
+                    } else {
+                        self.render_session_badge(row, 32.0)
+                    })
                     .when_some(dot_color, |el, col| {
                         el.child(
                             div()
