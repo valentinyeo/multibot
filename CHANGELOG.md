@@ -13,6 +13,7 @@ This file is embedded in Multibot so Changelog works offline.
 - Use Pi and Cursor agents alongside the existing agents on your server.
 - Choose a working directory when starting an agent in a workspace with multiple directories.
 - Sign in at account.multiprompt.dev to sync your Deepgram key.
+- See your custom bot faces imported from legacy Multiprompt.
 
 ## v0.1.55
 
