@@ -12,6 +12,7 @@ mod sidebar;
 mod slash_picker;
 mod state;
 mod table_modal;
+mod terminal_pane;
 mod theme;
 mod update_ui;
 
@@ -25,6 +26,7 @@ use app::{
     NewSession, NewWindow, NextSession, NextWorkspace, OpenInbox, OpenPalette, OpenShortcuts,
     PrevSession, PrevWorkspace, ReconnectSession, RenameActiveSession, ReopenClosedSession,
     SnoozeWorkspace, ToggleFavorite, ToggleGroup, ToggleInbox, ToggleSettings, ToggleSidebar,
+    ToggleTerminal,
     ToggleUnreadOnly, UndoWaiting, WorkspaceViewAll, WorkspaceViewFavorites, WorkspaceViewFrequent,
 };
 use gpui_kit::{
@@ -77,6 +79,8 @@ pub fn bind_multibot_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-i", ToggleInbox, None),
         KeyBinding::new("ctrl-,", ToggleSettings, None),
         KeyBinding::new("ctrl-shift-b", ToggleSidebar, None),
+        // Slice 5 — built-in terminal pane
+        KeyBinding::new("alt-c", ToggleTerminal, None),
         KeyBinding::new("ctrl-n", NewWindow, None),
         KeyBinding::new("f1", OpenShortcuts, None),
         KeyBinding::new("escape", CloseOverlay, None),

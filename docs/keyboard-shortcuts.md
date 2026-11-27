@@ -177,6 +177,7 @@ The split bar shows only splits that hold at least one session, so no wall of `F
 | --- | --- |
 | Ctrl+K -&gt; Computer: Take control / Give back | Control Computer or return to watching |
 | Ctrl+K -&gt; Computer: Retry | Retry a lost Computer connection |
+| Alt+C | Toggle the built-in terminal panel: an interactive SSH PTY (`ssh -tt`) on the active session's configured host and `cwd`, or a local login shell when the session is local/offline. Closed means no shell process, no PTY and no polling loop; Clear, Reconnect and Close live in the panel header. Also Ctrl+K -&gt; `Toggle Terminal` |
 | Ctrl+Shift+F | Toggle full-width (fullscreen) |
 | Ctrl+Shift+B | Cycle sidebar: open / collapsed / hidden |
 | multiprompt-browser sidebar | Reveal the sidebar from a shell |

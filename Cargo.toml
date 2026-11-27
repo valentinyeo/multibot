@@ -17,11 +17,13 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 dirs = "6.0"
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 notify = "8.0"
+portable-pty = "0.9"
 regex = "1.13"
 semver = "1.0"
 serde = { version = "1.0", features = ["derive"] }

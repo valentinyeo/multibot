@@ -295,7 +295,10 @@ public sealed class MultibotUiSession : IDisposable {
         @{ name = 'palette'; file = '02-palette.png'; keys = @(0x11, 0x4B); dismiss = $true },
         @{ name = 'settings'; file = '03-settings.png'; keys = @(0x11, 0xBC); dismiss = $true },
         @{ name = 'inbox'; file = '04-inbox.png'; keys = @(0x12, 0x49); dismiss = $false },
-        @{ name = 'shortcuts'; file = '05-shortcuts.png'; keys = @(0x70); dismiss = $true }
+        @{ name = 'shortcuts'; file = '05-shortcuts.png'; keys = @(0x70); dismiss = $true },
+        # Alt+C opens the built-in terminal pane, then Alt+C again closes it (MBRU-6).
+        @{ name = 'terminal'; file = '06-terminal.png'; keys = @(0x12, 0x43); dismiss = $false },
+        @{ name = 'terminal-close'; file = '07-terminal-close.png'; keys = @(0x12, 0x43); dismiss = $false }
     )
     $reference = $null
     foreach ($journey in $journeys) {
