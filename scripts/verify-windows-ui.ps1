@@ -302,15 +302,17 @@ public sealed class MultibotUiSession : IDisposable {
     if ($adapter.Count -lt 7 -or $adapter[2] -eq '10de') { throw 'Invalid GPU report or NVIDIA adapter selected.' }
     $doctor.activeGpu = @{ luid = $adapter[1]; vendor = $adapter[2]; software = $adapter[5] -eq '1'; name = $adapter[6] }
 
+    # Every journey names all three fields. Set-StrictMode is on, so a missing hashtable
+    # key is an error rather than $null.
     $journeys = @(
-        @{ name = 'launch'; file = '01-launch.png'; keys = @(); dismiss = $false },
-        @{ name = 'palette'; file = '02-palette.png'; keys = @(0x11, 0x4B); dismiss = $true },
-        @{ name = 'settings'; file = '03-settings.png'; keys = @(0x11, 0xBC); dismiss = $true },
-        @{ name = 'inbox'; file = '04-inbox.png'; keys = @(0x12, 0x49); dismiss = $false },
-        @{ name = 'shortcuts'; file = '05-shortcuts.png'; keys = @(0x70); dismiss = $true },
+        @{ name = 'launch'; file = '01-launch.png'; keys = @(); text = ''; dismiss = $false },
+        @{ name = 'palette'; file = '02-palette.png'; keys = @(0x11, 0x4B); text = ''; dismiss = $true },
+        @{ name = 'settings'; file = '03-settings.png'; keys = @(0x11, 0xBC); text = ''; dismiss = $true },
+        @{ name = 'inbox'; file = '04-inbox.png'; keys = @(0x12, 0x49); text = ''; dismiss = $false },
+        @{ name = 'shortcuts'; file = '05-shortcuts.png'; keys = @(0x70); text = ''; dismiss = $true },
         # Alt+C opens the built-in terminal pane, then Alt+C again closes it (MBRU-6).
-        @{ name = 'terminal'; file = '06-terminal.png'; keys = @(0x12, 0x43); dismiss = $false },
-        @{ name = 'terminal-close'; file = '07-terminal-close.png'; keys = @(0x12, 0x43); dismiss = $false },
+        @{ name = 'terminal'; file = '06-terminal.png'; keys = @(0x12, 0x43); text = ''; dismiss = $false },
+        @{ name = 'terminal-close'; file = '07-terminal-close.png'; keys = @(0x12, 0x43); text = ''; dismiss = $false },
         # Ctrl+K -> "Toggle Computer View" opens the lazy pane, and the same row closes it
         # again (MBRU-7). Typed by name so the journey does not depend on a chord the pane
         # deliberately does not claim.
