@@ -196,6 +196,11 @@ public sealed class MultibotUiSession : IDisposable {
         } finally { image.UnlockBits(data); }
     }
     public CaptureResult Capture(IntPtr hwnd, string path, string reference) {
+        // PowerShell binds a $null argument to "" for a string parameter, so a missing
+        // reference arrives empty rather than null. Treat both the same way.
+        if (!string.IsNullOrEmpty(reference) && !File.Exists(reference))
+            throw new Exception("Reference screenshot does not exist: " + reference);
+        if (string.IsNullOrEmpty(path)) throw new Exception("Capture path is empty.");
         Focus(hwnd);
         RECT r = Bounds(hwnd);
         using (var image = new Bitmap(r.Right - r.Left, r.Bottom - r.Top, PixelFormat.Format32bppArgb)) {
@@ -209,7 +214,7 @@ public sealed class MultibotUiSession : IDisposable {
                 varied |= pixels[i] != pixels[0] || pixels[i+1] != pixels[1] || pixels[i+2] != pixels[2];
             }
             long changed = 0;
-            if (reference != null) {
+            if (!string.IsNullOrEmpty(reference)) {
                 using (var previous = new Bitmap(reference)) {
                     if (previous.Size != image.Size) throw new Exception("Window size changed during the journey.");
                     var before = Pixels(previous);
