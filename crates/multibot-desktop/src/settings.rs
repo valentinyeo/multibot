@@ -111,6 +111,7 @@ impl MultibotView {
         let hosts_found = bundle.hosts.len();
         let ws_found = bundle.workspaces.len();
         let fav_found = bundle.favorites.len();
+        let sessions_found = bundle.sessions.len();
 
         let hosts_added = self.settings.merge_hosts(bundle.hosts.clone());
         let merge_stats = merge_zigshel_bundle(&mut self.sidebar_state.workspace_store, &bundle);
@@ -122,13 +123,13 @@ impl MultibotView {
         }
         self.persist_workspace_store_if_enabled();
 
-        self.notice = Some(if hosts_found == 0 && ws_found == 0 && fav_found == 0 {
-            "No SSH hosts, workspaces, or favorites found in %APPDATA%\\ZigShell (read-only check)."
+        self.notice = Some(if hosts_found == 0 && ws_found == 0 && fav_found == 0 && sessions_found == 0 {
+            "No SSH hosts, workspaces, sessions, or favorites found in %APPDATA%\\ZigShell (read-only check)."
                 .into()
         } else {
             format!(
-                "Imported {hosts_added} host(s), {} workspace(s), and {} favorite(s) from ZigShell (read-only).",
-                merge_stats.workspaces_added, merge_stats.favorites_added
+                "Imported {hosts_added} host(s), {} workspace(s), {} session assignment(s), and {} favorite(s) from ZigShell (read-only).",
+                merge_stats.workspaces_added, merge_stats.sessions_assigned, merge_stats.favorites_added
             )
         });
         cx.notify();
@@ -289,7 +290,7 @@ impl MultibotView {
                                         div()
                                             .text_xs()
                                             .text_color(theme::text_muted())
-                                            .child("Imports SSH hosts (including IdentityFile keys), workspaces & favorites without modifying %APPDATA%\\ZigShell."),
+                                            .child("Imports SSH hosts (including IdentityFile keys), workspaces, sessions & favorites without modifying %APPDATA%\\ZigShell."),
                                     ),
                             )
                             .child(
