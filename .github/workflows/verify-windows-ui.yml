@@ -1,0 +1,118 @@
+name: Windows UI Verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Published release tag (leave empty to build this ref)'
+        required: false
+        type: string
+  pull_request:
+    paths:
+      - 'crates/multibot-desktop/**'
+      - 'crates/multibot-keys/**'
+      - 'crates/multibot-gpu/**'
+      - 'crates/multibot-core/src/settings.rs'
+      - 'patches/gpui-pre-windows/**'
+      - 'scripts/verify-windows-ui.ps1'
+      - '.github/workflows/verify-windows-ui.yml'
+      - 'skills/verify-multibot/SKILL.md'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ui-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Real Windows keyboard journeys
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Exclude build dirs from Windows Defender
+        run: |
+          Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: env.RELEASE_TAG == ''
+
+      - uses: Swatinem/rust-cache@v2
+        if: env.RELEASE_TAG == ''
+
+      - name: Test Windows profile isolation
+        if: env.RELEASE_TAG == ''
+        run: cargo test -p multibot-core settings::tests::windows_data_dir_honors_override -- --exact
+
+      - name: Build multibot.exe with default GPU policy
+        if: env.RELEASE_TAG == ''
+        run: cargo build --release -p multibot-desktop
+
+      - name: Download and verify published release
+        if: env.RELEASE_TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force release | Out-Null
+          gh release download "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" --pattern multibot-windows-x64.zip --pattern SHA256SUMS.txt --dir release
+          if ($LASTEXITCODE -ne 0) { throw 'Release download failed.' }
+          $lines = @(Get-Content release/SHA256SUMS.txt | Where-Object { $_ -match '^[0-9a-fA-F]{64}\s+\*?multibot-windows-x64\.zip$' })
+          if ($lines.Count -ne 1) { throw 'Missing or ambiguous release archive checksum.' }
+          $expected = ($lines[0] -split '\s+')[0]
+          if ((Get-FileHash release/multibot-windows-x64.zip -Algorithm SHA256).Hash -ne $expected) { throw 'Release archive checksum mismatch.' }
+          Expand-Archive release/multibot-windows-x64.zip -DestinationPath release/unpacked
+          if (-not (Test-Path release/unpacked/multibot.exe -PathType Leaf)) { throw 'Release contains no multibot.exe.' }
+
+      - name: Run read-only Doctor and keyboard journeys
+        timeout-minutes: 3
+        run: |
+          $exe = if ($env:RELEASE_TAG) { 'release/unpacked/multibot.exe' } else { 'target/release/multibot.exe' }
+          pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-ui.ps1 -Exe $exe -EvidenceDir evidence
+          exit $LASTEXITCODE
+
+      - name: Summarize Doctor and journeys
+        if: always()
+        run: |
+          $summary = [Collections.Generic.List[string]]::new()
+          $summary.Add('## Windows UI verification')
+          if (Test-Path evidence/doctor.json) {
+            $doctor = Get-Content -Raw evidence/doctor.json | ConvertFrom-Json
+            $summary.Add("Doctor: PID $($doctor.pid), alive $($doctor.processAlive), HWND $($doctor.hwnd).")
+            $summary.Add("Launch RAM: $($doctor.workingSetMB) MB. GPU: $($doctor.activeGpu.name), software: $($doctor.activeGpu.software).")
+          } else {
+            $summary.Add('Doctor unavailable: build, download, or launch did not complete.')
+          }
+          if (Test-Path evidence/result.json) {
+            $result = Get-Content -Raw evidence/result.json | ConvertFrom-Json
+            $summary.Add("Passed: $($result.pass). Final RAM: $($result.finalWorkingSetMB) MB.")
+            $summary.Add('')
+            $summary.Add('| Journey | Passed | Elapsed ms | Screenshot |')
+            $summary.Add('| --- | --- | --- | --- |')
+            foreach ($step in $result.steps) {
+              $summary.Add("| $($step.name) | $($step.pass) | $($step.elapsedMs) | $($step.screenshot) |")
+            }
+            if ($result.error) { $summary.Add("Failure details are in result.json and stderr.txt in the artifact.") }
+          }
+          $summary.Add('')
+          $summary.Add('Download **windows-ui-evidence** for PNGs, Doctor, result JSON, logs, and the isolated profile.')
+          $summary | Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-ui-evidence
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: warn
+          include-hidden-files: true
