@@ -744,6 +744,9 @@ impl TerminalSession {
                                 emulator.advance(&buffer[..n]);
                             }
                             // Exactly one wake-up per read batch: demand-driven, no timer.
+                            // GPUI's headless test scheduler refuses foreground wakes
+                            // raised from another thread, so tests read the grid directly.
+                            #[cfg(not(test))]
                             if let Some(wake) = wake.as_ref() {
                                 let _ = wake.send(());
                             }
@@ -753,11 +756,14 @@ impl TerminalSession {
                     }
                 }
                 #[cfg(test)]
+                #[cfg(test)]
                 local_gen.fetch_add(1, Ordering::Relaxed);
                 // A closed PTY is an event too: wake once so the pane can report the exit.
+                #[cfg(not(test))]
                 if let Some(wake) = wake.as_ref() {
                     let _ = wake.send(());
                 }
+                let _ = &wake;
             })
             .context("spawning PTY reader thread")?;
 
@@ -1150,10 +1156,11 @@ impl crate::app::MultibotView {
             return false;
         }
         let modifiers = ev.keystroke.modifiers;
-        // Copy / paste are app-level; everything else goes to the PTY.
-        if modifiers.platform && ev.keystroke.key.eq_ignore_ascii_case("v")
-            || modifiers.control && modifiers.shift && ev.keystroke.key.eq_ignore_ascii_case("v")
-        {
+        // Paste is the one chord the pane keeps for itself: Cmd+V on macOS, Ctrl+V (with or
+        // without Shift) elsewhere. Everything else goes to the PTY.
+        let is_paste = ev.keystroke.key.eq_ignore_ascii_case("v")
+            && (modifiers.platform || modifiers.control);
+        if is_paste {
             self.paste_into_terminal(cx);
             window.prevent_default();
             cx.stop_propagation();
@@ -1342,18 +1349,24 @@ impl crate::app::MultibotView {
                     ),
             );
 
-        let body_inner: gpui_kit::AnyElement = match (&self.terminal.screen, &self.terminal.error) {
-            (_, Some(error)) => div()
+        // A status line (spawn failure, ended session) rides above the grid so the last
+        // screenful stays readable instead of being replaced by an error message.
+        let status_line: gpui_kit::AnyElement = match &self.terminal.error {
+            Some(error) => div()
                 .id("terminal-error")
                 .test_support()
-                .flex_1()
-                .p_3()
-                .text_size(px(12.0))
+                .w_full()
+                .px_3()
+                .py_1()
+                .text_size(px(11.5))
                 .text_color(crate::theme::accent_amber())
                 .child(error.clone())
                 .into_any_element(),
-            (Some(screen), _) => render_screen(screen, mono, self.terminal.focus_handle.clone()),
-            (None, None) => div()
+            None => div().w_full().child(" ").into_any_element(),
+        };
+        let grid_body: gpui_kit::AnyElement = match &self.terminal.screen {
+            Some(screen) => render_screen(screen, mono, self.terminal.focus_handle.clone()),
+            None => div()
                 .id("terminal-starting")
                 .test_support()
                 .flex_1()
@@ -1363,6 +1376,11 @@ impl crate::app::MultibotView {
                 .child("Starting terminal...")
                 .into_any_element(),
         };
+        let body_inner = v_flex()
+            .flex_1()
+            .min_h_0()
+            .child(status_line)
+            .child(grid_body);
 
         let body = div()
             .id("terminal-scroll")

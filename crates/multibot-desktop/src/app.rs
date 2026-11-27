@@ -6737,6 +6737,8 @@ mod tests {
     // Slice 5 — built-in Alt+C terminal pane (lazy lifecycle + obsidian grid)
     // =====================================================================
 
+    /// Stub shell for headless tests: prints a marker and stays alive so the pane keeps a
+    /// live child until the test closes it.
     fn stub_terminal_command() -> crate::terminal_pane::TerminalCommand {
         crate::terminal_pane::TerminalCommand {
             program: if cfg!(windows) {
@@ -6745,11 +6747,42 @@ mod tests {
                 "/bin/sh".to_string()
             },
             args: if cfg!(windows) {
-                vec!["/C".to_string(), "echo mbru-6-terminal-ready".to_string()]
+                vec![
+                    "/C".to_string(),
+                    "echo mbru-6-terminal-ready & ping -n 30 127.0.0.1 >NUL".to_string(),
+                ]
             } else {
-                vec!["-c".to_string(), "echo mbru-6-terminal-ready".to_string()]
+                vec![
+                    "-c".to_string(),
+                    "echo mbru-6-terminal-ready; sleep 30".to_string(),
+                ]
             },
             cwd: None,
+        }
+    }
+
+    /// Waits (bounded) for the pane's grid to show `needle`. The PTY reader is a real OS
+    /// thread, so the test must let it deliver bytes before asserting.
+    fn wait_for_terminal_output(
+        window: &mut gpui_kit::Window,
+        cx: &mut gpui_kit::App,
+        view: &Entity<MultibotView>,
+        needle: &str,
+    ) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            // The PTY reader thread cannot wake a headless GPUI scheduler, so pull the
+            // emulator snapshot ourselves before each frame.
+            view.update(cx, |view, _cx| view.refresh_terminal_screen());
+            window.render_frame(cx);
+            let value = window
+                .try_find("terminal-grid")
+                .and_then(|snapshot| snapshot.value().map(str::to_string))
+                .unwrap_or_default();
+            if value.contains(needle) || std::time::Instant::now() >= deadline {
+                return value;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
 
@@ -6791,8 +6824,7 @@ mod tests {
                 assert!(window.try_find(control).is_some(), "missing {control}");
             }
             // The grid advertises its text, proving real PTY output reached the emulator.
-            let grid = window.find("terminal-grid");
-            let value = grid.value().unwrap_or_default().to_string();
+            let value = wait_for_terminal_output(window, cx, &view, "mbru-6-terminal-ready");
             assert!(
                 value.contains("mbru-6-terminal-ready"),
                 "terminal grid must render PTY output, got: {value:?}"
