@@ -23,7 +23,12 @@ use multibot_core::workspaces::{
     STARRED_WORKSPACE_ID, canonical_session_key, now_unix_ms, rank_palette,
 };
 use multibot_keys::{ALL_CATEGORIES, by_category};
-use multibot_proto::ClientRequest;
+use multibot_proto::{AgentKind, ClientRequest};
+
+pub(crate) struct SessionDirectoryPicker {
+    agent: AgentKind,
+    directories: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum ReminderTarget {
@@ -35,6 +40,7 @@ pub(crate) enum ReminderTarget {
 pub(crate) struct PaletteState {
     pub stats: PaletteStats,
     pub reminder_target: Option<ReminderTarget>,
+    pub directory_picker: Option<SessionDirectoryPicker>,
     pub selected_index: usize,
     pub tab_context_session_key: Option<String>,
     pub input_sub: Option<Subscription>,
@@ -50,6 +56,7 @@ impl MultibotView {
         self.active_modal = ActiveModal::Palette;
         self.palette_state.tab_context_session_key = None;
         self.palette_state.reminder_target = None;
+        self.palette_state.directory_picker = None;
         self.palette_state.selected_index = 0;
         self.palette_state.scroll_handle.scroll_to_item(0);
         self.ensure_palette_input_subscription(window, cx);
@@ -71,6 +78,7 @@ impl MultibotView {
         }
         self.active_modal = ActiveModal::Palette;
         self.palette_state.reminder_target = None;
+        self.palette_state.directory_picker = None;
         self.palette_state.tab_context_session_key = Some(session_key);
         self.palette_state.selected_index = 0;
         self.palette_state.scroll_handle.scroll_to_item(0);
@@ -110,6 +118,7 @@ impl MultibotView {
         };
         self.open_palette(window, cx);
         self.palette_state.reminder_target = Some(target);
+        self.palette_state.directory_picker = None;
     }
 
     fn ensure_palette_input_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -266,6 +275,16 @@ impl MultibotView {
                 category: PaletteCategory::Sessions,
                 destructive: false,
                 aliases: vec!["new agy".into(), "spawn agy".into(), "antigravity".into()],
+                tab_context: false,
+                global: true,
+            },
+            PaletteCommandSpec {
+                id: "pal-cmd-spawn-pi".into(),
+                label: "Session: New Pi session".into(),
+                chord: String::new(),
+                category: PaletteCategory::Sessions,
+                destructive: false,
+                aliases: vec!["new pi".into(), "spawn pi".into()],
                 tab_context: false,
                 global: true,
             },
@@ -674,7 +693,57 @@ impl MultibotView {
         cmds
     }
 
+    fn start_agent_session(
+        &mut self,
+        agent: AgentKind,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        let directories = self.sidebar_state.workspace_store.workspace_directories(
+            &self.sidebar_state.active_workspace_id,
+            self.active_session_host(),
+            &self.session_inputs(),
+        );
+        if directories.len() <= 1 {
+            let cwd = directories
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| self.default_spawn_cwd());
+            self.spawn_new_session(agent, cwd, None, None, cx);
+            return;
+        }
+        self.active_modal = ActiveModal::Palette;
+        self.palette_state.directory_picker = Some(SessionDirectoryPicker { agent, directories });
+        self.palette_state.selected_index = 0;
+        self.palette_state.scroll_handle.scroll_to_item(0);
+        if let Some(window) = window {
+            self.palette_input.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+                state.focus(window, cx);
+            });
+        }
+        cx.notify();
+    }
+
     pub(crate) fn build_palette_rows(&self, query: &str, now_ms: i64) -> Vec<PaletteRow> {
+        if let Some(picker) = &self.palette_state.directory_picker {
+            let query = query.trim().to_lowercase();
+            return picker
+                .directories
+                .iter()
+                .enumerate()
+                .filter(|(_, cwd)| cwd.to_lowercase().contains(&query))
+                .map(|(idx, cwd)| PaletteRow::Command {
+                    id: format!("pal-spawn-directory-{idx}"),
+                    label: cwd.clone(),
+                    chord: String::new(),
+                    category: PaletteCategory::Sessions,
+                    destructive: false,
+                    match_rank: 0,
+                    frecency: 0,
+                })
+                .collect();
+        }
         if let Some(target) = &self.palette_state.reminder_target {
             let clear = match target {
                 ReminderTarget::Session(_) => "Clear reminder",
@@ -786,6 +855,18 @@ impl MultibotView {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        if let Some(picker) = self.palette_state.directory_picker.take() {
+            if let PaletteRow::Command { id, .. } = row
+                && let Some(idx) = id
+                    .strip_prefix("pal-spawn-directory-")
+                    .and_then(|s| s.parse::<usize>().ok())
+                && let Some(cwd) = picker.directories.get(idx)
+            {
+                self.active_modal = ActiveModal::None;
+                self.spawn_new_session(picker.agent, cwd.clone(), None, None, cx);
+            }
+            return;
+        }
         if let Some(target) = self.palette_state.reminder_target.take() {
             let PaletteRow::Command { id, .. } = row else {
                 return;
@@ -805,6 +886,7 @@ impl MultibotView {
                         self.notice =
                             Some("Tomorrow 9am is unavailable; choose a duration instead".into());
                         self.palette_state.reminder_target = Some(target);
+                        self.palette_state.directory_picker = None;
                         cx.notify();
                         return;
                     };
@@ -843,6 +925,7 @@ impl MultibotView {
         self.active_modal = ActiveModal::None;
         self.palette_state.tab_context_session_key = None;
         self.palette_state.reminder_target = None;
+        self.palette_state.directory_picker = None;
 
         match row {
             PaletteRow::Header(_) => {}
@@ -1318,37 +1401,17 @@ impl MultibotView {
                         self.interrupt_active_session(cx);
                         return;
                     }
-                    "pal-cmd-spawn-claude" => {
-                        let cwd = self.default_spawn_cwd();
-                        self.spawn_new_session(
-                            multibot_proto::AgentKind::Claude,
-                            cwd,
-                            None,
-                            None,
-                            cx,
-                        );
-                        return;
-                    }
-                    "pal-cmd-spawn-codex" => {
-                        let cwd = self.default_spawn_cwd();
-                        self.spawn_new_session(
-                            multibot_proto::AgentKind::Codex,
-                            cwd,
-                            None,
-                            None,
-                            cx,
-                        );
-                        return;
-                    }
-                    "pal-cmd-spawn-antigravity" => {
-                        let cwd = self.default_spawn_cwd();
-                        self.spawn_new_session(
-                            multibot_proto::AgentKind::Antigravity,
-                            cwd,
-                            None,
-                            None,
-                            cx,
-                        );
+                    "pal-cmd-spawn-claude"
+                    | "pal-cmd-spawn-codex"
+                    | "pal-cmd-spawn-antigravity"
+                    | "pal-cmd-spawn-pi" => {
+                        let agent = match id.as_str() {
+                            "pal-cmd-spawn-claude" => AgentKind::Claude,
+                            "pal-cmd-spawn-codex" => AgentKind::Codex,
+                            "pal-cmd-spawn-antigravity" => AgentKind::Antigravity,
+                            _ => AgentKind::Pi,
+                        };
+                        self.start_agent_session(agent, window, cx);
                         return;
                     }
                     "pal-cmd-unarchive-session" => {
@@ -1410,6 +1473,7 @@ impl MultibotView {
         if query.is_empty() && self.palette_state.tab_context_session_key.is_some() {
             self.palette_state.tab_context_session_key = None;
             self.palette_state.reminder_target = None;
+            self.palette_state.directory_picker = None;
             self.palette_state.selected_index = 0;
             self.palette_state.scroll_handle.scroll_to_item(0);
             cx.notify();
@@ -1462,6 +1526,7 @@ impl MultibotView {
                 self.active_modal = ActiveModal::None;
                 self.palette_state.tab_context_session_key = None;
                 self.palette_state.reminder_target = None;
+                self.palette_state.directory_picker = None;
                 self.focus_active_surface_default(window, cx);
                 cx.stop_propagation();
                 cx.notify();
@@ -1773,6 +1838,15 @@ impl MultibotView {
             None => context_banner,
         };
 
+        let context_banner = if let Some(picker) = &self.palette_state.directory_picker {
+            Some(format!(
+                "New {} session · Choose a directory · ↑/↓ then Enter",
+                picker.agent.label()
+            ))
+        } else {
+            context_banner
+        };
+
         div()
             .id("palette-backdrop")
             .absolute()
@@ -1788,6 +1862,7 @@ impl MultibotView {
                     this.active_modal = ActiveModal::None;
                     this.palette_state.tab_context_session_key = None;
                     this.palette_state.reminder_target = None;
+                    this.palette_state.directory_picker = None;
                     this.focus_active_surface_default(window, cx);
                     cx.notify();
                 }),
@@ -1810,6 +1885,7 @@ impl MultibotView {
                         }
                         this.palette_state.tab_context_session_key = None;
                         this.palette_state.reminder_target = None;
+                        this.palette_state.directory_picker = None;
                         this.active_modal = ActiveModal::None;
                         this.focus_active_surface_default(window, cx);
                         cx.notify();
@@ -1857,6 +1933,7 @@ impl MultibotView {
                         }
                         this.palette_state.tab_context_session_key = None;
                         this.palette_state.reminder_target = None;
+                        this.palette_state.directory_picker = None;
                         this.active_modal = ActiveModal::None;
                         this.focus_active_surface_default(window, cx);
                         cx.stop_propagation();
@@ -2046,6 +2123,128 @@ mod tests {
             })
             .unwrap()
         })
+    }
+
+    #[gpui_kit::test]
+    fn new_agent_sessions_pick_directory_before_spawning(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, _| {
+                v.daemon_tx = Some(tx);
+                v.sessions = ["/repo/a", "/repo/b", "/repo/a"].into_iter().enumerate()
+                    .map(|(i, cwd)| SessionSummary {
+                        id: format!("s{i}"),
+                        cwd: Some(cwd.into()),
+                        ..Default::default()
+                    }).collect();
+                v.selected_session = Some(v.sessions[0].clone());
+            });
+            for (slug, agent) in [
+                ("claude", AgentKind::Claude),
+                ("antigravity", AgentKind::Antigravity),
+                ("pi", AgentKind::Pi),
+                ("codex", AgentKind::Codex),
+            ] {
+                window.render_frame(cx);
+                window.press("ctrl-k", cx);
+                view.update(cx, |v, cx| {
+                    v.palette_input.update(cx, |input, cx| input.set_value(format!("new {slug}"), window, cx));
+                });
+                window.render_frame(cx);
+                window.click(format!("pal-cmd-spawn-{slug}"), cx);
+                window.render_frame(cx);
+                assert!(rx.try_recv().is_err(), "{slug} spawned before choosing a directory");
+                assert!(window.find("palette-context-banner").visible());
+                assert!(window.find("pal-spawn-directory-0").visible());
+                assert!(window.find("pal-spawn-directory-1").visible());
+                assert!(window.try_find("pal-spawn-directory-2").is_none());
+                view.update(cx, |v, cx| {
+                    v.palette_input.update(cx, |input, cx| input.set_value("/repo/b", window, cx));
+                });
+                window.render_frame(cx);
+                window.press("enter", cx);
+                window.render_frame(cx);
+                assert!(matches!(rx.try_recv(), Ok(ClientRequest::SpawnSession { agent: actual, cwd, .. })
+                    if actual == agent && cwd == "/repo/b"));
+                assert!(rx.try_recv().is_err());
+                assert_eq!(view.read_with(cx, |v, _| v.active_modal), ActiveModal::None);
+            }
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn new_agent_sessions_launch_directly_with_zero_or_one_directory(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, _| v.daemon_tx = Some(tx));
+            for directories in [vec![], vec!["/repo/only"], vec!["/repo/only", "/repo/only"]] {
+                view.update(cx, |v, _| {
+                    v.selected_session = None;
+                    v.sessions = directories.iter().enumerate().map(|(i, cwd)| SessionSummary {
+                        id: format!("s{i}"),
+                        cwd: Some((*cwd).into()),
+                        ..Default::default()
+                    }).collect();
+                });
+                for (slug, agent) in [
+                    ("claude", AgentKind::Claude),
+                    ("antigravity", AgentKind::Antigravity),
+                    ("pi", AgentKind::Pi),
+                    ("codex", AgentKind::Codex),
+                ] {
+                    window.render_frame(cx);
+                    window.press("ctrl-k", cx);
+                    view.update(cx, |v, cx| {
+                        v.palette_input.update(cx, |input, cx| input.set_value(format!("new {slug}"), window, cx));
+                    });
+                    window.render_frame(cx);
+                    window.click(format!("pal-cmd-spawn-{slug}"), cx);
+                    window.render_frame(cx);
+                    let expected_cwd = directories.first().copied().unwrap_or(".");
+                    assert!(matches!(rx.try_recv(), Ok(ClientRequest::SpawnSession { agent: actual, cwd, .. })
+                        if actual == agent && cwd == expected_cwd));
+                    assert_eq!(view.read_with(cx, |v, _| v.active_modal), ActiveModal::None);
+                    assert!(rx.try_recv().is_err());
+                }
+            }
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn directory_picker_cancels_without_spawning_and_ctrl_t_stays_direct(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, _| {
+                v.daemon_tx = Some(tx);
+                v.sessions = ["/repo/a", "/repo/b"].into_iter().enumerate().map(|(i, cwd)| SessionSummary {
+                    id: format!("s{i}"),
+                    cwd: Some(cwd.into()),
+                    ..Default::default()
+                }).collect();
+                v.selected_session = Some(v.sessions[0].clone());
+            });
+            window.render_frame(cx);
+            window.press("ctrl-k", cx);
+            view.update(cx, |v, cx| {
+                v.palette_input.update(cx, |input, cx| input.set_value("new codex", window, cx));
+            });
+            window.render_frame(cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert!(window.find("pal-spawn-directory-0").visible());
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(rx.try_recv().is_err());
+            window.press("ctrl-t", cx);
+            window.render_frame(cx);
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::SpawnSession { agent: AgentKind::Claude, cwd, .. }) if cwd == "/repo/a"));
+            window.press("ctrl-k", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("pal-spawn-directory-0").is_none());
+        }).unwrap();
     }
 
     #[gpui_kit::test]

@@ -1638,6 +1638,39 @@ impl WorkspaceStore {
         self.default_workspace_id()
     }
 
+    pub fn workspace_directories(
+        &self,
+        workspace_id: &str,
+        host: &str,
+        sessions: &[SessionInput<'_>],
+    ) -> Vec<String> {
+        let mut directories = Vec::new();
+        for input in sessions {
+            if input.host != host || input.summary.archived {
+                continue;
+            }
+            let in_workspace = match workspace_id {
+                ALL_WORKSPACES_ID => true,
+                STARRED_WORKSPACE_ID => self.favorites.contains(&input.key),
+                _ => self.effective_workspace_id(&input.key) == workspace_id,
+            };
+            if !in_workspace {
+                continue;
+            }
+            if let Some(cwd) = input
+                .summary
+                .cwd
+                .as_deref()
+                .filter(|cwd| !cwd.trim().is_empty())
+            {
+                directories.push(cwd.to_string());
+            }
+        }
+        directories.sort();
+        directories.dedup();
+        directories
+    }
+
     pub fn compute_sidebar_layout(
         &self,
         workspace_id: &str,
@@ -3206,6 +3239,82 @@ mod tests {
             host,
             summary,
         }
+    }
+
+    #[test]
+    fn workspace_directories_are_distinct_and_scoped_to_workspace_and_host() {
+        let mut store = WorkspaceStore::new();
+        let work = store.create_workspace("Work", None).unwrap();
+        let other = store.create_workspace("Separate", None).unwrap();
+        let sessions: Vec<_> = [
+            (Some("/repo/b"), false),
+            (Some("/repo/a"), false),
+            (Some("/repo/a"), false),
+            (Some("   "), false),
+            (None, false),
+            (Some("/archived"), true),
+            (Some("/other-workspace"), false),
+            (Some("/other-host"), false),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (cwd, archived))| SessionSummary {
+            id: i.to_string(),
+            cwd: cwd.map(str::to_string),
+            archived,
+            ..Default::default()
+        })
+        .collect();
+        let inputs: Vec<_> = sessions
+            .iter()
+            .enumerate()
+            .map(|(i, session)| make_input(if i == 7 { "remote" } else { "local" }, session))
+            .collect();
+        for (i, input) in inputs.iter().enumerate() {
+            store.assign_session_workspace(&input.key, if i == 6 { &other.id } else { &work.id });
+        }
+        assert_eq!(
+            store.workspace_directories(&work.id, "local", &inputs),
+            ["/repo/a", "/repo/b"]
+        );
+        assert_eq!(
+            store.workspace_directories(&work.id, "remote", &inputs),
+            ["/other-host"]
+        );
+        assert!(
+            store
+                .workspace_directories(&work.id, "offline", &inputs)
+                .is_empty()
+        );
+        store.favorites.insert(inputs[0].key.clone());
+        assert_eq!(
+            store.workspace_directories(STARRED_WORKSPACE_ID, "local", &inputs),
+            ["/repo/b"]
+        );
+        assert_eq!(
+            store.workspace_directories(ALL_WORKSPACES_ID, "local", &inputs),
+            ["/other-workspace", "/repo/a", "/repo/b"]
+        );
+    }
+
+    #[test]
+    fn workspace_directories_with_zero_or_one_distinct_directory() {
+        let store = WorkspaceStore::new();
+        let workspace = store.default_workspace_id();
+        assert!(
+            store
+                .workspace_directories(&workspace, "local", &[])
+                .is_empty()
+        );
+        let session = SessionSummary {
+            cwd: Some("/repo/only".into()),
+            ..Default::default()
+        };
+        let inputs = [make_input("local", &session), make_input("local", &session)];
+        assert_eq!(
+            store.workspace_directories(&workspace, "local", &inputs),
+            ["/repo/only"]
+        );
     }
 
     #[test]
