@@ -1176,7 +1176,7 @@ impl MultibotView {
                         .bg(theme::bg_surface())
                         .text_xs()
                         .text_color(theme::text_muted())
-                        .child("Connect to a VPS or local daemon to stream Claude, Antigravity & Codex chats."),
+                        .child("Connect to a VPS or local daemon to stream Claude, Antigravity, Codex, Pi & Cursor chats."),
                 );
             } else if layout.recents.is_empty()
                 && layout.pinned_tiles.is_empty()

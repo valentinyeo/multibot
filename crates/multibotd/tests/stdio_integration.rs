@@ -898,3 +898,251 @@ async fn shell_sessions_spawn_open_refresh_and_disappear_without_transcripts() {
             .success()
     );
 }
+
+#[tokio::test]
+async fn pi_cursor_active_discovery_history_live_updates_stay_under_10mb() {
+    use serde_json::json;
+    let home = temp_home("pi-cursor");
+    let tmux_home = home.join("tmux");
+    fs::create_dir_all(&tmux_home).unwrap();
+    let pi = home.join(".pi/agent/sessions/--repo--/date_pi-session.jsonl");
+    let cursor =
+        home.join(".cursor/projects/repo/agent-transcripts/cursor-session/cursor-session.jsonl");
+    for (path, agent) in [(&pi, AgentKind::Pi), (&cursor, AgentKind::Cursor)] {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut file = fs::File::create(path).unwrap();
+        if agent == AgentKind::Pi {
+            writeln!(
+                file,
+                "{}",
+                json!({"type":"session","id":"pi-session","cwd":"/repo"})
+            )
+            .unwrap();
+        }
+        for i in 0..12 {
+            let message = json!({"role":"assistant","content":format!("reply {i}")});
+            let row = if agent == AgentKind::Pi {
+                json!({"type":"message","id":format!("m{i}"),"message":message})
+            } else {
+                json!({"role":"assistant","message":message})
+            };
+            writeln!(file, "{row}").unwrap();
+        }
+        for i in 0..2 {
+            let message = json!({"role":"assistant","content":"A bounded prose segment. ".repeat(9000)});
+            let row = if agent == AgentKind::Pi { json!({"type":"message","id":format!("large-{i}"),"message":message}) }
+                else { json!({"role":"assistant","message":message}) };
+            writeln!(file, "{row}").unwrap();
+        }
+        let message = json!({"role":"user","content":[{"type":"text","text":"screenshot"},{"type":"image","source":{"type":"base64","data":"A".repeat(1500 * 1024)}}]});
+        let row = if agent == AgentKind::Pi {
+            json!({"type":"message","id":"image","message":message})
+        } else {
+            json!({"role":"user","message":message})
+        };
+        writeln!(file, "{row}").unwrap();
+        for i in 0..600 {
+            let dead = if agent == AgentKind::Cursor {
+                path.parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join(format!("dead-{i}/dead-{i}.jsonl"))
+            } else {
+                path.with_file_name(format!("dead-{i}.jsonl"))
+            };
+            fs::create_dir_all(dead.parent().unwrap()).unwrap();
+            fs::write(dead, "not a transcript\n").unwrap();
+        }
+    }
+    let legacy = home.join(".local/state/multiprompt");
+    fs::create_dir_all(legacy.join("agent-host")).unwrap();
+    let names = r#"{"live-pi":{"name":"Pi Work","sid":"pi-session","workspace":"Coding"},"live-cursor":{"name":"Cursor Work","sid":"cursor-session","workspace":"Coding"}}"#;
+    fs::write(legacy.join("chat-names.json"), names).unwrap();
+    for sid in ["pi-session", "cursor-session"] {
+        fs::write(
+            legacy.join(format!("agent-host/{sid}.state.json")),
+            format!("{{\"sid\":\"{sid}\",\"pid\":{}}}", std::process::id()),
+        )
+        .unwrap();
+    }
+    let mut child = Command::new(env!("CARGO_BIN_EXE_multibotd"))
+        .arg("--stdio")
+        .env("HOME", &home)
+        .env("TMUX_TMPDIR", &tmux_home)
+        .env_remove("TMUX")
+        .env("MULTIPROMPT_STATE_DIR", &legacy)
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
+        .env_remove("PI_CODING_AGENT_SESSION_DIR")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let pid = child.id().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap()).lines();
+    async fn send(stdin: &mut tokio::process::ChildStdin, request: ClientRequest) {
+        stdin
+            .write_all(encode_line(&request).unwrap().as_bytes())
+            .await
+            .unwrap();
+        stdin.flush().await.unwrap();
+    }
+    async fn next(
+        reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    ) -> ServerEvent {
+        loop {
+            let line = tokio::time::timeout(Duration::from_secs(10), reader.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(!line.contains(&"A".repeat(256)));
+            let event = decode_line(&line).unwrap();
+            if !matches!(event, ServerEvent::SessionUpdated { .. }) {
+                return event;
+            }
+        }
+    }
+    send(
+        &mut stdin,
+        ClientRequest::Hello {
+            client_version: "test".into(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        next(&mut reader).await,
+        ServerEvent::HelloAck { .. }
+    ));
+    send(
+        &mut stdin,
+        ClientRequest::ListSessions {
+            limit: Some(20),
+            include_archived: None,
+        },
+    )
+    .await;
+    let ServerEvent::Sessions { sessions } = next(&mut reader).await else {
+        panic!("expected sessions")
+    };
+    assert_eq!(sessions.len(), 2, "{sessions:?}");
+    assert!(
+        sessions
+            .iter()
+            .any(|s| s.agent == AgentKind::Pi && s.title == "Pi Work")
+    );
+    assert!(
+        sessions
+            .iter()
+            .any(|s| s.agent == AgentKind::Cursor && s.title == "Cursor Work")
+    );
+    assert!(
+        sessions
+            .iter()
+            .all(|s| s.workspace.as_deref() == Some("Coding"))
+    );
+    for (path, agent, sid) in [
+        (&pi, AgentKind::Pi, "pi-session"),
+        (&cursor, AgentKind::Cursor, "cursor-session"),
+    ] {
+        send(
+            &mut stdin,
+            ClientRequest::ReadHistory {
+                session_id: sid.into(),
+                source_path: path.to_string_lossy().into(),
+                agent,
+                tail: Some(3),
+                before_offset: None,
+                max_bytes: None,
+                known_probe: None,
+            },
+        )
+        .await;
+        let event = next(&mut reader).await;
+        let ServerEvent::History {
+            messages,
+            oldest_offset,
+            has_more,
+            ..
+        } = event
+        else {
+            panic!("expected history, got {event:?}")
+        };
+        assert!(has_more);
+        assert!(messages.iter().any(|m| m.text.contains("[image omitted]")));
+        let ids: Vec<_> = messages.iter().map(|m| m.id.clone()).collect();
+        send(
+            &mut stdin,
+            ClientRequest::ReadHistory {
+                session_id: sid.into(),
+                source_path: path.to_string_lossy().into(),
+                agent,
+                tail: Some(3),
+                before_offset: oldest_offset,
+                max_bytes: None,
+                known_probe: None,
+            },
+        )
+        .await;
+        let ServerEvent::History { messages, .. } = next(&mut reader).await else {
+            panic!("expected older history")
+        };
+        assert!(!messages.is_empty());
+        assert!(messages.iter().all(|m| !ids.contains(&m.id)));
+        send(
+            &mut stdin,
+            ClientRequest::WatchSession {
+                session_id: sid.into(),
+                source_path: path.to_string_lossy().into(),
+                agent,
+            },
+        )
+        .await;
+        assert!(matches!(
+            next(&mut reader).await,
+            ServerEvent::History { .. }
+        ));
+        let row = if agent == AgentKind::Pi {
+            json!({"type":"message","id":"live","message":{"role":"assistant","content":"live reply"}})
+        } else {
+            json!({"role":"assistant","message":{"content":"live reply"}})
+        };
+        writeln!(OpenOptions::new().append(true).open(path).unwrap(), "{row}").unwrap();
+        let ServerEvent::HistoryAppend { messages, .. } = next(&mut reader).await else {
+            panic!("expected append")
+        };
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "live reply");
+        send(
+            &mut stdin,
+            ClientRequest::UnwatchSession { session_id: None },
+        )
+        .await;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let peak = read_proc_vm_hwm_kib(pid).unwrap();
+        eprintln!("Pi + Cursor discovery/history/live peak RSS: {peak} KiB");
+        assert!(
+            peak < 10 * 1024,
+            "Pi + Cursor peak RSS exceeds budget: {peak} KiB"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(legacy.join("chat-names.json")).unwrap(),
+        names
+    );
+    drop(stdin);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    fs::remove_dir_all(home).unwrap();
+}

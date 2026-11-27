@@ -3,6 +3,8 @@ pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod tmux;
+pub mod cursor;
+pub mod pi;
 
 use anyhow::Result;
 use multibot_proto::{
@@ -27,6 +29,8 @@ pub use activity::LiveActivity;
 pub use antigravity::AntigravityProvider;
 pub use claude::ClaudeProvider;
 pub use codex::CodexProvider;
+pub use cursor::CursorProvider;
+pub use pi::PiProvider;
 
 pub const DEFAULT_HISTORY_MAX_BYTES: usize = 512 * 1024; // 512 KiB (PROJECT.md Feature #18)
 pub const HARD_HISTORY_MAX_BYTES: usize = 512 * 1024; // 512 KiB page ceiling
@@ -259,11 +263,29 @@ pub trait AgentProvider: Send + Sync {
     fn extract_header_meta(&self, path: &Path) -> HeaderMeta;
 }
 
+// Normalize one record at a time, keeping both page memory and source byte ranges intact.
+fn parse_normalized_messages(
+    lines: &[LineSlice<'_>],
+    prefix: &str,
+    normalize: impl FnMut(Value) -> Option<Value>,
+) -> ParsedSlice {
+    let mut parsed = ClaudeProvider.parse_records(lines, normalize);
+    for message in &mut parsed.messages {
+        if let Some(offset) = message.id.strip_prefix("claude-") {
+            message.id = format!("{prefix}-{offset}");
+        }
+    }
+    populate_last_assistant_fields(&mut parsed);
+    parsed
+}
+
 pub fn all_providers() -> Vec<Box<dyn AgentProvider>> {
     vec![
         Box::new(ClaudeProvider),
         Box::new(AntigravityProvider),
         Box::new(CodexProvider),
+        Box::new(PiProvider),
+        Box::new(CursorProvider),
     ]
 }
 
@@ -273,6 +295,8 @@ pub fn provider_for(kind: AgentKind) -> Box<dyn AgentProvider> {
         AgentKind::Antigravity => Box::new(AntigravityProvider),
         AgentKind::Codex => Box::new(CodexProvider),
         AgentKind::Shell => Box::new(tmux::TmuxProvider),
+        AgentKind::Pi => Box::new(PiProvider),
+        AgentKind::Cursor => Box::new(CursorProvider),
     }
 }
 
@@ -504,7 +528,11 @@ impl DiscoveryContext<'_> {
     /// Antigravity names its transcript `transcript.jsonl` under a conversation-uuid folder,
     /// so every path component is checked, not just the file stem. Codex names a rollout
     /// `rollout-<date>-<uuid>.jsonl`, so a held-open id that is a suffix of the stem matches.
-    fn is_held_open_path(&self, path: &Path, history_candidates: &HashSet<PathBuf>) -> bool {
+    pub(crate) fn is_held_open_path(
+        &self,
+        path: &Path,
+        history_candidates: &HashSet<PathBuf>,
+    ) -> bool {
         let file_name = path.file_name().and_then(|n| n.to_str());
         if let Some(stem) = file_name.map(|n| {
             n.strip_suffix(".jsonl")
@@ -521,12 +549,10 @@ impl DiscoveryContext<'_> {
             return true;
         }
         if let Some(name) = file_name
-            && name.starts_with("rollout-")
-            && (self.live.ids.iter().any(|id| is_uuid_suffix(id, name))
-                || self
-                    .connected_session_ids
-                    .iter()
-                    .any(|id| is_uuid_suffix(id, name)))
+            && (name.starts_with("rollout-") || name.contains('_'))
+            && self
+                .held_open_ids()
+                .any(|id| !self.is_archived_id(id) && is_uuid_suffix(id, name))
         {
             return true;
         }
@@ -1481,9 +1507,15 @@ pub fn read_history_page(
     let meta = file.metadata()?;
     let file_size = meta.len();
     let file_mtime_ms = meta.modified().map(system_time_ms).unwrap_or(0);
+    // The adapters share the 256 KiB live-delta budget, including duplicated text/block output.
+    let page_ceiling = if matches!(agent, AgentKind::Pi | AgentKind::Cursor) {
+        MAX_HISTORY_LINE_BYTES
+    } else {
+        HARD_HISTORY_MAX_BYTES
+    };
     let budget = max_bytes
         .unwrap_or(DEFAULT_HISTORY_MAX_BYTES)
-        .clamp(1, HARD_HISTORY_MAX_BYTES) as u64;
+        .clamp(1, page_ceiling) as u64;
 
     if before_offset == Some(0) {
         return Ok(HistoryPage {
@@ -2849,6 +2881,65 @@ pub fn truncate_title(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_cursor_metadata_and_connected_sessions_survive_active_pruning() {
+        let home = unique_temp_dir("pi-cursor-held");
+        let pi = home.join(".pi/agent/sessions/repo/date_pi-live.jsonl");
+        let cursor = home.join(".cursor/projects/repo/agent-transcripts/cursor-live.jsonl");
+        fs::create_dir_all(pi.parent().unwrap()).unwrap();
+        fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+        fs::write(
+            &pi,
+            "{\"type\":\"session\",\"id\":\"pi-live\",\"cwd\":\"/repo\"}\n",
+        )
+        .unwrap();
+        fs::write(
+            &cursor,
+            "{\"role\":\"user\",\"message\":{\"content\":\"hi\"}}\n",
+        )
+        .unwrap();
+        let none = HashSet::new();
+        let connected = HashSet::from(["pi-live".to_string(), "cursor-live".to_string()]);
+        let mut metadata = MetadataStore::default();
+        let archive = ArchiveStore::default();
+        let live = LiveActivity::default();
+        let workspaces = ServerWorkspaceIndex::default();
+        let ctx = DiscoveryContext {
+            active_session_ids: &none,
+            connected_session_ids: &connected,
+            metadata: &metadata,
+            archive: &archive,
+            live: &live,
+            include_archived: false,
+            server_workspaces: &workspaces,
+        };
+        assert_eq!(discover_all_sessions_with_ctx(&home, 10, &ctx).len(), 2);
+        for (id, agent, source) in [
+            ("pi-live", AgentKind::Pi, &pi),
+            ("cursor-live", AgentKind::Cursor, &cursor),
+        ] {
+            metadata.sessions.insert(
+                id.into(),
+                SessionMetaEntry {
+                    agent: Some(agent),
+                    source_path: Some(source.to_string_lossy().into()),
+                    ..Default::default()
+                },
+            );
+        }
+        let ctx = DiscoveryContext {
+            active_session_ids: &none,
+            connected_session_ids: &none,
+            metadata: &metadata,
+            archive: &archive,
+            live: &live,
+            include_archived: false,
+            server_workspaces: &workspaces,
+        };
+        assert_eq!(discover_all_sessions_with_ctx(&home, 10, &ctx).len(), 2);
+        fs::remove_dir_all(home).unwrap();
+    }
 
     fn unique_temp_dir(tag: &str) -> PathBuf {
         let n = ATOMIC_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);

@@ -2167,7 +2167,9 @@ impl MultibotView {
             None if agent == AgentKind::Claude => Some(self.chat_state.draft_options.clone()),
             None => None,
         };
-        options.filter(|options| agent != AgentKind::Antigravity && !options.is_default())
+        options.filter(|options| {
+            matches!(agent, AgentKind::Claude | AgentKind::Codex) && !options.is_default()
+        })
     }
 
     fn active_composer_options(&self) -> SessionOptions {
@@ -2203,7 +2205,7 @@ impl MultibotView {
             .as_ref()
             .map_or(AgentKind::Claude, |s| s.agent);
         let options = self.active_composer_options();
-        let supported = agent != AgentKind::Antigravity;
+        let supported = matches!(agent, AgentKind::Claude | AgentKind::Codex);
         let mut menu = v_flex()
             .id("composer-options")
             .test_support()
@@ -2231,7 +2233,7 @@ impl MultibotView {
                 ("GPT-5.4", Some("gpt-5.4")),
                 ("Codex", Some("gpt-5.3-codex")),
             ],
-            AgentKind::Antigravity | AgentKind::Shell => &[("Default", None)],
+            AgentKind::Antigravity | AgentKind::Shell | AgentKind::Pi | AgentKind::Cursor => &[("Default", None)],
         };
         let mut row = h_flex().gap_1();
         for (index, &(label, model)) in models.iter().enumerate() {

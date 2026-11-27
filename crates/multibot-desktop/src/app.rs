@@ -257,6 +257,8 @@ pub(crate) fn parse_outbox_session_key(key: &str) -> Option<(&str, AgentKind, &s
         "antigravity" => AgentKind::Antigravity,
         "codex" => AgentKind::Codex,
         "shell" => AgentKind::Shell,
+        "pi" => AgentKind::Pi,
+        "cursor" => AgentKind::Cursor,
         _ => return None,
     };
     let (sid_len_str, sid) = after_agent.split_once(':')?;
@@ -4748,6 +4750,8 @@ impl MultibotView {
             AgentKind::Antigravity => gpui_kit::rgb(0x60A5FA).into(),
             AgentKind::Codex => gpui_kit::rgb(0x34D399).into(),
             AgentKind::Shell => gpui_kit::rgb(0xE2E8F0).into(),
+            AgentKind::Pi => gpui_kit::rgb(0xC084FC).into(),
+            AgentKind::Cursor => gpui_kit::rgb(0xFACC15).into(),
         }
     }
 

@@ -159,6 +159,7 @@ impl ServerWorkspaceIndex {
             if is_state {
                 // The rollout id a Codex chat actually writes its transcript under.
                 push_id(ids, obj.get("native_session"));
+                push_id(ids, obj.get("context_session"));
             } else {
                 push_id(ids, obj.get("sid"));
                 push_id(ids, obj.get("native_session"));

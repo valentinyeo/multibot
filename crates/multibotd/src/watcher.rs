@@ -485,8 +485,15 @@ impl WatchManager {
                                     .and_then(|m| m.modified().ok())
                                     .map(system_time_ms)
                                     .unwrap_or_else(now_ms);
+                                if matches!(agent, AgentKind::Pi | AgentKind::Cursor)
+                                    && !ctx.is_held_open_path(&path, &HashSet::new()) {
+                                    continue;
+                                }
                                 let summary =
                                     summarize_session_by_agent(agent, &path, mtime_ms, &ctx);
+                                if matches!(agent, AgentKind::Pi | AgentKind::Cursor) && summary.archived {
+                                    continue;
+                                }
                                 let _ = out_c.send(ServerEvent::SessionUpdated { session: summary });
                             }
                         })
@@ -781,6 +788,16 @@ fn desired_provider_watch_roots(home: &Path) -> Vec<(PathBuf, AgentKind)> {
         }
     }
     candidates.push((base_home.join(".codex").join("sessions"), AgentKind::Codex));
+    candidates.extend(
+        crate::providers::pi::pi_discovery_roots(&base_home)
+            .into_iter()
+            .map(|p| (p, AgentKind::Pi)),
+    );
+    candidates.extend(
+        crate::providers::cursor::cursor_discovery_roots(&base_home)
+            .into_iter()
+            .map(|p| (p, AgentKind::Cursor)),
+    );
 
     candidates.push((
         base_home.join(".multibot").join("history"),
@@ -813,6 +830,14 @@ fn classify_agent_for_path(path: &Path, roots: &[(PathBuf, AgentKind)]) -> Optio
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     for (root, agent) in roots {
         if canon.starts_with(root) {
+            if *agent == AgentKind::Cursor {
+                if root.ends_with("projects")
+                    && path.is_file()
+                    && !crate::providers::cursor::is_native_transcript(&canon, root)
+                {
+                    return None;
+                }
+            }
             return Some(*agent);
         }
     }

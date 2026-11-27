@@ -166,6 +166,8 @@ pub fn agent_slug(agent: AgentKind) -> &'static str {
         AgentKind::Antigravity => "antigravity",
         AgentKind::Codex => "codex",
         AgentKind::Shell => "shell",
+        AgentKind::Pi => "pi",
+        AgentKind::Cursor => "cursor",
     }
 }
 
@@ -3147,6 +3149,16 @@ pub fn rank_palette(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_cursor_session_keys_remain_distinct() {
+        assert_eq!(agent_slug(AgentKind::Pi), "pi");
+        assert_eq!(agent_slug(AgentKind::Cursor), "cursor");
+        assert_ne!(
+            canonical_session_key("host", AgentKind::Pi, "same"),
+            canonical_session_key("host", AgentKind::Cursor, "same")
+        );
+    }
 
     static TEST_DIR_SEQ: AtomicU64 = AtomicU64::new(1);
 

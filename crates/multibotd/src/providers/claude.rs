@@ -404,6 +404,16 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn parse_lines(&self, lines: &[LineSlice<'_>]) -> ParsedSlice {
+        self.parse_records(lines, Some)
+    }
+}
+
+impl ClaudeProvider {
+    pub(super) fn parse_records(
+        &self,
+        lines: &[LineSlice<'_>],
+        mut normalize: impl FnMut(Value) -> Option<Value>,
+    ) -> ParsedSlice {
         let mut parsed = ParsedSlice::default();
         let mut open_tools: HashMap<String, OpenToolRef> = HashMap::new();
         let mut completed_tool_ids: HashSet<String> = HashSet::new();
@@ -420,6 +430,9 @@ impl AgentProvider for ClaudeProvider {
                 continue;
             }
             let Ok(val) = serde_json::from_str::<Value>(trimmed) else {
+                continue;
+            };
+            let Some(val) = normalize(val) else {
                 continue;
             };
             if is_filtered_claude_entry(&val) {

@@ -48,6 +48,8 @@ pub enum AgentKind {
     Antigravity,
     Codex,
     Shell,
+    Pi,
+    Cursor,
 }
 
 impl AgentKind {
@@ -57,6 +59,8 @@ impl AgentKind {
             Self::Antigravity => "Antigravity",
             Self::Codex => "Codex",
             Self::Shell => "Shell",
+            Self::Pi => "Pi",
+            Self::Cursor => "Cursor",
         }
     }
 
@@ -66,6 +70,8 @@ impl AgentKind {
             Self::Antigravity => "◈",
             Self::Codex => "⬡",
             Self::Shell => ">_",
+            Self::Pi => "π",
+            Self::Cursor => "➤",
         }
     }
 }
@@ -524,6 +530,22 @@ mod tests {
         );
         assert_eq!(AgentKind::Shell.label(), "Shell");
         assert_eq!(AgentKind::Shell.glyph(), ">_");
+    }
+
+    #[test]
+    fn pi_cursor_wire_names_and_labels_are_stable() {
+        for (kind, wire, label) in [
+            (AgentKind::Pi, "pi", "Pi"),
+            (AgentKind::Cursor, "cursor", "Cursor"),
+        ] {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{wire}\""));
+            assert_eq!(
+                serde_json::from_str::<AgentKind>(&format!("\"{wire}\"")).unwrap(),
+                kind
+            );
+            assert_eq!(kind.label(), label);
+            assert!(!kind.glyph().is_empty());
+        }
     }
 
     #[test]

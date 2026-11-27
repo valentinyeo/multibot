@@ -209,6 +209,8 @@ impl ProcessManager {
             AgentKind::Codex => "codex",
             AgentKind::Antigravity => "agy",
             AgentKind::Shell => return Err(anyhow!("Use the embedded terminal for shell input")),
+            AgentKind::Pi => "pi",
+            AgentKind::Cursor => "cursor-agent",
         };
         let bin_path = self.resolve_agent_binary(bin_name);
 
@@ -263,6 +265,102 @@ impl ProcessManager {
                     child,
                 );
                 Ok(format!("dispatched codex (pid {pid})"))
+            }
+            AgentKind::Pi | AgentKind::Cursor => {
+                if session_id.is_empty()
+                    || !session_id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                {
+                    return Err(anyhow!("invalid session id"));
+                }
+                let source_path = self.resolve_session_source_path(session_id, agent, cwd);
+                let metadata = MetadataStore::load(&self.home);
+                let native_id = metadata
+                    .get(session_id)
+                    .and_then(|m| m.native_session_id.as_deref());
+                let args = build_pi_cursor_args(
+                    agent,
+                    session_id,
+                    &source_path,
+                    native_id,
+                    text,
+                    is_new_session,
+                )?;
+                let mut cmd = Command::new(&bin_path);
+                cmd.args(&args).stdin(Stdio::null()).stderr(Stdio::null());
+                if agent == AgentKind::Cursor {
+                    cmd.stdout(Stdio::piped());
+                } else {
+                    cmd.stdout(Stdio::null());
+                }
+                if let Some(dir) = cwd.filter(|dir| !dir.trim().is_empty()) {
+                    cmd.current_dir(dir);
+                }
+                if let Some(parent) = source_path
+                    .parent()
+                    .filter(|p| p.starts_with(self.home.join(".multibot")))
+                {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let owned = source_path.starts_with(self.home.join(".multibot"));
+                if agent == AgentKind::Pi && owned && !source_path.exists() {
+                    append_history_record(
+                        &source_path,
+                        &json!({"type":"session", "version":3,
+                        "id":session_id, "cwd":cwd, "timestamp":chrono::Utc::now().to_rfc3339()}),
+                    )?;
+                }
+                let mut child = cmd
+                    .spawn()
+                    .with_context(|| format!("spawning {}", bin_path.display()))?;
+                let pid = child.id().unwrap_or(0);
+                if agent == AgentKind::Cursor {
+                    if owned
+                        && let Err(err) = append_history_record(
+                            &source_path,
+                            &json!({"type":"user", "message":{"content":text}, "timestamp":chrono::Utc::now().to_rfc3339()}),
+                        )
+                    {
+                        let _ = child.start_kill();
+                        tokio::spawn(async move {
+                            let _ = child.wait().await;
+                        });
+                        return Err(err);
+                    }
+                    let stdout = child.stdout.take().expect("piped Cursor stdout");
+                    let mgr = Arc::clone(self);
+                    let sid = session_id.to_string();
+                    let sink = source_path.clone();
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .active
+                        .insert(
+                            sid.clone(),
+                            ActiveProcess {
+                                pid,
+                                cwd: cwd.map(String::from),
+                                source_path: sink.clone(),
+                                stdin_tx: None,
+                                busy: true,
+                                interrupted: false,
+                            },
+                        );
+                    tokio::spawn(async move {
+                        read_cursor_output(stdout, &mgr.home, &sid, &sink, owned).await;
+                        let _ = child.wait().await;
+                        mgr.on_process_exit(&sid, pid);
+                    });
+                    return Ok(format!("dispatched Cursor (pid {pid})"));
+                }
+                self.register_one_shot_child(
+                    session_id.to_string(),
+                    cwd.map(String::from),
+                    source_path,
+                    child,
+                );
+                Ok(format!("dispatched {} (pid {pid})", agent.label()))
             }
             AgentKind::Antigravity => {
                 let conversation = self.resolve_agy_conversation(session_id, is_new_session);
@@ -809,25 +907,33 @@ impl ProcessManager {
         let ts = now_ms();
 
         let mut created_history_file = false;
-        if agent == AgentKind::Antigravity {
+        if matches!(
+            agent,
+            AgentKind::Antigravity | AgentKind::Pi | AgentKind::Cursor
+        ) {
             let existed_before = source_path.exists();
             if let Err(err) = append_history_record(
                 &source_path,
-                &json!({
-                    "type": "multibot_meta",
-                    "session_id": session_id,
-                    "agent": "antigravity",
-                    "cwd": cwd,
-                    "title": clean_title,
-                    "created_at_ms": ts,
-                }),
+                &if agent == AgentKind::Pi {
+                    json!({"type":"session", "version":3, "id":session_id, "cwd":cwd,
+                        "timestamp":chrono::Utc::now().to_rfc3339()})
+                } else {
+                    json!({
+                        "type": "multibot_meta",
+                        "session_id": session_id,
+                        "agent": agent,
+                        "cwd": cwd,
+                        "title": clean_title,
+                        "created_at_ms": ts,
+                    })
+                },
             ) {
                 if !existed_before {
                     let _ = std::fs::remove_file(&source_path);
                 }
                 let _ = self.out_tx.send(ServerEvent::Error {
                     code: "spawn_failed".to_string(),
-                    message: format!("Failed to initialize Antigravity history: {err}"),
+                    message: format!("Failed to initialize {} history: {err}", agent.label()),
                 });
                 return;
             }
@@ -1183,12 +1289,142 @@ impl ProcessManager {
                     .join(sanitized)
                     .join(format!("{session_id}.jsonl"))
             }
+            AgentKind::Pi | AgentKind::Cursor => {
+                if let Some(path) = MetadataStore::load(&self.home)
+                    .get(session_id)
+                    .and_then(|m| m.source_path.as_ref())
+                    .map(PathBuf::from)
+                {
+                    return path;
+                }
+                let provider = crate::providers::provider_for(agent);
+                let keep = |path: &Path, _: i64| {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|stem| {
+                            stem == session_id || stem.ends_with(&format!("_{session_id}"))
+                        })
+                };
+                provider
+                    .discover_paths(&self.home, 1, &keep)
+                    .into_iter()
+                    .next()
+                    .map(|p| p.0)
+                    .unwrap_or_else(|| {
+                        self.home
+                            .join(".multibot")
+                            .join(if agent == AgentKind::Pi {
+                                "pi"
+                            } else {
+                                "cursor"
+                            })
+                            .join(format!("{session_id}.jsonl"))
+                    })
+            }
             AgentKind::Codex => self
                 .home
                 .join(".codex")
                 .join("sessions")
                 .join(format!("rollout-{session_id}.jsonl")),
         }
+    }
+}
+
+fn build_pi_cursor_args(
+    agent: AgentKind,
+    session_id: &str,
+    source_path: &Path,
+    native_id: Option<&str>,
+    text: &str,
+    is_new: bool,
+) -> Result<Vec<String>> {
+    if session_id.is_empty() || session_id.starts_with('-') {
+        return Err(anyhow!("invalid session id"));
+    }
+    let mut args = match agent {
+        AgentKind::Pi => vec![
+            "--print".into(),
+            "--session".into(),
+            source_path.to_string_lossy().into_owned(),
+        ],
+        AgentKind::Cursor => {
+            let mut args = vec![
+                "--print".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+            ];
+            let owned = source_path
+                .components()
+                .any(|c| c.as_os_str() == ".multibot");
+            if let Some(id) = native_id.or_else(|| (!is_new && !owned).then_some(session_id)) {
+                if id.is_empty() || id.starts_with('-') {
+                    return Err(anyhow!("invalid Cursor session id"));
+                }
+                args.extend(["--resume".into(), id.into()]);
+            }
+            args
+        }
+        _ => return Err(anyhow!("expected Pi or Cursor")),
+    };
+    args.extend(["--".into(), text.into()]);
+    Ok(args)
+}
+
+async fn read_cursor_output(
+    stdout: tokio::process::ChildStdout,
+    home: &Path,
+    session_id: &str,
+    sink: &Path,
+    owned: bool,
+) {
+    let mut reader = BufReader::new(stdout);
+    let mut line = Vec::new();
+    let mut oversized = false;
+    loop {
+        let Ok(bytes) = reader.fill_buf().await else {
+            break;
+        };
+        if bytes.is_empty() {
+            break;
+        }
+        let count = bytes
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(bytes.len(), |i| i + 1);
+        let complete = bytes[count - 1] == b'\n';
+        if !oversized && line.len() + count <= crate::providers::MAX_HISTORY_LINE_BYTES {
+            line.extend_from_slice(&bytes[..count]);
+        } else {
+            oversized = true;
+            line.clear();
+        }
+        reader.consume(count);
+        if !complete {
+            continue;
+        }
+        if !oversized {
+            let raw = String::from_utf8_lossy(&line);
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&strip_base64_cow(&raw)) {
+                let kind = value.get("type").and_then(serde_json::Value::as_str);
+                if kind == Some("system")
+                    && value.get("subtype").and_then(serde_json::Value::as_str) == Some("init")
+                    && let Some(native) =
+                        value.get("session_id").and_then(serde_json::Value::as_str)
+                {
+                    let mut meta = MetadataStore::load(home);
+                    if let Some(entry) = meta.sessions.get_mut(session_id) {
+                        entry.native_session_id = Some(native.to_string());
+                        let _ = meta.save(home);
+                    }
+                }
+                // Cursor also writes its native transcript. Never mirror into that file.
+                if owned && matches!(kind, Some("assistant" | "result" | "system")) {
+                    let _ = append_history_record(sink, &value);
+                }
+            }
+        }
+        line.clear();
+        oversized = false;
     }
 }
 
@@ -1290,9 +1526,13 @@ fn validate_options(agent: AgentKind, options: Option<&SessionOptions>) -> Resul
     let Some(options) = options.filter(|o| !o.is_default()) else {
         return Ok(());
     };
-    if agent == AgentKind::Antigravity {
+    if matches!(
+        agent,
+        AgentKind::Antigravity | AgentKind::Pi | AgentKind::Cursor
+    ) {
         return Err(anyhow!(
-            "Antigravity does not support composer overrides; use agent defaults"
+            "{} does not support composer overrides; use agent defaults",
+            agent.label()
         ));
     }
     if options.model.as_ref().is_some_and(|m| {
@@ -1579,6 +1819,117 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn pi_and_cursor_dispatch_use_explicit_sessions_and_safe_prompt_separators() {
+        let pi = build_pi_cursor_args(
+            AgentKind::Pi,
+            "session",
+            Path::new("/repo/pi.jsonl"),
+            None,
+            "--prompt",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            pi,
+            ["--print", "--session", "/repo/pi.jsonl", "--", "--prompt"]
+        );
+        let cursor = build_pi_cursor_args(
+            AgentKind::Cursor,
+            "session",
+            Path::new("/repo/session.jsonl"),
+            None,
+            "hi",
+            false,
+        )
+        .unwrap();
+        assert!(cursor.windows(2).any(|a| a == ["--resume", "session"]));
+        let new_cursor = build_pi_cursor_args(
+            AgentKind::Cursor,
+            "session",
+            Path::new("/home/.multibot/cursor/session.jsonl"),
+            None,
+            "hi",
+            true,
+        )
+        .unwrap();
+        assert!(!new_cursor.iter().any(|a| a == "--resume"));
+        let resumed = build_pi_cursor_args(
+            AgentKind::Cursor,
+            "session",
+            Path::new("/home/.multibot/cursor/session.jsonl"),
+            Some("native-session"),
+            "hi",
+            false,
+        )
+        .unwrap();
+        assert!(
+            resumed
+                .windows(2)
+                .any(|a| a == ["--resume", "native-session"])
+        );
+        assert!(
+            build_pi_cursor_args(
+                AgentKind::Cursor,
+                "session",
+                Path::new("/repo/session.jsonl"),
+                Some("--bad"),
+                "hi",
+                false
+            )
+            .is_err()
+        );
+        for agent in [AgentKind::Pi, AgentKind::Cursor] {
+            assert!(
+                validate_options(
+                    agent,
+                    Some(&SessionOptions {
+                        model: Some("wrong".into()),
+                        ..Default::default()
+                    })
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cursor_output_is_bounded_scrubbed_and_records_native_resume_id() {
+        let home = temp_home("cursor-output");
+        let sink = home.join(".multibot/cursor/session.jsonl");
+        let mut metadata = MetadataStore::default();
+        metadata.sessions.insert(
+            "session".into(),
+            SessionMetaEntry {
+                agent: Some(AgentKind::Cursor),
+                source_path: Some(sink.to_string_lossy().into()),
+                ..Default::default()
+            },
+        );
+        metadata.save(&home).unwrap();
+        let mut child = Command::new("sh").arg("-c").arg(concat!(
+            "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"cursor-native\"}'; ",
+            "head -c 300000 /dev/zero | tr '\\000' X; printf '\\n'; ",
+            "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":\"done\"}}'"
+        )).stdout(Stdio::piped()).spawn().unwrap();
+        read_cursor_output(child.stdout.take().unwrap(), &home, "session", &sink, true).await;
+        assert!(child.wait().await.unwrap().success());
+        assert_eq!(
+            MetadataStore::load(&home)
+                .get("session")
+                .unwrap()
+                .native_session_id
+                .as_deref(),
+            Some("cursor-native")
+        );
+        let page = read_history_page(AgentKind::Cursor, &sink, None, None, None, None).unwrap();
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(page.messages[0].text, "done");
+        assert!(fs::metadata(&sink).unwrap().len() < 1024);
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

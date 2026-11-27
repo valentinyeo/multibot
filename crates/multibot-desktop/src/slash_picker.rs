@@ -599,6 +599,7 @@ pub fn builtin_commands_for(agent: AgentKind) -> Vec<SlashCommandItem> {
             make_builtin("personality", "Configure assistant style", true),
             make_builtin("subagents", "Inspect subagents", true),
         ],
+        AgentKind::Pi | AgentKind::Cursor => vec![],
         AgentKind::Antigravity => vec![
             make_builtin("rename", "Rename this chat session", false),
             make_builtin("clear", "Clear conversation and start fresh", false),

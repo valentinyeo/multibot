@@ -104,6 +104,7 @@ pub fn list_commands(home: &Path, agent: AgentKind, cwd: Option<&Path>) -> Vec<S
                 );
             }
         }
+        AgentKind::Pi | AgentKind::Cursor => {}
         AgentKind::Antigravity => {
             for user_dir in [
                 home.join(".gemini/config/skills"),
@@ -800,6 +801,7 @@ fn builtin_commands(agent: AgentKind) -> Vec<SlashCommandItem> {
             }
             out
         }
+        AgentKind::Pi | AgentKind::Cursor => Vec::new(),
         AgentKind::Antigravity => {
             let live = [
                 ("compact", "Compact conversation context"),
