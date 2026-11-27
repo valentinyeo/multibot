@@ -2197,6 +2197,9 @@ impl WorkspaceStore {
         now_ms: i64,
     ) -> Vec<InboxRow> {
         let query_lower = filter_query.trim().to_lowercase();
+        // Multi-word matching: every whitespace-separated token must appear somewhere in the
+        // session's searchable text, so `multi rust` matches `Multi Bot Rust`.
+        let query_tokens: Vec<&str> = query_lower.split_whitespace().collect();
         let mut ordered_ws: Vec<(usize, &Workspace)> = self.workspaces.iter().enumerate().collect();
         ordered_ws.sort_by_key(|(idx, w)| (w.position, *idx));
         let ws_lookup: HashMap<&str, (usize, &Workspace)> = ordered_ws
@@ -2260,24 +2263,23 @@ impl WorkspaceStore {
                 .to_string();
             let preview = input.summary.last_assistant_preview.clone();
 
-            if !query_lower.is_empty() {
-                let matches_query = title.to_lowercase().contains(&query_lower)
-                    || input
+            if !query_tokens.is_empty() {
+                let haystack = format!(
+                    "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                    title.to_lowercase(),
+                    input
                         .summary
                         .cwd
                         .as_deref()
-                        .is_some_and(|c| c.to_lowercase().contains(&query_lower))
-                    || preview
-                        .as_deref()
-                        .is_some_and(|p| p.to_lowercase().contains(&query_lower))
-                    || ws_name.to_lowercase().contains(&query_lower)
-                    || input
-                        .summary
-                        .agent
-                        .label()
-                        .to_lowercase()
-                        .contains(&query_lower);
-                if !matches_query {
+                        .unwrap_or_default()
+                        .to_lowercase(),
+                    preview.as_deref().unwrap_or_default().to_lowercase(),
+                    ws_name.to_lowercase(),
+                    input.host.to_lowercase(),
+                    input.summary.agent.label().to_lowercase(),
+                    input.summary.id.to_lowercase(),
+                );
+                if !query_tokens.iter().all(|token| haystack.contains(token)) {
                     continue;
                 }
             }
@@ -3855,6 +3857,35 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["s4", "s2"]
         );
+    }
+
+    #[test]
+    fn inbox_filter_matches_every_whitespace_token_in_any_order() {
+        let store = WorkspaceStore::new();
+        let now = 10_000_000_i64;
+        let one = make_session("m1", AgentKind::Claude, "Multi Bot Rust", now - 10, false, false);
+        let two = make_session("m2", AgentKind::Codex, "Multi Bot Rust 2", now - 20, false, false);
+        let other = make_session("p1", AgentKind::Codex, "Multi Python Tool", now - 30, false, false);
+        let all = [one, two, other];
+        let inputs: Vec<_> = all.iter().map(|s| make_input("h", s)).collect();
+
+        let ids = |query: &str| {
+            store
+                .query_inbox(&InboxSplit::All, &inputs, false, query, now)
+                .into_iter()
+                .map(|r| r.session_id)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(ids("multi rust"), vec!["m1", "m2"]);
+        assert_eq!(ids("rust multi"), vec!["m1", "m2"]);
+        assert_eq!(ids("MULTI RUST"), vec!["m1", "m2"]);
+        assert_eq!(ids("  multi   rust  "), vec!["m1", "m2"]);
+        let broad = ids("multi r");
+        assert!(broad.contains(&"m1".to_string()) && broad.contains(&"m2".to_string()));
+        assert_eq!(ids("multi python"), vec!["p1"]);
+        assert!(ids("multi rust python").is_empty());
+        assert!(ids("multi nomatch").is_empty());
     }
 
     #[test]
