@@ -145,7 +145,12 @@ pub fn import_zigshel_bundle_from_dir(dir: &Path) -> ZigShellImportBundle {
         let ssh_config = ssh_key_dir.join("config");
         if let Some(text) = read_regular_file_capped(&ssh_config, MAX_IMPORT_FILE_BYTES) {
             bundle.source_files_read.push(ssh_config);
-            parse_ssh_config(&text, Some(&ssh_key_dir), &mut raw_hosts);
+            parse_ssh_config(
+                &text,
+                Some(&ssh_key_dir),
+                &mut raw_hosts,
+                &mut host_slot_map,
+            );
         }
     }
 
@@ -185,6 +190,7 @@ pub fn import_zigshel_bundle_from_dir(dir: &Path) -> ZigShellImportBundle {
 
     let mut workspaces: Vec<ImportedWorkspace> = Vec::new();
     let mut favorites: Vec<ImportedFavorite> = Vec::new();
+    let mut primary_ws_slots: Option<Vec<String>> = None;
 
     for path in json_files {
         let Some(text) = read_regular_file_capped(&path, MAX_IMPORT_FILE_BYTES) else {
@@ -250,6 +256,12 @@ pub fn import_zigshel_bundle_from_dir(dir: &Path) -> ZigShellImportBundle {
                     },
                 );
             }
+            if primary_ws_slots.is_none() {
+                primary_ws_slots = Some(file_ws_slots.clone());
+            }
+        }
+        if file_ws_slots.is_empty() {
+            file_ws_slots = primary_ws_slots.clone().unwrap_or_default();
         }
 
         // Top-level-only `windows.json` workspace registry
@@ -639,19 +651,24 @@ fn parse_identity_file_value(raw_val: &str, base_dir: Option<&Path>) -> Option<S
     }
 }
 
-fn parse_ssh_config(text: &str, base_dir: Option<&Path>, out: &mut Vec<SshHostConfig>) {
+fn parse_ssh_config(
+    text: &str,
+    base_dir: Option<&Path>,
+    out: &mut Vec<SshHostConfig>,
+    host_slot_map: &mut HashMap<usize, String>,
+) {
     let mut current_alias: Option<String> = None;
     let mut current_hostname: Option<String> = None;
     let mut current_user: String = String::new();
     let mut current_port: u16 = 22;
     let mut current_identity_file: Option<String> = None;
 
-    let flush = |alias: &mut Option<String>,
-                 hostname: &mut Option<String>,
-                 user: &mut String,
-                 port: &mut u16,
-                 identity_file: &mut Option<String>,
-                 out: &mut Vec<SshHostConfig>| {
+    let mut flush = |alias: &mut Option<String>,
+                     hostname: &mut Option<String>,
+                     user: &mut String,
+                     port: &mut u16,
+                     identity_file: &mut Option<String>,
+                     out: &mut Vec<SshHostConfig>| {
         if let Some(a) = alias.take()
             && a != "*"
             && !a.contains('*')
@@ -659,6 +676,15 @@ fn parse_ssh_config(text: &str, base_dir: Option<&Path>, out: &mut Vec<SshHostCo
             && let Some(h) = hostname.take().filter(|s| is_safe_ssh_token(s))
             && (user.is_empty() || is_safe_ssh_token(user))
         {
+            let slot = match a.to_ascii_lowercase().as_str() {
+                "remote-1" => Some(0),
+                "remote-2" => Some(1),
+                "remote-3" => Some(2),
+                _ => None,
+            };
+            if let Some(slot) = slot {
+                host_slot_map.entry(slot).or_insert_with(|| a.clone());
+            }
             out.push(SshHostConfig {
                 name: a,
                 hostname: h,
@@ -1245,6 +1271,94 @@ mod tests {
             "hosts":[], "workspaces":[], "favorites":[], "favorite_keys":[], "source_files_read":[]
         }"#).unwrap();
         assert!(old.sessions.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ssh_remote_slots_fill_missing_servers_slots_without_overriding_them() {
+        let dir = unique_dir("remote-slots");
+        let ssh = dir.join("ssh-key");
+        std::fs::create_dir_all(&ssh).unwrap();
+        let config = concat!(
+            "Host remote-1\n HostName one.example.com\n User ubuntu\n",
+            "Host remote-2\n HostName two.example.com\n User ubuntu\n",
+            "Host remote-3\n HostName three.example.com\n User ubuntu\n",
+        );
+        std::fs::write(ssh.join("config"), config).unwrap();
+        std::fs::write(
+            dir.join("session.json"),
+            r#"{"tabs":[
+            {"tmux_host":0,"csid":"session-one"},
+            {"tmux_host":1,"csid":"session-two"},
+            {"tmux_host":2,"csid":"session-three"}
+        ]}"#,
+        )
+        .unwrap();
+        for servers in [
+            None,
+            Some(""),
+            Some("v1\nconnected\t1\t22\t1000\tone.example.com\tubuntu\tPreferred\t\n"),
+        ] {
+            if let Some(servers) = servers {
+                std::fs::write(ssh.join("servers.txt"), servers).unwrap();
+            }
+            let bundle = import_zigshel_bundle_from_dir(&dir);
+            let expected_host = if servers.is_some_and(|s| !s.is_empty()) {
+                "preferred"
+            } else {
+                "remote-1"
+            };
+            assert_eq!(
+                bundle.sessions[0].session_key,
+                format!("{expected_host}:claude:session-one")
+            );
+            assert_eq!(
+                bundle.sessions[1].session_key,
+                "remote-2:claude:session-two"
+            );
+            assert_eq!(
+                bundle.sessions[2].session_key,
+                "remote-3:claude:session-three"
+            );
+            assert_eq!(std::fs::read_to_string(ssh.join("config")).unwrap(), config);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn secondary_sessions_inherit_primary_workspace_slots_but_can_define_their_own() {
+        let dir = unique_dir("secondary-workspaces");
+        let primary =
+            r#"{"workspaces":[{"wid":"home","name":"Home"},{"wid":"work","name":"Work"}]}"#;
+        let secondary = r#"{"tabs":[{"csid":"secondary-session","workspace":1}]}"#;
+        std::fs::write(dir.join("session.json"), primary).unwrap();
+        std::fs::write(dir.join("session-win2.json"), secondary).unwrap();
+        std::fs::write(
+            dir.join("session-win3.json"),
+            r#"{
+            "workspaces":[{"wid":"other","name":"Other"}],
+            "tabs":[{"csid":"own-session","workspace":0}]
+        }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("session-win4.json"),
+            secondary.replace("secondary-session", "last-session"),
+        )
+        .unwrap();
+        let bundle = import_zigshel_bundle_from_dir(&dir);
+        assert_eq!(bundle.sessions.len(), 3);
+        assert_eq!(bundle.sessions[0].workspace_id.as_deref(), Some("work"));
+        assert_eq!(bundle.sessions[1].workspace_id.as_deref(), Some("other"));
+        assert_eq!(bundle.sessions[2].workspace_id.as_deref(), Some("work"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("session.json")).unwrap(),
+            primary
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("session-win2.json")).unwrap(),
+            secondary
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

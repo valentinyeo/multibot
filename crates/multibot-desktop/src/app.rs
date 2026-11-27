@@ -31,7 +31,7 @@ use multibot_core::cache::{
 use multibot_core::outbox::ChatOutbox;
 use multibot_core::settings::{MAX_CHAT_FONT_SIZE_PT, MIN_CHAT_FONT_SIZE_PT};
 use multibot_core::workspaces::{
-    ReorderDirection, WorkspaceView, canonical_session_key, now_unix_ms,
+    ReorderDirection, WorkspaceStore, WorkspaceView, canonical_session_key, now_unix_ms,
 };
 use multibot_core::zigshel_import::{
     import_zigshel_bundle_readonly, legacy_zigshel_dir, merge_zigshel_bundle,
@@ -357,6 +357,20 @@ pub struct MultibotView {
     pub(crate) notice: Option<String>,
 }
 
+fn backfill_zigshel_workspaces(store: &mut WorkspaceStore, dir: &std::path::Path) -> bool {
+    if store
+        .session_meta
+        .values()
+        .any(|m| m.workspace_id.is_some())
+        || !dir.exists()
+    {
+        return false;
+    }
+    let bundle = import_zigshel_bundle_readonly(Some(dir));
+    let stats = merge_zigshel_bundle(store, &bundle);
+    stats.sessions_assigned > 0 || stats.favorites_added > 0 || stats.workspaces_added > 0
+}
+
 impl MultibotView {
     pub fn new(
         runtime: Arc<tokio::runtime::Runtime>,
@@ -396,17 +410,9 @@ impl MultibotView {
             let store = cx.global_mut::<SharedAppStore>();
             if store.persist_to_disk
                 && store.window_count == 0
-                && store.workspace_store.session_meta.is_empty()
-                && legacy_zigshel_dir().exists()
+                && backfill_zigshel_workspaces(&mut store.workspace_store, &legacy_zigshel_dir())
             {
-                let bundle = import_zigshel_bundle_readonly(None);
-                let stats = merge_zigshel_bundle(&mut store.workspace_store, &bundle);
-                if stats.sessions_assigned > 0
-                    || stats.favorites_added > 0
-                    || stats.workspaces_added > 0
-                {
-                    let _ = store.workspace_store.save();
-                }
+                let _ = store.workspace_store.save();
             }
             store.window_count = store.window_count.saturating_add(1);
             (
@@ -1852,7 +1858,7 @@ impl MultibotView {
                         return;
                     }
                     let _ = conn.send(ClientRequest::WatchDirectory);
-                    let _ = conn.send(ClientRequest::ListSessions { limit: Some(60) });
+                    let _ = conn.send(ClientRequest::ListSessions { limit: Some(250) });
 
                     loop {
                         tokio::select! {
@@ -2079,6 +2085,19 @@ impl MultibotView {
                     ServerEvent::Sessions { sessions } => {
                         let store = cx.global_mut::<SharedAppStore>();
                         store.sessions = sessions.clone();
+                        let host = store.connected_host.as_deref().unwrap_or("local");
+                        let live_keys: Vec<_> = sessions
+                            .iter()
+                            .map(|s| canonical_session_key(host, s.agent, &s.id))
+                            .collect();
+                        if store
+                            .workspace_store
+                            .reconcile_live_session_keys(&live_keys)
+                            > 0
+                            && store.persist_to_disk
+                        {
+                            let _ = store.workspace_store.save();
+                        }
                         store.bump_revision();
                     }
                     ServerEvent::SessionUpdated { session } => {
@@ -2454,6 +2473,20 @@ impl MultibotView {
                 }
                 ServerEvent::Sessions { sessions } => {
                     self.sessions = sessions;
+                    let live_keys: Vec<_> = self
+                        .sessions
+                        .iter()
+                        .map(|s| self.session_key_for(s))
+                        .collect();
+                    if self
+                        .sidebar_state
+                        .workspace_store
+                        .reconcile_live_session_keys(&live_keys)
+                        > 0
+                    {
+                        self.persist_workspace_store_if_enabled();
+                        self.sync_workspace_to_shared(cx);
+                    }
                     if let Some(ref sel) = self.selected_session.clone()
                         && let Some(fresh) = self
                             .sessions
@@ -4554,7 +4587,7 @@ impl Render for MultibotView {
                 if let Some(ref tx) = this.daemon_tx
                     && !tx.is_closed()
                     && tx
-                        .send(ClientRequest::ListSessions { limit: Some(60) })
+                        .send(ClientRequest::ListSessions { limit: Some(250) })
                         .is_ok()
                 {
                     if let Some(ref s) = this.selected_session {
@@ -5794,6 +5827,131 @@ mod tests {
 
         assert_eq!(cx.update(|cx| cx.global::<SharedAppStore>().window_count), 1);
         let _ = (handle1, view1);
+    }
+
+    #[test]
+    fn startup_backfill_restores_workspaces_after_session_view_history() {
+        let seq = APP_TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("multibot-backfill-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = r#"{"workspaces":[{"id":"work","name":"Work"}],"tabs":[{"host":"vps0","csid":"legacy-session-id","workspace":0}]}"#;
+        std::fs::write(root.join("session.json"), source).unwrap();
+        let mut store = WorkspaceStore::new();
+        store.record_session_view("vps0:claude:legacy-session-id", 123);
+        assert!(
+            store.session_meta["vps0:claude:legacy-session-id"]
+                .workspace_id
+                .is_none()
+        );
+        assert!(backfill_zigshel_workspaces(&mut store, &root));
+        assert_eq!(
+            store.session_meta["vps0:claude:legacy-session-id"]
+                .workspace_id
+                .as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            store.session_meta["vps0:claude:legacy-session-id"].last_used_ms,
+            123
+        );
+        let before = store.clone();
+        assert!(!backfill_zigshel_workspaces(&mut store, &root));
+        assert_eq!(store, before);
+        assert_eq!(
+            std::fs::read_to_string(root.join("session.json")).unwrap(),
+            source
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn session_lists_reconcile_imported_keys_in_app_and_view_paths(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, _window, cx| {
+            view.update(cx, |v, cx| {
+                let sid = "c0a80101-1234-4567-89ab-0123456789ab";
+                let live = format!("vps hetzner:codex:{sid}");
+                for app_scoped in [false, true] {
+                    let mut store = WorkspaceStore::new();
+                    let ws = store.create_workspace("Work", None).unwrap();
+                    let imported = format!("vps0:claude:{sid}");
+                    store.assign_session_workspace(&imported, &ws.id);
+                    store.favorites.insert(imported);
+                    store.record_session_view(&live, 123);
+                    v.sidebar_state.workspace_store = store;
+                    v.connected_host = Some("VPS Hetzner".into());
+                    v.sync_workspace_to_shared(cx);
+                    v.sync_sessions_to_shared(cx);
+                    let event = UiBridgeEvent::Server(ServerEvent::Sessions {
+                        sessions: vec![make_session(sid, AgentKind::Codex, "Live", false)],
+                    });
+                    if app_scoped {
+                        let connection_gen = cx.global::<SharedAppStore>().connection_gen;
+                        assert!(MultibotView::apply_daemon_bridge_event_to_app(
+                            connection_gen,
+                            event,
+                            &v.runtime,
+                            cx
+                        ));
+                        v.sync_from_shared_store(cx);
+                    } else {
+                        v.handle_bridge_event(event, cx);
+                    }
+                    assert_eq!(
+                        v.sidebar_state.workspace_store.session_meta[&live]
+                            .workspace_id
+                            .as_deref(),
+                        Some(ws.id.as_str())
+                    );
+                    assert!(v.sidebar_state.workspace_store.is_favorite(&live));
+                    let shared = &cx.global::<SharedAppStore>().workspace_store;
+                    assert_eq!(
+                        shared.session_meta[&live].workspace_id.as_deref(),
+                        Some(ws.id.as_str())
+                    );
+                    assert!(shared.is_favorite(&live));
+                }
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn manual_import_reconciles_already_loaded_sessions(cx: &mut TestAppContext) {
+        let seq = APP_TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("multibot-live-import-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = r#"{"workspaces":[{"id":"work","name":"Work"}],"tabs":[{"host":"remote-1","csid":"c0a80101-1234-4567-89ab-0123456789ab","workspace":0,"favorite":true,"pinned_top":true}]}"#;
+        std::fs::write(root.join("session.json"), source).unwrap();
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, _window, cx| {
+            view.update(cx, |v, cx| {
+                let sid = "c0a80101-1234-4567-89ab-0123456789ab";
+                let live = format!("vps hetzner:codex:{sid}");
+                v.connected_host = Some("VPS Hetzner".into());
+                v.sessions = vec![make_session(sid, AgentKind::Codex, "Live", false)];
+                v.sidebar_state
+                    .workspace_store
+                    .record_session_view(&live, 123);
+                v.import_from_zigshel_dir(Some(&root), cx);
+                let store = &v.sidebar_state.workspace_store;
+                assert_eq!(
+                    store.session_meta[&live].workspace_id.as_deref(),
+                    Some("work")
+                );
+                assert!(store.session_meta[&live].pinned);
+                assert!(store.is_favorite(&live));
+                assert_eq!(cx.global::<SharedAppStore>().workspace_store, *store);
+            });
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("session.json")).unwrap(),
+            source
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[gpui_kit::test]

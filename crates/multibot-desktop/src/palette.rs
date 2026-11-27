@@ -1080,7 +1080,7 @@ impl MultibotView {
                     }
                     "pal-cmd-refresh" => {
                         if let Some(ref tx) = self.daemon_tx {
-                            let _ = tx.send(ClientRequest::ListSessions { limit: Some(60) });
+                            let _ = tx.send(ClientRequest::ListSessions { limit: Some(250) });
                         }
                     }
                     "pal-cmd-usage" => {
