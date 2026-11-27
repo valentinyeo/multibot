@@ -310,6 +310,9 @@ pub struct MultibotView {
     pub(crate) terminal: TerminalPaneState,
     /// Lazy-loaded Computer View pane (MBRU-7). Owns no webview while closed.
     pub(crate) computer: ComputerViewState,
+    /// Last Computer View URL this window connected to, offered again on reopen. A
+    /// remembered address never starts a browser on its own.
+    pub(crate) last_computer_url: Option<crate::computer_view::SafeUrl>,
 
     // Daemon & chat state
     pub(crate) connected_host: Option<String>,
@@ -629,6 +632,7 @@ impl MultibotView {
             table_modal_state: TableModalState::default(),
             terminal: TerminalPaneState::default(),
             computer: ComputerViewState::default(),
+            last_computer_url: None,
             connected_host,
             connection_status,
             daemon_tx,
@@ -7134,6 +7138,50 @@ mod tests {
                     Some(crate::computer_view::ComputerStatus::Failed(_))
                 ));
             }
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn reopening_computer_view_offers_the_last_url_without_starting_a_backend(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            view.update(cx, |v, cx| {
+                v.open_computer_view(window, cx);
+                v.computer.open().unwrap().url_input.update(cx, |state, cx| {
+                    state.set_value("https://vnc.example.com:6080", window, cx);
+                });
+                v.connect_computer_view_with_window(window, cx);
+            });
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).computer.backend_handle_count(), 1);
+            view.update(cx, |v, cx| {
+                v.close_computer_view(cx);
+            });
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).computer.backend_handle_count(), 0);
+
+            // Reopening offers the same address but starts nothing: remembering an
+            // address is not permission to launch a browser.
+            view.update(cx, |v, cx| {
+                v.open_computer_view(window, cx);
+            });
+            window.render_frame(cx);
+            let computer = &view.read(cx).computer;
+            assert_eq!(computer.backend_handle_count(), 0);
+            assert_eq!(
+                computer
+                    .open()
+                    .map(|open| open.url_input.read(cx).value().to_string()),
+                Some("https://vnc.example.com:6080".to_string())
+            );
+            assert!(matches!(
+                computer.open().map(|open| open.status.clone()),
+                Some(crate::computer_view::ComputerStatus::NeedsUrl)
+            ));
         })
         .unwrap();
     }

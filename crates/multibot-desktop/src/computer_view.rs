@@ -689,14 +689,13 @@ impl crate::app::MultibotView {
                 this.connect_computer_view(cx);
             }
         });
-        let suggested = self.suggested_computer_url();
-        let (status, url) = match &suggested {
-            Some(safe) => (ComputerStatus::Connecting, Some(safe.clone())),
-            None => (ComputerStatus::NeedsUrl, None),
-        };
+        // The last URL this pane connected to is offered again, but the pane still
+        // starts nothing until the user presses Enter: remembering an address is not
+        // permission to launch a browser.
+        let remembered = self.last_computer_url.clone();
         let open = ComputerViewOpen {
-            url,
-            status,
+            url: None,
+            status: ComputerStatus::NeedsUrl,
             backend: current_backend(),
             focus_handle: focus_handle.clone(),
             url_input: url_input.clone(),
@@ -706,16 +705,14 @@ impl crate::app::MultibotView {
         };
         self.computer = ComputerViewState::Open(Box::new(open));
         url_input.update(cx, |state, cx| {
-            if let Some(safe) = suggested.as_ref() {
+            if let Some(safe) = remembered.as_ref() {
                 state.set_value(safe.as_str(), window, cx);
             }
         });
-        window.focus(&focus_handle, cx);
-        // A session that already names a computer address is the one path that starts a
-        // backend on open; a plain open shows the prompt and starts nothing.
-        if let Some(safe) = suggested {
-            self.navigate_computer_view_with_window(safe, Some(window), cx);
-        }
+        // Focus lands in the URL bar so the first keystroke is the address, not a Tab.
+        let input_focus = url_input.read(cx).focus_handle(cx);
+        window.focus(&input_focus, cx);
+        let _ = focus_handle;
         cx.notify();
     }
 
@@ -737,13 +734,9 @@ impl crate::app::MultibotView {
         self.computer = ComputerViewState::Closed;
     }
 
-    /// URL to load on open: the session's configured computer/VNC address if it has
-    /// one, else `None` so the pane shows the connect prompt and starts nothing.
-    ///
-    /// No session field carries that address today; the hook is here so a per-session
-    /// address reaches the pane through the same validation when one exists.
-    pub(crate) fn suggested_computer_url(&self) -> Option<SafeUrl> {
-        None
+    /// Records a successful connection so the next open can offer the same address.
+    fn remember_computer_url(&mut self, url: &SafeUrl) {
+        self.last_computer_url = Some(url.clone());
     }
 
     /// Toolbar Connect: validates the typed URL, then creates or navigates the backend.
@@ -783,6 +776,7 @@ impl crate::app::MultibotView {
         };
         if !open.backend_state.is_live() {
             let bounds = open.bounds.unwrap_or((0.0, 0.0));
+            open.status = ComputerStatus::Connecting;
             // Without a window we cannot create a webview; report it instead of
             // pretending the pane is connected.
             let Some(window) = window else {
@@ -794,6 +788,7 @@ impl crate::app::MultibotView {
             };
             match create_backend(window, url.as_str(), bounds) {
                 Ok(state) => {
+                    self.remember_computer_url(&url);
                     if let Some(open) = self.computer.open_mut() {
                         open.backend_state = state;
                         open.url = Some(url);
@@ -811,6 +806,11 @@ impl crate::app::MultibotView {
             return;
         }
         let result = open.backend_state.navigate(url.as_str());
+        let navigated = result.is_ok();
+        if navigated {
+            let url = url.clone();
+            self.remember_computer_url(&url);
+        }
         if let Some(open) = self.computer.open_mut() {
             match result {
                 Ok(()) => {
