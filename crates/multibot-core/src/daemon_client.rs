@@ -213,7 +213,10 @@ impl DaemonConnection {
     }
 
     pub fn list_sessions(&self, limit: Option<usize>) -> Result<()> {
-        self.send(ClientRequest::ListSessions { limit })
+        self.send(ClientRequest::ListSessions {
+            limit,
+            include_archived: None,
+        })
     }
 
     pub fn read_history(

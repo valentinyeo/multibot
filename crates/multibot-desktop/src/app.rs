@@ -167,6 +167,10 @@ impl UpdaterPlatform for DesktopUpdaterPlatform {
 const GENERIC_UPDATE_ERROR_COPY: &str =
     "Could not complete update. Check your connection and try again.";
 
+/// Sessions the desktop asks for at connect time. The daemon returns only chats something
+/// still holds open, so this is headroom for a lot of live work, not the payload size.
+const SESSION_LIST_LIMIT: usize = 500;
+
 /// Detects millisecond/timeout or compact duration tokens (e.g. `15000ms`, `500 ms`, `30s`,
 /// `timed out`, `timeout`) that must never appear in user-facing update UI copy.
 fn has_millisecond_or_timeout_pattern(text: &str) -> bool {
@@ -1966,14 +1970,20 @@ impl MultibotView {
     pub(crate) fn refresh_all_hosts(&self) -> bool {
         if self.host_txs.is_empty() && self.host_statuses.is_empty() {
             return self.daemon_tx.as_ref().is_some_and(|tx| {
-                tx.send(ClientRequest::ListSessions { limit: Some(500) })
-                    .is_ok()
+                tx.send(ClientRequest::ListSessions {
+                    limit: Some(SESSION_LIST_LIMIT),
+                    include_archived: None,
+                })
+                .is_ok()
             });
         }
         let mut refreshed = false;
         for tx in self.host_txs.values() {
             refreshed |= tx
-                .send(ClientRequest::ListSessions { limit: Some(500) })
+                .send(ClientRequest::ListSessions {
+                    limit: Some(SESSION_LIST_LIMIT),
+                    include_archived: None,
+                })
                 .is_ok();
         }
         refreshed
@@ -2115,7 +2125,10 @@ impl MultibotView {
                         return;
                     }
                     let _ = conn.send(ClientRequest::WatchDirectory);
-                    let _ = conn.send(ClientRequest::ListSessions { limit: Some(500) });
+                    let _ = conn.send(ClientRequest::ListSessions {
+                        limit: Some(SESSION_LIST_LIMIT),
+                        include_archived: None,
+                    });
 
                     loop {
                         tokio::select! {
@@ -5451,7 +5464,10 @@ impl Render for MultibotView {
                 if let Some(ref tx) = this.daemon_tx
                     && !tx.is_closed()
                     && tx
-                        .send(ClientRequest::ListSessions { limit: Some(500) })
+                        .send(ClientRequest::ListSessions {
+                            limit: Some(SESSION_LIST_LIMIT),
+                            include_archived: None,
+                        })
                         .is_ok()
                 {
                     if let Some(ref s) = this.selected_session {

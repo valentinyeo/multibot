@@ -1,8 +1,8 @@
 use crate::process::ProcessManager;
 use crate::providers::{
-    ArchiveStore, DEFAULT_HISTORY_MAX_BYTES, DeltaRead, DiscoveryContext, MetadataStore,
-    compute_semantic_working, now_ms, read_history_delta, read_history_page, sha256_hex,
-    summarize_session_by_agent, system_time_ms,
+    ArchiveStore, DEFAULT_HISTORY_MAX_BYTES, DeltaRead, DiscoveryContext, LiveActivity,
+    MetadataStore, compute_semantic_working, now_ms, read_history_delta, read_history_page,
+    sha256_hex, summarize_session_by_agent, system_time_ms,
 };
 use anyhow::{Result, anyhow};
 use multibot_proto::{AgentKind, ServerEvent};
@@ -442,11 +442,16 @@ impl WatchManager {
                         if run_on_disk(disk_tx.as_ref(), move || {
                             let metadata = MetadataStore::load(&home_c);
                             let archive = ArchiveStore::load(&home_c);
+                            let live = LiveActivity::cached(&home_c);
                             let active_ids = pm_c.active_session_ids();
+                            let connected_ids = pm_c.connected_session_ids();
                             let ctx = DiscoveryContext {
                                 active_session_ids: &active_ids,
+                                connected_session_ids: &connected_ids,
                                 metadata: &metadata,
                                 archive: &archive,
+                                live: &live,
+                                include_archived: true,
                             };
                             for (path, agent) in targets {
                                 if !path.is_file() {
@@ -636,11 +641,16 @@ fn emit_session_updated(
 ) {
     let metadata = MetadataStore::load(home);
     let archive = ArchiveStore::load(home);
+    let live = LiveActivity::cached(home);
     let active_ids = process_mgr.active_session_ids();
+    let connected_ids = process_mgr.connected_session_ids();
     let ctx = DiscoveryContext {
         active_session_ids: &active_ids,
+        connected_session_ids: &connected_ids,
         metadata: &metadata,
         archive: &archive,
+        live: &live,
+        include_archived: true,
     };
     let mtime_ms = path
         .metadata()

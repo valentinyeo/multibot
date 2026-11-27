@@ -318,7 +318,12 @@ impl AgentProvider for ClaudeProvider {
         AgentKind::Claude
     }
 
-    fn discover_paths(&self, home: &Path, limit: usize) -> Vec<(PathBuf, i64)> {
+    fn discover_paths(
+        &self,
+        home: &Path,
+        limit: usize,
+        keep: &dyn Fn(&Path, i64) -> bool,
+    ) -> Vec<(PathBuf, i64)> {
         let mut files = Vec::new();
         for root in claude_discovery_roots(home) {
             for entry in WalkDir::new(&root).max_depth(3).into_iter().flatten() {
@@ -326,13 +331,15 @@ impl AgentProvider for ClaudeProvider {
                 if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                     continue;
                 }
-                if !is_safe_transcript_path(path, &root) {
-                    continue;
-                }
                 if let Ok(meta) = fs::metadata(path)
                     && let Ok(modified) = meta.modified()
                 {
-                    files.push((path.to_path_buf(), system_time_ms(modified)));
+                    let ts = system_time_ms(modified);
+                    // Cheapest check first: a symlink escaping the root is rare, a stale
+                    // transcript is the common case on a long-lived home directory.
+                    if keep(path, ts) && is_safe_transcript_path(path, &root) {
+                        files.push((path.to_path_buf(), ts));
+                    }
                 }
             }
         }

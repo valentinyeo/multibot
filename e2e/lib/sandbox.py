@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -161,6 +162,48 @@ class IsolatedHome:
         if readonly:
             return self.lock_readonly(self.zigshel_dir)
         return snapshot_tree(self.zigshel_dir)
+
+    def stage_live_legacy_chat(
+        self,
+        *,
+        tmux: str,
+        sid: Optional[str] = None,
+        conversation: Optional[str] = None,
+        name: Optional[str] = None,
+        provider: str = "claude",
+    ) -> None:
+        """Stage a live legacy Multiprompt chat, the way `agent-host` records one.
+
+        The desktop lists only chats that something still holds open, so any fixture that
+        must appear without `include_archived` needs a live host record like this one.
+        """
+        host = self.home / ".local" / "state" / "multiprompt" / "agent-host"
+        host.mkdir(parents=True, exist_ok=True)
+        stem = hashlib.sha256(
+            f"{provider}:{sid or conversation or tmux}".encode()
+        ).hexdigest()[:32]
+        config: Dict[str, object] = {"enabled": True, "provider": provider, "tmux": tmux}
+        state: Dict[str, object] = {"pid": os.getpid(), "provider": provider, "tmux": tmux}
+        if conversation:
+            config["conversation"] = conversation
+            state["conversation"] = conversation
+        if sid:
+            config["sid"] = sid
+            state["sid"] = sid
+        (host / f"{stem}.config.json").write_text(json.dumps(config), encoding="utf-8")
+        (host / f"{stem}.state.json").write_text(json.dumps(state), encoding="utf-8")
+        if name:
+            names_path = self.home / ".local" / "state" / "multiprompt" / "chat-names.json"
+            names: Dict[str, object] = {}
+            if names_path.exists():
+                names = json.loads(names_path.read_text(encoding="utf-8"))
+            entry: Dict[str, object] = {"name": name, "at": time.time()}
+            if sid:
+                entry["sid"] = sid
+            if conversation:
+                entry["conversation"] = conversation
+            names[tmux] = entry
+            names_path.write_text(json.dumps(names), encoding="utf-8")
 
     def install_fake_cli(self, name: str, script_body: str) -> Path:
         """Install an executable fake CLI shim into fake_bin_dir."""

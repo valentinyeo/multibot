@@ -101,6 +101,19 @@ def test_slice1_list_sessions_all_providers_isolated() -> None:
             ".gemini/antigravity/brain/agy-brain-001/transcript.jsonl",
             mtime_offset_sec=-5,
         )
+        # The desktop lists only chats something still holds open, so each fixture gets the
+        # legacy host record that marks it live.
+        sb.stage_live_legacy_chat(tmux="live-claude-basic", sid="claude-basic-001")
+        sb.stage_live_legacy_chat(
+            tmux="live-codex-basic",
+            sid="codex-basic-001",
+            provider="codex",
+        )
+        sb.stage_live_legacy_chat(
+            tmux="live-agy-brain",
+            conversation="agy-brain-001",
+            provider="antigravity",
+        )
 
         with DaemonDriver(sb) as dmn:
             ev = dmn.request({"op": "list_sessions", "limit": 20}, "sessions")
@@ -393,6 +406,7 @@ def test_slice2_codex_rich_parsing() -> None:
             "codex/rollout-2026-11-26-codex-rich-001.jsonl",
             ".codex/sessions/2026/11/26/rollout-2026-11-26-codex-rich-001.jsonl",
         )
+        sb.stage_live_legacy_chat(tmux="live-codex-rich", sid="codex-rich-001", provider="codex")
         with DaemonDriver(sb) as dmn:
             sess_ev = dmn.request({"op": "list_sessions", "limit": 20}, "sessions")
             codex_sess = next((s for s in sess_ev["sessions"] if s["agent"] == "codex"), None)
@@ -451,6 +465,12 @@ def test_slice2_antigravity_daemon_owned_history() -> None:
         sb.stage_fixture(
             "antigravity/brain_session.jsonl",
             ".gemini/antigravity/brain/agy-brain-001/transcript.jsonl",
+        )
+        sb.stage_live_legacy_chat(
+            tmux="live-agy-hosted", sid="agy-hosted-001", provider="antigravity"
+        )
+        sb.stage_live_legacy_chat(
+            tmux="live-agy-brain", conversation="agy-brain-001", provider="antigravity"
         )
         with DaemonDriver(sb) as dmn:
             sess_ev = dmn.request({"op": "list_sessions", "limit": 20}, "sessions")
