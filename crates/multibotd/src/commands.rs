@@ -8,14 +8,23 @@ use walkdir::WalkDir;
 const MAX_FRONTMATTER_READ_BYTES: usize = 64 * 1024;
 const MAX_DESCRIPTION_BYTES: usize = 200;
 const MAX_ANCESTOR_DEPTH: usize = 16;
+const MAX_JSON_READ_BYTES: u64 = 4 * 1024 * 1024;
+
+// Precedence tiers. A higher value wins; project overrides user, user overrides
+// plugin, and plugin overrides the hardcoded builtin list.
+const PREC_BUILTIN: u16 = 10;
+const PREC_PLUGIN: u16 = 15;
+const PREC_USER: u16 = 20;
+const PREC_PROJECT: u16 = 30;
+
+/// Key: (trigger, lowercase name) -> (precedence, item)
+type CommandMap = HashMap<(String, String), (u16, SlashCommandItem)>;
 
 pub fn list_commands(home: &Path, agent: AgentKind, cwd: Option<&Path>) -> Vec<SlashCommandItem> {
-    // Key: (trigger, lowercase name) -> (precedence, SlashCommandItem)
-    // Precedence: 3 = project_*, 2 = user_*, 1 = builtin
-    let mut map: HashMap<(String, String), (u8, SlashCommandItem)> = HashMap::new();
+    let mut map: CommandMap = HashMap::new();
 
     for item in builtin_commands(agent) {
-        insert_with_precedence(&mut map, 1, item);
+        insert_with_precedence(&mut map, PREC_BUILTIN, item);
     }
 
     let ancestors = collect_ancestors(cwd, home);
@@ -25,8 +34,9 @@ pub fn list_commands(home: &Path, agent: AgentKind, cwd: Option<&Path>) -> Vec<S
             scan_skills_dir(
                 &home.join(".claude/skills"),
                 "/",
+                "",
                 "user_skill",
-                2,
+                PREC_USER,
                 &mut map,
             );
             scan_markdown_commands_dir(
@@ -34,15 +44,17 @@ pub fn list_commands(home: &Path, agent: AgentKind, cwd: Option<&Path>) -> Vec<S
                 "/",
                 "",
                 "user_command",
-                2,
+                PREC_USER,
                 &mut map,
             );
+            scan_claude_plugins(home, cwd, &mut map);
             for anc in &ancestors {
                 scan_skills_dir(
                     &anc.join(".claude/skills"),
                     "/",
+                    "",
                     "project_skill",
-                    3,
+                    PREC_PROJECT,
                     &mut map,
                 );
                 scan_markdown_commands_dir(
@@ -50,7 +62,7 @@ pub fn list_commands(home: &Path, agent: AgentKind, cwd: Option<&Path>) -> Vec<S
                     "/",
                     "",
                     "project_command",
-                    3,
+                    PREC_PROJECT,
                     &mut map,
                 );
             }
@@ -61,17 +73,32 @@ pub fn list_commands(home: &Path, agent: AgentKind, cwd: Option<&Path>) -> Vec<S
                 "/",
                 "prompts:",
                 "user_prompt",
-                2,
+                PREC_USER,
                 &mut map,
             );
-            scan_skills_dir(&home.join(".agents/skills"), "$", "user_skill", 2, &mut map);
-            scan_skills_dir(&home.join(".codex/skills"), "$", "user_skill", 2, &mut map);
+            scan_skills_dir(
+                &home.join(".agents/skills"),
+                "$",
+                "",
+                "user_skill",
+                PREC_USER,
+                &mut map,
+            );
+            scan_skills_dir(
+                &home.join(".codex/skills"),
+                "$",
+                "",
+                "user_skill",
+                PREC_USER,
+                &mut map,
+            );
             for anc in &ancestors {
                 scan_skills_dir(
                     &anc.join(".agents/skills"),
                     "$",
+                    "",
                     "project_skill",
-                    3,
+                    PREC_PROJECT,
                     &mut map,
                 );
             }
@@ -84,22 +111,23 @@ pub fn list_commands(home: &Path, agent: AgentKind, cwd: Option<&Path>) -> Vec<S
                 home.join(".gemini/skills"),
                 home.join(".claude/skills"),
             ] {
-                scan_skills_dir(&user_dir, "/", "user_skill", 2, &mut map);
+                scan_skills_dir(&user_dir, "/", "", "user_skill", PREC_USER, &mut map);
             }
+            scan_antigravity_plugins(home, &mut map);
             for anc in &ancestors {
                 for proj_dir in [
                     anc.join(".agents/skills"),
                     anc.join(".agent/skills"),
                     anc.join(".claude/skills"),
                 ] {
-                    scan_skills_dir(&proj_dir, "/", "project_skill", 3, &mut map);
+                    scan_skills_dir(&proj_dir, "/", "", "project_skill", PREC_PROJECT, &mut map);
                 }
                 scan_markdown_commands_dir(
                     &anc.join(".claude/commands"),
                     "/",
                     "",
                     "project_command",
-                    3,
+                    PREC_PROJECT,
                     &mut map,
                 );
             }
@@ -116,11 +144,7 @@ pub fn list_commands(home: &Path, agent: AgentKind, cwd: Option<&Path>) -> Vec<S
     items
 }
 
-fn insert_with_precedence(
-    map: &mut HashMap<(String, String), (u8, SlashCommandItem)>,
-    prec: u8,
-    item: SlashCommandItem,
-) {
+fn insert_with_precedence(map: &mut CommandMap, prec: u16, item: SlashCommandItem) {
     let key = (item.trigger.clone(), item.name.to_ascii_lowercase());
     match map.get(&key) {
         Some((existing_prec, _)) if *existing_prec >= prec => {}
@@ -156,17 +180,175 @@ fn collect_ancestors(cwd: Option<&Path>, home: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Skills and commands shipped inside installed Antigravity plugins, for example
+/// `~/.gemini/config/plugins/pstack/skills/poteto-mode/SKILL.md`, plus the
+/// builtin skill tree the CLI installs for itself.
+fn scan_antigravity_plugins(home: &Path, map: &mut CommandMap) {
+    for plugin_dir in subdirs(&home.join(".gemini/config/plugins")) {
+        scan_skills_dir(
+            &plugin_dir.join("skills"),
+            "/",
+            "",
+            "plugin_skill",
+            PREC_PLUGIN,
+            map,
+        );
+        scan_markdown_commands_dir(
+            &plugin_dir.join("commands"),
+            "/",
+            "",
+            "plugin_command",
+            PREC_PLUGIN,
+            map,
+        );
+    }
+    scan_skills_dir(
+        &home.join(".gemini/antigravity-cli/builtin/skills"),
+        "/",
+        "",
+        "plugin_skill",
+        PREC_PLUGIN,
+        map,
+    );
+}
+
+/// Skills and commands from Claude plugins the user enabled in
+/// `~/.claude/settings.json`, resolved through
+/// `~/.claude/plugins/installed_plugins.json`. Claude exposes plugin entries as
+/// `<plugin>:<name>`, so each scan is namespaced by the plugin name.
+fn scan_claude_plugins(home: &Path, cwd: Option<&Path>, map: &mut CommandMap) {
+    let settings = read_json_file(&home.join(".claude/settings.json"));
+    let Some(enabled) = settings
+        .as_ref()
+        .and_then(|v| v.get("enabledPlugins"))
+        .and_then(|v| v.as_object())
+    else {
+        return;
+    };
+    let installed_path = home.join(".claude/plugins/installed_plugins.json");
+    let Some(installed) = read_json_file(&installed_path) else {
+        return;
+    };
+    let plugins = installed.get("plugins").unwrap_or(&installed);
+    let Some(plugins) = plugins.as_object() else {
+        return;
+    };
+
+    for (key, records) in plugins {
+        if enabled.get(key).and_then(|v| v.as_bool()) != Some(true) {
+            continue;
+        }
+        let Some(install_path) = plugin_install_path(records, cwd) else {
+            continue;
+        };
+        let plugin_name = key.split('@').next().unwrap_or(key);
+        let prefix = format!("{plugin_name}:");
+        scan_skills_dir(
+            &install_path.join("skills"),
+            "/",
+            &prefix,
+            "plugin_skill",
+            PREC_PLUGIN,
+            map,
+        );
+        scan_markdown_commands_dir(
+            &install_path.join("commands"),
+            "/",
+            &prefix,
+            "plugin_command",
+            PREC_PLUGIN,
+            map,
+        );
+    }
+}
+
+/// Pick the newest installed record whose `installPath` exists and whose scope
+/// applies here. `local` records only apply inside their own project.
+fn plugin_install_path(records: &serde_json::Value, cwd: Option<&Path>) -> Option<PathBuf> {
+    let records: Vec<&serde_json::Value> = match records {
+        serde_json::Value::Array(items) => items.iter().collect(),
+        other => vec![other],
+    };
+    for record in records.iter().rev() {
+        let Some(raw_path) = record.get("installPath").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let install_path = PathBuf::from(raw_path);
+        if !install_path.is_dir() {
+            continue;
+        }
+        let scope = record.get("scope").and_then(|v| v.as_str()).unwrap_or("");
+        if scope.eq_ignore_ascii_case("local") {
+            let Some(project) = record.get("projectPath").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if !path_is_self_or_ancestor(cwd, project) {
+                continue;
+            }
+        }
+        return Some(install_path);
+    }
+    None
+}
+
+fn path_is_self_or_ancestor(cwd: Option<&Path>, ancestor: &str) -> bool {
+    let Some(cwd) = cwd else {
+        return false;
+    };
+    let target = canonical_or_original(Path::new(ancestor));
+    let mut cur = canonical_or_original(cwd);
+    loop {
+        if cur == target {
+            return true;
+        }
+        match cur.parent() {
+            Some(parent) if parent != cur => cur = parent.to_path_buf(),
+            _ => return false,
+        }
+    }
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn subdirs(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    out.sort();
+    out
+}
+
+fn read_json_file(path: &Path) -> Option<serde_json::Value> {
+    let file = File::open(path).ok()?;
+    let mut buf = Vec::new();
+    file.take(MAX_JSON_READ_BYTES).read_to_end(&mut buf).ok()?;
+    serde_json::from_slice(&buf).ok()
+}
+
 fn scan_skills_dir(
     root: &Path,
     trigger: &str,
+    prefix: &str,
     source: &str,
-    prec: u8,
-    map: &mut HashMap<(String, String), (u8, SlashCommandItem)>,
+    prec: u16,
+    map: &mut CommandMap,
 ) {
     if !root.is_dir() {
         return;
     }
-    for entry in WalkDir::new(root).max_depth(4).into_iter().flatten() {
+    for entry in WalkDir::new(root)
+        .max_depth(4)
+        .follow_links(true)
+        .into_iter()
+        .flatten()
+    {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -195,7 +377,7 @@ fn scan_skills_dir(
                 .and_then(|s| s.to_str())
                 .map(String::from)
         });
-        let Some(name) = raw_name.and_then(|n| clean_cmd_name(&n)) else {
+        let Some(name) = raw_name.and_then(|n| clean_cmd_name(&format!("{prefix}{n}"))) else {
             continue;
         };
         let description = fm
@@ -222,13 +404,18 @@ fn scan_markdown_commands_dir(
     trigger: &str,
     prefix: &str,
     source: &str,
-    prec: u8,
-    map: &mut HashMap<(String, String), (u8, SlashCommandItem)>,
+    prec: u16,
+    map: &mut CommandMap,
 ) {
     if !root.is_dir() {
         return;
     }
-    for entry in WalkDir::new(root).max_depth(4).into_iter().flatten() {
+    for entry in WalkDir::new(root)
+        .max_depth(4)
+        .follow_links(true)
+        .into_iter()
+        .flatten()
+    {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -771,5 +958,245 @@ mod tests {
         assert_eq!(quoted.description, "C# guide");
 
         let _ = fs::remove_dir_all(&home);
+    }
+
+    fn write(path: &Path, contents: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn antigravity_lists_plugin_skills_with_precedence() {
+        let home = temp_home("agy-plugins");
+        let repo = home.join("workspace/agy-app");
+        fs::create_dir_all(repo.join("src")).unwrap();
+        let plugins = home.join(".gemini/config/plugins");
+
+        write(
+            &plugins.join("pstack/skills/unslop/SKILL.md"),
+            "---\nname: unslop\ndescription: Cut AI tells\n---\n",
+        );
+        write(
+            &plugins.join("pstack/skills/poteto-mode/SKILL.md"),
+            "---\nname: poteto-mode\ndescription: Plugin style\n---\n",
+        );
+        write(
+            &plugins.join("pstack/skills/plan/SKILL.md"),
+            "---\nname: plan\ndescription: Plugin plan\n---\n",
+        );
+        write(
+            &plugins.join("pstack/skills/hidden-plugin/SKILL.md"),
+            "---\nname: hidden-plugin\nuser-invocable: false\ndescription: Hidden\n---\n",
+        );
+        write(
+            &plugins.join("pstack/commands/ship.md"),
+            "---\ndescription: Ship a ticket\n---\n",
+        );
+        write(
+            &home.join(".gemini/antigravity-cli/builtin/skills/builtin-guide/SKILL.md"),
+            "---\ndescription: Builtin guide\n---\n",
+        );
+
+        // User and project skills of the same name must win over the plugin copies.
+        write(
+            &home.join(".gemini/config/skills/poteto-mode/SKILL.md"),
+            "---\nname: poteto-mode\ndescription: User style\n---\n",
+        );
+        write(
+            &repo.join(".agents/skills/builtin-guide/SKILL.md"),
+            "---\ndescription: Project guide\n---\n",
+        );
+
+        let cmds = list_commands(&home, AgentKind::Antigravity, Some(&repo.join("src")));
+
+        let unslop = cmds
+            .iter()
+            .find(|c| c.name == "unslop")
+            .expect("plugin skill must be listed");
+        assert_eq!(unslop.source, "plugin_skill");
+        assert_eq!(unslop.trigger, "/");
+        assert_eq!(unslop.description, "Cut AI tells");
+
+        let poteto = cmds.iter().find(|c| c.name == "poteto-mode").unwrap();
+        assert_eq!(
+            poteto.source, "user_skill",
+            "user skill must win over plugin"
+        );
+
+        let plan = cmds.iter().find(|c| c.name == "plan").unwrap();
+        assert_eq!(plan.source, "plugin_skill", "plugin must win over builtin");
+        assert_eq!(plan.description, "Plugin plan");
+
+        let guide = cmds.iter().find(|c| c.name == "builtin-guide").unwrap();
+        assert_eq!(guide.source, "project_skill", "project skill must win");
+        assert_eq!(guide.description, "Project guide");
+
+        assert!(!cmds.iter().any(|c| c.name == "hidden-plugin"));
+        assert!(cmds.iter().any(|c| c.name == "ship"
+            && c.source == "plugin_command"
+            && c.description == "Ship a ticket"));
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_follows_symlinked_plugin_dirs() {
+        use std::os::unix::fs::symlink;
+
+        let home = temp_home("agy-plugin-link");
+        let outside = home.join("checkout/shared-plugin");
+        write(
+            &outside.join("skills/linked-skill/SKILL.md"),
+            "---\nname: linked-skill\ndescription: Symlinked plugin skill\n---\n",
+        );
+        let plugins = home.join(".gemini/config/plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        symlink(&outside, plugins.join("linked-plugin")).unwrap();
+
+        let cmds = list_commands(&home, AgentKind::Antigravity, None);
+        let linked = cmds
+            .iter()
+            .find(|c| c.name == "linked-skill")
+            .expect("symlinked plugin skill must be listed");
+        assert_eq!(linked.source, "plugin_skill");
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn claude_lists_enabled_plugin_skills_and_respects_local_scope() {
+        let home = temp_home("claude-plugins");
+        let repo = home.join("projects/app");
+        fs::create_dir_all(repo.join("src")).unwrap();
+
+        let install = home.join(".claude/plugins/cache/market/pstack/1.0.0");
+        write(
+            &install.join("skills/poteto-mode/SKILL.md"),
+            "---\nname: poteto-mode\ndescription: Concise style\n---\n",
+        );
+        write(
+            &install.join("commands/ship.md"),
+            "---\ndescription: Ship ticket\n---\n",
+        );
+
+        let disabled = home.join(".claude/plugins/cache/market/off/1.0.0");
+        write(
+            &disabled.join("skills/off-skill/SKILL.md"),
+            "---\ndescription: Disabled skill\n---\n",
+        );
+
+        let elsewhere = home.join(".claude/plugins/cache/market/elsewhere/1.0.0");
+        write(
+            &elsewhere.join("skills/elsewhere-skill/SKILL.md"),
+            "---\ndescription: Other project skill\n---\n",
+        );
+
+        let here = home.join(".claude/plugins/cache/market/here/1.0.0");
+        write(
+            &here.join("skills/here-skill/SKILL.md"),
+            "---\ndescription: This project skill\n---\n",
+        );
+
+        write(
+            &home.join(".claude/settings.json"),
+            r#"{"enabledPlugins":{"pstack@market":true,"off@market":false,"elsewhere@market":true,"here@market":true}}"#,
+        );
+        write(
+            &home.join(".claude/plugins/installed_plugins.json"),
+            &format!(
+                r#"{{"version":2,"plugins":{{
+                  "pstack@market":[{{"scope":"user","installPath":{}}}],
+                  "off@market":[{{"scope":"user","installPath":{}}}],
+                  "elsewhere@market":[{{"scope":"local","projectPath":"/somewhere/else","installPath":{}}}],
+                  "here@market":[{{"scope":"local","projectPath":{},"installPath":{}}}]
+                }}}}"#,
+                json_str(&install),
+                json_str(&disabled),
+                json_str(&elsewhere),
+                json_str(&repo),
+                json_str(&here),
+            ),
+        );
+
+        let cmds = list_commands(&home, AgentKind::Claude, Some(&repo.join("src")));
+
+        let poteto = cmds
+            .iter()
+            .find(|c| c.name == "pstack:poteto-mode")
+            .expect("enabled plugin skill must be namespaced by plugin name");
+        assert_eq!(poteto.source, "plugin_skill");
+        assert_eq!(poteto.description, "Concise style");
+
+        assert!(cmds
+            .iter()
+            .any(|c| c.name == "pstack:ship" && c.source == "plugin_command"));
+        assert!(cmds
+            .iter()
+            .any(|c| c.name == "here:here-skill" && c.source == "plugin_skill"));
+
+        assert!(!cmds.iter().any(|c| c.name.contains("off-skill")));
+        assert!(
+            !cmds.iter().any(|c| c.name.contains("elsewhere-skill")),
+            "local-scope plugin for another project must not be listed"
+        );
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn claude_plugin_scan_survives_missing_and_broken_json() {
+        let home = temp_home("claude-plugin-json");
+        fs::create_dir_all(home.join(".claude/plugins")).unwrap();
+
+        // No settings file at all.
+        let cmds = list_commands(&home, AgentKind::Claude, None);
+        assert!(cmds
+            .iter()
+            .any(|c| c.name == "clear" && c.source == "builtin"));
+
+        // Broken settings JSON.
+        write(&home.join(".claude/settings.json"), "{not json");
+        let cmds = list_commands(&home, AgentKind::Claude, None);
+        assert!(cmds.iter().any(|c| c.name == "clear"));
+
+        // Valid settings, broken install manifest.
+        write(
+            &home.join(".claude/settings.json"),
+            r#"{"enabledPlugins":{"pkg@m":true}}"#,
+        );
+        write(
+            &home.join(".claude/plugins/installed_plugins.json"),
+            "not json at all",
+        );
+        let cmds = list_commands(&home, AgentKind::Claude, None);
+        assert!(cmds.iter().any(|c| c.name == "clear"));
+
+        // Valid JSON with junk record shapes and a missing install path.
+        write(
+            &home.join(".claude/plugins/installed_plugins.json"),
+            r#"{"plugins":{"pkg@m":[{"scope":"user"},"nope",{"installPath":123},{"scope":"local","installPath":"/definitely/missing/dir"}]}}"#,
+        );
+        let cmds = list_commands(&home, AgentKind::Claude, None);
+        assert!(cmds.iter().any(|c| c.name == "clear"));
+
+        // plugins map in wrapped form, with a project record missing projectPath.
+        write(
+            &home.join(".claude/plugins/installed_plugins.json"),
+            r#"{"plugins":{"pkg@m":[{"scope":"local","installPath":"/definitely/missing/dir"}]}}"#,
+        );
+        let with_cwd = list_commands(&home, AgentKind::Claude, Some(&home));
+        assert!(with_cwd.iter().any(|c| c.name == "clear"));
+        assert!(with_cwd.iter().all(|c| !c.name.starts_with("pkg:")));
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    fn json_str(path: &Path) -> String {
+        let escaped = path
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        format!("\"{escaped}\"")
     }
 }
