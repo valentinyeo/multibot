@@ -4277,6 +4277,31 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_navigation_order_includes_sessions_beyond_digit_shortcuts() {
+        let store = WorkspaceStore::new();
+        let sessions: Vec<_> = (0..12)
+            .map(|i| {
+                make_session(
+                    &format!("s{i}"),
+                    AgentKind::Claude,
+                    "Chat",
+                    100 - i,
+                    false,
+                    false,
+                )
+            })
+            .collect();
+        let inputs: Vec<_> = sessions.iter().map(|s| make_input("h", s)).collect();
+        let expected: Vec<_> = inputs.iter().map(|s| s.key.clone()).collect();
+        for workspace_id in [ALL_WORKSPACES_ID, DEFAULT_WORKSPACE_ID] {
+            let layout = store.compute_sidebar_layout(workspace_id, &inputs, false, 1000);
+            assert_eq!(layout.ctrl_digit_order, expected);
+            assert_eq!(layout.resolve_ctrl_digit(9), Some(expected[8].as_str()));
+            assert_eq!(layout.resolve_ctrl_digit(10), None);
+        }
+    }
+
+    #[test]
     fn frequent_24h_input_and_6h_dwell_exact_boundaries() {
         let now = 100_000_000_i64;
         // Input exact 24h boundary

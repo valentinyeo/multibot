@@ -4607,32 +4607,27 @@ impl MultibotView {
 
     pub(crate) fn cycle_session(&mut self, delta: isize, cx: &mut Context<Self>) {
         let order = self.active_ctrl_digit_order();
-        if !order.is_empty() {
-            let active_key = self
-                .selected_session
-                .as_ref()
-                .map(|s| self.session_key_for(s));
-            let current = active_key
-                .as_deref()
-                .and_then(|k| order.iter().position(|x| x == k))
-                .unwrap_or(0);
-            let next = (current as isize + delta).rem_euclid(order.len() as isize) as usize;
-            self.open_session_key_with_tracking(&order[next], false, cx);
-            self.sync_workspace_to_shared(cx);
+        if order.is_empty() {
             return;
         }
-        if self.sessions.is_empty() {
-            return;
-        }
-        let current = self
+        let active_key = self
             .selected_session
             .as_ref()
-            .and_then(|sel| self.sessions.iter().position(|s| s.id == sel.id))
-            .unwrap_or(0);
-        let next = (current as isize + delta).rem_euclid(self.sessions.len() as isize) as usize;
-        if let Some(session) = self.sessions.get(next).cloned() {
-            self.open_session_with_tracking(session, false, cx);
-            self.sync_workspace_to_shared(cx);
+            .map(|s| self.session_key_for(s));
+        let current = active_key
+            .as_deref()
+            .and_then(|k| order.iter().position(|x| x == k));
+        let next = current
+            .map(|current| (current as isize + delta).rem_euclid(order.len() as isize) as usize)
+            .unwrap_or(if delta < 0 { order.len() - 1 } else { 0 });
+        if let Some((host, session)) = self.host_for_session_key(&order[next]) {
+            if active_key.as_deref() != Some(order[next].as_str()) {
+                self.sidebar_state.previous_session_key = active_key;
+            }
+            self.inbox_state.step_index = None;
+            self.inbox_state.step_order.clear();
+            // Tracking a view changes MRU order; marking read also removes rows in unread-only mode.
+            self.select_session_on_host(host, session, cx);
         }
     }
 

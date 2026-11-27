@@ -2085,6 +2085,96 @@ mod tests {
         .unwrap();
     }
 
+    #[gpui_kit::test]
+    fn ctrl_tab_cycles_every_visible_session_without_reordering(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            for count in [4, 12] {
+                for workspace_id in [ALL_WORKSPACES_ID, DEFAULT_WORKSPACE_ID] {
+                    for unread_only in [false, true] {
+                        let (keys, before) = view.update(cx, |v, cx| {
+                            v.sidebar_state.workspace_store = WorkspaceStore::new();
+                            v.sidebar_state.active_workspace_id = workspace_id.to_string();
+                            v.sidebar_state.unread_only = unread_only;
+                            v.sessions = (0..count)
+                                .map(|i| SessionSummary {
+                                    id: format!("cycle-{i}"),
+                                    title: format!("Session {i}"),
+                                    agent: AgentKind::Claude,
+                                    updated_at_ms: 10_000 - i as i64,
+                                    needs_attention: true,
+                                    ..Default::default()
+                                })
+                                .collect();
+                            let keys: Vec<_> =
+                                v.sessions.iter().map(|s| v.session_key_for(s)).collect();
+                            for (i, key) in keys.iter().enumerate() {
+                                v.sidebar_state
+                                    .workspace_store
+                                    .record_session_view(key, 20_000 - i as i64);
+                            }
+                            v.select_session(v.sessions[0].clone(), cx);
+                            (keys, v.sidebar_state.workspace_store.clone())
+                        });
+                        window.render_frame(cx);
+
+                        for (chord, indices) in [
+                            ("ctrl-tab", (1..count).chain([0]).collect::<Vec<_>>()),
+                            ("ctrl-shift-tab", (1..count).rev().chain([0]).collect()),
+                        ] {
+                            for index in indices {
+                                window.press(chord, cx);
+                                window.render_frame(cx);
+                                view.read_with(cx, |v, _| {
+                                    let active =
+                                        v.session_key_for(v.selected_session.as_ref().unwrap());
+                                    assert_eq!(active, keys[index], "{chord}, {workspace_id}");
+                                    let layout = v
+                                        .sidebar_state
+                                        .workspace_store
+                                        .compute_sidebar_layout_with_options(
+                                            workspace_id,
+                                            v.sidebar_state.active_workspace_view,
+                                            &v.session_inputs(),
+                                            unread_only,
+                                            Some(&active),
+                                            now_unix_ms(),
+                                        );
+                                    assert_eq!(layout.ctrl_digit_order, keys);
+                                    assert_eq!(v.sidebar_state.workspace_store, before);
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_tab_does_not_open_sessions_in_collapsed_sections(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.sessions = sample_sessions();
+                v.sidebar_state.workspace_store.recents_section_collapsed = true;
+                v.sidebar_state.recents_collapsed = true;
+                v.select_session(v.sessions[0].clone(), cx);
+            });
+            window.render_frame(cx);
+            for chord in ["ctrl-tab", "ctrl-shift-tab"] {
+                window.press(chord, cx);
+                window.render_frame(cx);
+                view.read_with(cx, |v, _| {
+                    assert_eq!(v.selected_session.as_ref().unwrap().id, "s1");
+                    assert!(v.sidebar_state.workspace_store.recent_views.is_empty());
+                });
+            }
+        })
+        .unwrap();
+    }
+
     #[test]
     fn inline_rename_consumes_printable_keys_at_63_char_cap() {
         let mut r = InlineRenameState::new("k".into(), "s1".into(), "a".repeat(63));
