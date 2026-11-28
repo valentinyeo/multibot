@@ -292,7 +292,7 @@ impl MultibotView {
             .max_h(px(180.0))
             .overflow_y_scroll()
             .w_full()
-            .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+            .when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0)))
             .mx_auto()
             .p_3()
             .gap_2()
@@ -412,7 +412,7 @@ impl MultibotView {
                 el.child(
                     div()
                         .w_full()
-                        .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+                        .when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0)))
                         .mx_auto()
                         .px_4()
                         .pb_1()
@@ -425,7 +425,7 @@ impl MultibotView {
                 el.child(
                     div()
                         .w_full()
-                        .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+                        .when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0)))
                         .mx_auto()
                         .px_5()
                         .pb_1()
@@ -480,7 +480,7 @@ impl MultibotView {
             })
             .when(!self.chat_state.quoted_snippets.is_empty(), |el| {
                 let mut chips = h_flex().id("quoted-snippets").test_support()
-                    .w_full().when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+                    .w_full().when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0)))
                     .mx_auto().px_5().pb_1().gap_1p5().flex_wrap();
                 for snippet in &self.chat_state.quoted_snippets {
                     let id = snippet.id;
@@ -509,7 +509,7 @@ impl MultibotView {
             .when(!self.chat_state.pending_attachments.is_empty(), |el| {
                 let mut chips = h_flex()
                     .w_full()
-                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0)))
                     .mx_auto()
                     .px_5()
                     .pb_1()
@@ -563,7 +563,7 @@ impl MultibotView {
                 el.child(chips)
             })
             .when(lifecycle != multibot_core::workspaces::SessionLifecycle::Active, |el| el.child(
-                h_flex().id("lifecycle-peek-banner").test_support().w_full().when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0))).mx_auto()
+                h_flex().id("lifecycle-peek-banner").test_support().w_full().when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0))).mx_auto()
                     .px_4().py_2().gap_3().items_center().justify_between().rounded(RADIUS_ROW).bg(theme::bg_surface())
                     .child(div().text_xs().text_color(theme::text_muted()).child(
                         if lifecycle == multibot_core::workspaces::SessionLifecycle::Dissolved {
@@ -584,20 +584,22 @@ impl MultibotView {
             .when_some(self.render_slash_picker(cx), |el, picker| el.child(picker))
             .when_some(self.render_mention_picker(cx), |el, picker| el.child(picker))
             .when(self.chat_state.composer_menu_open, |el| el.child(
-                div().w_full().when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0))).mx_auto().px_5().child(
+                div().w_full().when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0))).mx_auto().px_5().child(
                     self.render_composer_options(cx)
                 )
             ))
             .child(
                 div().w_full().flex_shrink_0().px_5().pb_4().pt_2().child(
                     h_flex()
+                        .id("chat-composer-pill")
+                        .test_support()
                         .w_full()
-                        .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+                        .when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0)))
                         .mx_auto()
                         .px_3()
                         .py_1p5()
                         .gap_2()
-                        .items_end()
+                        .items_center()
                         .rounded(px(20.0))
                         .bg(theme::bg_surface())
                         .border_1()

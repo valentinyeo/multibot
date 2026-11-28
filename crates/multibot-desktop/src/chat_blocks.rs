@@ -822,7 +822,7 @@ impl MultibotView {
 
         let mut wrapper = v_flex()
             .w_full()
-            .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+            .when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0)))
             .mx_auto()
             .px_4()
             .pt_1()

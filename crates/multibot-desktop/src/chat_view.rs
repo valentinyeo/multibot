@@ -353,7 +353,7 @@ impl MultibotView {
                 let msg_visible_text = message_visible_text(msg);
                 let msg_text_up = msg_visible_text.clone();
 
-                let mut body_col = v_flex().w_full().gap_2();
+                let mut body_col = v_flex().w_auto().min_w_0().gap_2();
 
                 // Compact 1-line clickable quote header when message quotes an earlier turn.
                 let parsed_quote = parse_quoted_message(&msg_visible_text);
@@ -620,10 +620,12 @@ impl MultibotView {
                 };
 
                 let bubble = if is_user {
-                    div()
+                    v_flex()
                         .id(SharedString::from(format!("msg-bubble-{orig_idx}")))
                         .role(Role::Button)
                         .test_support()
+                        .w_auto()
+                        .min_w_0()
                         .max_w(px(560.0))
                         .px_4()
                         .py_2p5()
@@ -680,11 +682,14 @@ impl MultibotView {
                         )
                         .child(body_col)
                 } else {
-                    div()
+                    v_flex()
                         .id(SharedString::from(format!("msg-bubble-{orig_idx}")))
                         .role(Role::Button)
                         .test_support()
-                        .w_full()
+                        .w_auto()
+                        .min_w_0()
+                        .max_w(px(680.0))
+                        .self_start()
                         .px_4()
                         .py_3()
                         .rounded(RADIUS_BUBBLE)
@@ -764,7 +769,7 @@ impl MultibotView {
                 ));
                 let mut msg_wrapper = v_flex()
                     .w_full()
-                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0)))
                     .mx_auto()
                     .flex_shrink_0()
                     .gap_1();
@@ -936,7 +941,7 @@ impl MultibotView {
             let mut activity = v_flex()
                 .id("chat-live-activity-container")
                 .w_full()
-                .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+                .when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0)))
                 .mx_auto()
                 .px_2()
                 .gap_1p5();
@@ -1126,7 +1131,7 @@ impl MultibotView {
                     .id("chat-turn-notice")
                     .test_support()
                     .w_full()
-                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0)))
                     .mx_auto()
                     .px_2()
                     .py_1p5()
