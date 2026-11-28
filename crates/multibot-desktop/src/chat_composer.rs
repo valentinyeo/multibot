@@ -340,8 +340,10 @@ impl MultibotView {
                     )
                     .child(
                         Button::new(format!("queue-send-{index}"))
-                            .small()
-                            .icon(lucide_icon(icons::SEND, 14.0))
+                            .ghost()
+                            .size(px(24.0))
+                            .rounded(RADIUS_CHIP)
+                            .icon(lucide_icon(icons::ARROW_UP, 14.0))
                             .accessibility_label("Send now")
                             .tooltip(crate::icons::shortcut_tooltip(
                                 "Send now",
@@ -353,7 +355,9 @@ impl MultibotView {
                     )
                     .child(
                         Button::new(format!("queue-edit-{index}"))
-                            .small()
+                            .ghost()
+                            .size(px(24.0))
+                            .rounded(RADIUS_CHIP)
                             .icon(lucide_icon(icons::PENCIL, 14.0))
                             .accessibility_label("Edit queued message")
                             .tooltip("Edit queued message")
@@ -385,7 +389,9 @@ impl MultibotView {
                     )
                     .child(
                         Button::new(format!("queue-remove-{index}"))
-                            .small()
+                            .ghost()
+                            .size(px(24.0))
+                            .rounded(RADIUS_CHIP)
                             .icon(lucide_icon(icons::TRASH_2, 14.0))
                             .accessibility_label("Remove queued message")
                             .tooltip("Remove queued message")
