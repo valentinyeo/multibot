@@ -263,6 +263,12 @@ impl ProcessManager {
         if text.trim().is_empty() {
             return Err(anyhow!("prompt text is empty"));
         }
+        if agent == AgentKind::Antigravity {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.active.get(session_id).is_some_and(|p| p.interrupted) {
+                state.active.remove(session_id);
+            }
+        }
         if agent != AgentKind::Antigravity || !self.session_accepts_live_stdin(session_id) {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(interrupted) = state
@@ -834,20 +840,7 @@ impl ProcessManager {
                 };
 
                 let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<String>();
-                tokio::spawn(async move {
-                    let mut writer = stdin;
-                    while let Some(line) = stdin_rx.recv().await {
-                        if writer.write_all(line.as_bytes()).await.is_err() {
-                            break;
-                        }
-                        if writer.flush().await.is_err() {
-                            break;
-                        }
-                    }
-                });
-
                 let _ = stdin_tx.send(wire);
-
                 if let Some(conv_id) = conversation.as_deref()
                     && !history_path.starts_with(self.home.join(".multibot"))
                 {
@@ -869,6 +862,37 @@ impl ProcessManager {
                     );
                 }
 
+                let mgr_stdin = Arc::clone(self);
+                let sid_stdin = session_id.to_string();
+                tokio::spawn(async move {
+                    let mut writer = stdin;
+                    while let Some(line) = stdin_rx.recv().await {
+                        if writer.write_all(line.as_bytes()).await.is_err()
+                            || writer.flush().await.is_err()
+                        {
+                            let removed = {
+                                let mut state =
+                                    mgr_stdin.state.lock().unwrap_or_else(|e| e.into_inner());
+                                if state.active.get(&sid_stdin).is_some_and(|p| p.pid == pid) {
+                                    state.active.remove(&sid_stdin);
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+                            if removed {
+                                let _ = mgr_stdin.out_tx.send(ServerEvent::PromptStatus {
+                                    session_id: sid_stdin.clone(),
+                                    message_id: String::new(),
+                                    status: "failed".into(),
+                                    detail: "Antigravity stdin closed before delivery".into(),
+                                });
+                                mgr_stdin.notify_session_working(&sid_stdin, false);
+                            }
+                            break;
+                        }
+                    }
+                });
                 // Spawn stdout stream-json reader writing to `history_path`.
                 let mgr_stdout = Arc::clone(self);
                 let sid_stdout = session_id.to_string();

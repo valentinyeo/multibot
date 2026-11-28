@@ -76,6 +76,7 @@ fn sidebar_subworker_badges_only_show_for_live_workers(cx: &mut TestAppContext) 
         let keys = view.update(cx, |v, cx| {
             v.sidebar_state.workspace_store = WorkspaceStore::new();
             v.connection.sessions = sample_sessions();
+            v.connection.sessions[0].working = false;
             v.connection.sessions[0].subworkers = vec![multibot_proto::SubworkerInfo {
                 pid: 101,
                 label: "MBRU-117".into(),

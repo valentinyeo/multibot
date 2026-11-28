@@ -5493,18 +5493,19 @@ fn live_subworkers_expand_without_tools_and_stop_idle_animation(cx: &mut TestApp
                 ],
                 ..Default::default()
             });
-            assert!(v.is_active_chat_working());
+            assert!(!v.is_active_chat_working());
             cx.notify();
         });
         window.render_frame(cx);
         assert!(window.find("chat-live-activity").visible());
-        assert!(window.find("chat-busy-dots").visible());
+        assert!(window.try_find("chat-busy-dots").is_none());
+        assert!(window.try_find("stop-agent").is_none());
         assert!(window.find("chat-live-activity-chevron").visible());
         assert!(window.try_find("chat-live-subworkers").is_none());
         assert!(
             gpui_kit::base::test_support::texts(window)
                 .iter()
-                .any(|text| text.text() == "2 workers running")
+                .any(|text| text.text() == "Ready to chat · 2 workers running")
         );
         let row = window.find("chat-live-activity").bounds();
         window.click("chat-live-activity", cx);
@@ -5526,6 +5527,7 @@ fn live_subworkers_expand_without_tools_and_stop_idle_animation(cx: &mut TestApp
             );
         }
         view.update(cx, |v, cx| {
+            v.selection.selected_session.as_mut().unwrap().working = true;
             v.history.messages = vec![ChatMessage {
                 role: MessageRole::Assistant,
                 blocks: vec![activity_tool(
@@ -5542,7 +5544,7 @@ fn live_subworkers_expand_without_tools_and_stop_idle_animation(cx: &mut TestApp
         assert!(
             gpui_kit::base::test_support::texts(window)
                 .iter()
-                .any(|text| text.text() == "2 workers · Reading chat_view.rs")
+                .any(|text| text.text() == "Reading chat_view.rs · 2 workers")
         );
         assert!(window.find("tool-row-0-0").visible());
         assert!(
@@ -5550,6 +5552,7 @@ fn live_subworkers_expand_without_tools_and_stop_idle_animation(cx: &mut TestApp
                 <= window.find("tool-row-0-0").bounds().top()
         );
         view.update(cx, |v, cx| {
+            v.selection.selected_session.as_mut().unwrap().working = false;
             v.selection
                 .selected_session
                 .as_mut()
@@ -7076,6 +7079,121 @@ fn older_history_pill_loads_non_overflowing_chat_and_backfill_stays_at_bottom(
             rx.try_recv().is_err(),
             "enough visible messages stops backfill"
         );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn pending_delivery_shows_resend_until_server_echo(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let session = SessionSummary {
+                id: "delivery".into(),
+                agent: AgentKind::Antigravity,
+                ..Default::default()
+            };
+            v.connection.daemon_tx = Some(tx);
+            v.connection.sessions = vec![session.clone()];
+            v.selection.selected_session = Some(session.clone());
+            let host = v.active_session_host().to_string();
+            v.record_pending_sent_message(&host, &session, "local".into(), "hello".into());
+            cx.notify();
+        });
+        window.render_frame(cx);
+        let texts = gpui_kit::base::test_support::texts(window);
+        assert!(texts.iter().any(|t| t.text() == "Sending…"));
+        assert!(texts.iter().any(|t| t.text() == "Sending to agent…"));
+        view.update(cx, |v, cx| {
+            let key = v.session_key_for(v.selection.selected_session.as_ref().unwrap());
+            v.history.pending_sent_messages.get_mut(&key).unwrap()[0].sent_at_ms =
+                now_unix_ms() - 10_001;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        let texts = gpui_kit::base::test_support::texts(window);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.text() == "Not received yet · Resend")
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.text() == "Waiting for agent to receive…")
+        );
+        window.click("pending-delivery-0", cx);
+        window.render_frame(cx);
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "hello")
+        );
+        view.update(cx, |v, cx| {
+            let session = v.selection.selected_session.clone().unwrap();
+            let key = v.session_key_for(&session);
+            assert_eq!(v.history.pending_sent_messages[&key].len(), 1);
+            assert_eq!(v.history.messages.len(), 1);
+            v.handle_daemon_server_event(
+                multibot_proto::ServerEvent::HistoryAppend {
+                    session_id: session.id,
+                    messages: vec![ChatMessage {
+                        id: "echo".into(),
+                        role: MessageRole::User,
+                        text: "hello".into(),
+                        ..Default::default()
+                    }],
+                    latest_offset: None,
+                    working: Some(true),
+                    todos: vec![],
+                    probe_sha256: None,
+                },
+                cx,
+            );
+            assert!(v.history.pending_sent_messages.is_empty());
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("pending-delivery-0").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn parent_reply_remains_visible_alongside_one_worker(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.selection.selected_session = Some(SessionSummary {
+                id: "one-worker".into(),
+                subworkers: vec![multibot_proto::SubworkerInfo {
+                    pid: 101,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(
+            gpui_kit::base::test_support::texts(window)
+                .iter()
+                .any(|t| t.text() == "Ready to chat · 1 worker running")
+        );
+        assert!(window.try_find("chat-busy-dots").is_none());
+        assert!(window.try_find("stop-agent").is_none());
+        assert!(view.read(cx).chat_state.busy_timer.is_none());
+        view.update(cx, |v, cx| {
+            v.selection.selected_session.as_mut().unwrap().working = true;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(
+            gpui_kit::base::test_support::texts(window)
+                .iter()
+                .any(|t| t.text() == "Thinking · 1 worker")
+        );
+        assert!(window.find("chat-busy-dots").visible());
+        assert!(window.find("stop-agent").visible());
     })
     .unwrap();
 }

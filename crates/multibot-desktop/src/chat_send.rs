@@ -35,6 +35,46 @@ impl MultibotView {
         cx.notify();
     }
 
+    pub(crate) fn resend_pending_message(&mut self, msg_id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(session) = self.selection.selected_session.clone() else {
+            return false;
+        };
+        let key = self.session_key_for(&session);
+        let Some(pending) = self
+            .history
+            .pending_sent_messages
+            .get(&key)
+            .and_then(|pending| pending.iter().find(|p| p.message.id == msg_id))
+        else {
+            return false;
+        };
+        let text = pending.message.text.clone();
+        let Some(tx) = self.active_session_tx() else {
+            return false;
+        };
+        if tx
+            .send(ClientRequest::SendPrompt {
+                session_id: session.id.clone(),
+                agent: session.agent,
+                cwd: session.cwd.clone(),
+                text: text.clone(),
+                options: self.composer_options_for(&session),
+            })
+            .is_err()
+        {
+            return false;
+        }
+        if let Some(pending) = self.history.pending_sent_messages.get_mut(&key) {
+            pending.retain(|p| p.message.id != msg_id);
+        }
+        self.history.messages.retain(|m| m.id != msg_id);
+        let host = self.active_session_host().to_string();
+        self.record_pending_sent_message(&host, &session, msg_id.into(), text);
+        self.sync_busy_dots_timer(cx);
+        cx.notify();
+        true
+    }
+
     pub(crate) fn retry_failed_send(&mut self, msg_id: &str, cx: &mut Context<Self>) -> bool {
         let Some(failed) = self.chat_state.failed_sends.get(msg_id).cloned() else {
             return false;

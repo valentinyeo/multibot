@@ -1344,19 +1344,24 @@ async fn interrupted_process_closes_stdin_and_force_prompt_resumes_first() {
         mgr.interrupt_session("force-resume".into(), agent).await;
         assert!(!mgr.session_accepts_live_stdin("force-resume"));
         assert_eq!(stdin_rx.recv().await, None, "interrupted stdin must close");
-        assert_eq!(
-            mgr.send_prompt(
+        let result = mgr
+            .send_prompt(
                 "force-resume",
                 agent,
                 home.to_str(),
                 "force this first",
-                None
+                None,
             )
             .await
-            .unwrap(),
-            "queued behind active turn"
-        );
-        {
+            .unwrap();
+        if agent == AgentKind::Antigravity {
+            assert!(result.starts_with("dispatched agy"));
+            assert_eq!(mgr.state.lock().unwrap().queues["force-resume"].len(), 1);
+            assert!(!mgr.state.lock().unwrap().active["force-resume"].interrupted);
+            mgr.on_process_exit("force-resume", pid);
+            assert_ne!(mgr.state.lock().unwrap().active["force-resume"].pid, pid);
+        } else {
+            assert_eq!(result, "queued behind active turn");
             let mut state = mgr.state.lock().unwrap();
             assert_eq!(state.queues["force-resume"][0].text, "force this first");
             assert_eq!(state.queues["force-resume"][1].text, "older queued prompt");
@@ -1364,8 +1369,10 @@ async fn interrupted_process_closes_stdin_and_force_prompt_resumes_first() {
             // Even a late turn-end must not permit queue draining before exit.
             state.active.get_mut("force-resume").unwrap().busy = false;
         }
-        mgr.drain_next_queued("force-resume");
-        assert_eq!(mgr.state.lock().unwrap().queues["force-resume"].len(), 2);
+        if agent != AgentKind::Antigravity {
+            mgr.drain_next_queued("force-resume");
+            assert_eq!(mgr.state.lock().unwrap().queues["force-resume"].len(), 2);
+        }
         tokio::time::timeout(Duration::from_secs(2), child.wait())
             .await
             .unwrap()
@@ -2162,4 +2169,71 @@ async fn steer_session_on_busy_claude_still_queues() {
         other => panic!("expected queued, got {other:?}"),
     }
     let _ = fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn agy_broken_stdin_reports_delivery_failure_and_evicts_stale_process() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = temp_home("agy-broken-stdin");
+    let bin = home.join("agy-close-stdin");
+    let ready = home.join("stdin-closed");
+    fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\nIFS= read -r line\nexec 0<&-\ntouch '{}'\nexec sleep 30\n",
+            ready.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mgr = ProcessManager::new(home.clone(), tx);
+    mgr.set_test_bin_override(Some(bin));
+    mgr.send_prompt("broken", AgentKind::Antigravity, None, "first", None)
+        .await
+        .unwrap();
+    let pid = mgr.state.lock().unwrap().active["broken"].pid;
+    // Wait until the child has closed the pipe, without relying on process scheduling.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !ready.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    mgr.send_prompt(
+        "broken",
+        AgentKind::Antigravity,
+        None,
+        "must report failure",
+        None,
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(ServerEvent::PromptStatus { status, detail, .. }) = rx.recv().await {
+                assert_eq!(status, "failed");
+                assert_eq!(detail, "Antigravity stdin closed before delivery");
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!mgr.state.lock().unwrap().active.contains_key("broken"));
+    assert!(matches!(
+        rx.recv().await,
+        Some(ServerEvent::HistoryAppend {
+            working: Some(false),
+            ..
+        })
+    ));
+    Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status()
+        .await
+        .unwrap();
+    fs::remove_dir_all(home).unwrap();
 }

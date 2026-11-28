@@ -388,7 +388,6 @@ pub(crate) fn populate_from_snapshot(
         session
             .subworkers
             .sort_by_key(|info| (info.started_at_ms, info.pid));
-        session.working |= !session.subworkers.is_empty();
     }
 }
 
@@ -482,6 +481,28 @@ mod tests {
     }
 
     #[test]
+    fn worker_discovery_preserves_parent_turn_state() {
+        let snapshot = parallel_workers("hax --provider=codex");
+        for working in [false, true] {
+            let mut sessions = vec![SessionSummary {
+                id: "native-owner".into(),
+                agent: AgentKind::Antigravity,
+                working,
+                ..Default::default()
+            }];
+            populate_from_snapshot(
+                &mut sessions,
+                &MetadataStore::default(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &snapshot,
+            );
+            assert_eq!(sessions[0].subworkers.len(), 2);
+            assert_eq!(sessions[0].working, working);
+        }
+    }
+
+    #[test]
     fn postbox_conversation_workers_survive_newer_active_sibling() {
         let native = "de860fa4-e66e-4380-910d-baae1dec5b07";
         let command = format!(
@@ -532,7 +553,7 @@ mod tests {
                 &HashMap::new(),
                 &snapshot,
             );
-            assert!(sessions[0].working);
+            assert!(!sessions[0].working);
             assert_eq!(
                 sessions[0]
                     .subworkers
@@ -643,7 +664,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
         );
-        assert!(session.working);
+        assert!(!session.working);
         assert_eq!(
             session.subworkers,
             vec![
@@ -764,7 +785,7 @@ mod tests {
             HashMap::from([("term-56d16ef5".into(), vec![9])]),
         );
         assert_eq!(session.subworkers.len(), 2);
-        assert!(session.working);
+        assert!(!session.working);
     }
 
     #[test]
@@ -913,7 +934,7 @@ mod tests {
                 started_at_ms: Some(12000),
             }]
         );
-        assert!(session.working);
+        assert!(!session.working);
     }
 
     #[test]

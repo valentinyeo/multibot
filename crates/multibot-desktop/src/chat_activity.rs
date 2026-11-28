@@ -162,13 +162,23 @@ pub(crate) fn tool_activity_label(name: &str, summary: &str, detail: &str) -> St
 
 impl MultibotView {
     pub(crate) fn is_active_chat_working(&self) -> bool {
+        self.is_active_chat_replying()
+    }
+
+    pub(crate) fn has_active_subworkers(&self) -> bool {
+        self.selection
+            .selected_session
+            .as_ref()
+            .is_some_and(|s| !s.subworkers.is_empty())
+    }
+
+    pub(crate) fn is_active_chat_replying(&self) -> bool {
         self.selection
             .selected_session
             .as_ref()
             .is_some_and(|session| {
                 let key = self.session_key_for(session);
                 session.working
-                    || !session.subworkers.is_empty()
                     || self.chat_state.awaiting_reply_sessions.contains_key(&key)
                     || self
                         .history
