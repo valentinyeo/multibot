@@ -214,6 +214,8 @@ pub(crate) struct ChatViewState {
     pub busy_tick_phase: u8,
     pub failed_sends: HashMap<String, FailedSend>,
     pub expanded_tools: HashSet<String>,
+    pub show_all_tools: HashSet<String>,
+    pub tool_cluster_overrides: HashMap<(String, String), bool>,
     pub expanded_diffs: HashSet<String>,
     pub todo_drawer_open: HashMap<String, bool>,
     pub session_todos: HashMap<String, Vec<TodoItem>>,
@@ -254,6 +256,8 @@ impl Default for ChatViewState {
             busy_tick_phase: 0,
             failed_sends: HashMap::new(),
             expanded_tools: HashSet::new(),
+            show_all_tools: HashSet::new(),
+            tool_cluster_overrides: HashMap::new(),
             expanded_diffs: HashSet::new(),
             todo_drawer_open: HashMap::new(),
             session_todos: HashMap::new(),
@@ -742,6 +746,10 @@ pub(crate) fn is_copy_latest_code_block_chord(keystroke: &Keystroke) -> bool {
 // ============================================================================
 // 2. Collapsible Tool Steps, Inline Unified Diff & Todos
 // ============================================================================
+
+fn tool_cluster_key(msg: &ChatMessage, msg_idx: usize) -> String {
+    if msg.id.is_empty() { format!("message-{msg_idx}") } else { msg.id.clone() }
+}
 
 fn tool_step_key(msg: &ChatMessage, msg_idx: usize, block_idx: usize, call_id: &str) -> String {
     if !call_id.is_empty() {
@@ -1982,26 +1990,90 @@ impl MultibotView {
         open
     }
 
-    /// Toggles all tool steps open or folded (`Ctrl+K` action, wired in M6).
-    #[allow(dead_code)]
+    fn tool_chat_key(&self) -> String {
+        self.selected_session
+            .as_ref()
+            .map(|session| self.session_key_for(session))
+            .unwrap_or_else(|| "__default__".into())
+    }
+
+    fn tool_cluster_open(&self, msg: &ChatMessage, msg_idx: usize) -> bool {
+        let chat = self.tool_chat_key();
+        let message = tool_cluster_key(msg, msg_idx);
+        self.chat_state
+            .tool_cluster_overrides
+            .get(&(chat.clone(), message))
+            .copied()
+            .unwrap_or_else(|| self.chat_state.show_all_tools.contains(&chat))
+    }
+
     pub(crate) fn toggle_all_tool_steps(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.chat_state.expanded_tools.is_empty() {
-            self.chat_state.expanded_tools.clear();
-            cx.notify();
-            return false;
+        let chat = self.tool_chat_key();
+        let show = !self.chat_state.show_all_tools.contains(&chat)
+            && !self.messages.iter().enumerate().any(|(i, msg)| {
+                msg.blocks.iter().any(|b| matches!(b, MessageBlock::ToolUse { .. }))
+                    && self.tool_cluster_open(msg, i)
+            });
+        self.chat_state.tool_cluster_overrides.retain(|(key, _), _| key != &chat);
+        if show {
+            self.chat_state.show_all_tools.insert(chat);
+        } else {
+            self.chat_state.show_all_tools.remove(&chat);
         }
         for (msg_idx, msg) in self.messages.iter().enumerate() {
             for (block_idx, block) in msg.blocks.iter().enumerate() {
                 if let MessageBlock::ToolUse { call_id, .. } = block {
-                    self.chat_state
-                        .expanded_tools
-                        .insert(tool_step_key(msg, msg_idx, block_idx, call_id));
+                    let key = format!("{}:{}", self.tool_chat_key(), tool_step_key(msg, msg_idx, block_idx, call_id));
+                    if show {
+                        self.chat_state.expanded_tools.insert(key);
+                    } else {
+                        self.chat_state.expanded_tools.remove(&key);
+                    }
                 }
             }
         }
-        let any = !self.chat_state.expanded_tools.is_empty();
         cx.notify();
-        any
+        show
+    }
+
+    fn render_tool_cluster(
+        &self,
+        msg: &ChatMessage,
+        msg_idx: usize,
+        count: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let expanded = self.tool_cluster_open(msg, msg_idx);
+        let key = (self.tool_chat_key(), tool_cluster_key(msg, msg_idx));
+        let label = format!("{count} tool call{}", if count == 1 { "" } else { "s" });
+        h_flex()
+            .id(SharedString::from(format!("tool-cluster-{msg_idx}")))
+            .role(Role::Button)
+            .aria_label(label.clone())
+            .aria_expanded(expanded)
+            .test_support()
+            .gap_1p5()
+            .items_center()
+            .self_start()
+            .px_2()
+            .py_1()
+            .rounded(RADIUS_CHIP)
+            .bg(rgb(0x161616))
+            .border_1()
+            .border_color(rgb(0x2A2A2A))
+            .text_xs()
+            .text_color(theme::text_muted())
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::bg_hover()))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.chat_state.tool_cluster_overrides.insert(key.clone(), !expanded);
+                cx.notify();
+            }))
+            .child(lucide_icon(if expanded { icons::CHEVRON_DOWN } else { icons::CHEVRON_RIGHT }, 12.0))
+            .child(label)
+            .into_any_element()
     }
 
     pub(crate) fn copy_latest_code_block(&mut self, cx: &mut Context<Self>) -> bool {
@@ -3393,6 +3465,15 @@ impl MultibotView {
             .collect();
 
         let md_view = TextView::markdown(id.clone(), text)
+            .link(|link, _| crate::external_url::is_http_url(&link.url).then(|| link.clone()))
+            .on_link_click(|url, event, _, cx| {
+                cx.stop_propagation();
+                if !event.is_right_click() && !event.is_middle_click() {
+                    if let Err(error) = crate::external_url::open_external_url(url) {
+                        eprintln!("Could not open chat link: {error}");
+                    }
+                }
+            })
             .selectable(true)
             .text_size(px(font_pt))
             .code_block_actions(move |block: &CodeBlock, _window, _cx| {
@@ -3473,7 +3554,7 @@ impl MultibotView {
         output: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let key = tool_step_key(msg, msg_idx, block_idx, call_id);
+        let key = format!("{}:{}", self.tool_chat_key(), tool_step_key(msg, msg_idx, block_idx, call_id));
         let is_expanded = self.chat_state.expanded_tools.contains(&key);
         let diff_expanded = self.chat_state.expanded_diffs.contains(&key);
         let dot_color = match status {
@@ -4465,6 +4546,8 @@ impl MultibotView {
                 if !msg.blocks.is_empty() {
                     let mut saw_primary_active_prompt = false;
                     let mut stripped_quote_prefix = false;
+                    let tool_count = msg.blocks.iter().filter(|b| matches!(b, MessageBlock::ToolUse { .. })).count();
+                    let mut tool_cluster_rendered = false;
                     for (block_idx, block) in msg.blocks.iter().enumerate() {
                         match block {
                             MessageBlock::Text { text } => {
@@ -4487,7 +4570,16 @@ impl MultibotView {
                                                 .test_support()
                                                 .text_size(px(self.effective_font_size_pt() as f32))
                                                 .text_color(theme::text_primary())
-                                                .child(display_text),
+                                                .child(if crate::external_url::url_ranges(&display_text).is_empty() {
+                                                    display_text.into_any_element()
+                                                } else {
+                                                    self.render_markdown_with_actions(
+                                                        SharedString::from(format!("msg-user-md-{orig_idx}-{block_idx}")),
+                                                        display_text,
+                                                        orig_idx,
+                                                        cx,
+                                                    )
+                                                }),
                                         );
                                     } else {
                                         body_col = body_col.child(self.render_markdown_with_actions(
@@ -4510,6 +4602,13 @@ impl MultibotView {
                                 diff,
                                 output,
                             } => {
+                                if !tool_cluster_rendered {
+                                    body_col = body_col.child(self.render_tool_cluster(msg, orig_idx, tool_count, cx));
+                                    tool_cluster_rendered = true;
+                                }
+                                if !self.tool_cluster_open(msg, orig_idx) {
+                                    continue;
+                                }
                                 body_col = body_col.child(self.render_tool_step_block(
                                     msg,
                                     orig_idx,
@@ -4579,7 +4678,16 @@ impl MultibotView {
                             div()
                                 .text_size(px(self.effective_font_size_pt() as f32))
                                 .text_color(theme::text_primary())
-                                .child(display_text),
+                                .child(if crate::external_url::url_ranges(&display_text).is_empty() {
+                                    display_text.into_any_element()
+                                } else {
+                                    self.render_markdown_with_actions(
+                                        SharedString::from(format!("msg-user-md-{orig_idx}")),
+                                        display_text,
+                                        orig_idx,
+                                        cx,
+                                    )
+                                }),
                         );
                     } else {
                         body_col = body_col.child(self.render_markdown_with_actions(
@@ -6546,6 +6654,105 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn tool_clusters_default_closed_click_and_ctrl_k_toggle_current_chat(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_chat_window(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.selected_session = Some(SessionSummary { id: "cluster-chat".into(), agent: AgentKind::Claude, ..Default::default() });
+                let tool = |id: &str| MessageBlock::ToolUse {
+                    call_id: id.into(), name: "exec".into(), summary: "Run command".into(),
+                    detail: "secret tool details".into(), status: ToolStatus::Completed, diff: None, output: None,
+                };
+                v.messages = vec![ChatMessage {
+                    id: "cluster-message".into(), role: MessageRole::Assistant,
+                    blocks: vec![tool("c1"), tool("c2"), MessageBlock::Text { text: "Answer stays visible".into() }, tool("c3")],
+                    ..Default::default()
+                }];
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert_eq!(window.find_all("tool-cluster-0").len(), 1);
+            assert_eq!(window.find("tool-cluster-0").label(), Some("3 tool calls"));
+            assert_eq!(window.find("tool-cluster-0").expanded(), Some(false));
+            assert!(window.try_find("tool-row-0-0").is_none());
+            window.click("tool-cluster-0", cx);
+            window.render_frame(cx);
+            for id in ["tool-row-0-0", "tool-row-0-1", "tool-row-0-3"] {
+                assert!(window.try_find(id).is_some());
+            }
+            window.click("tool-cluster-0", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("tool-row-0-0").is_none());
+
+            for show in [true, false] {
+                window.press("ctrl-k", cx);
+                window.render_frame(cx);
+                assert_eq!(view.read(cx).active_modal, ActiveModal::Palette);
+                view.update(cx, |v, cx| {
+                    v.palette_input.update(cx, |input, cx| input.set_value("tool call details", window, cx));
+                });
+                window.render_frame(cx);
+                window.press("enter", cx);
+                window.render_frame(cx);
+                assert_eq!(view.read(cx).active_modal, ActiveModal::None);
+                assert_eq!(window.try_find("tool-row-0-0").is_some(), show);
+                view.update(cx, |v, _| {
+                    assert_eq!(v.tool_cluster_open(&v.messages[0], 0), show);
+                    assert_eq!(v.chat_state.expanded_tools.len(), if show { 3 } else { 0 });
+                });
+            }
+            view.update(cx, |v, cx| { assert!(v.toggle_all_tool_steps(cx)); });
+            view.update(cx, |v, cx| {
+                v.selected_session.as_mut().unwrap().id = "other-chat".into();
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("tool-row-0-0").is_none(), "same message/call IDs in another chat stay hidden");
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn chat_urls_open_on_regular_click_and_reject_unsafe_schemes(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_chat_window(cx);
+        cx.update_window(handle, |_, window, cx| {
+            crate::external_url::take_opened_urls();
+            for role in [MessageRole::Assistant, MessageRole::User] {
+                for with_blocks in [false, true] {
+                    for (text, expected) in [
+                        ("[Browser](https://example.com/a?x=1&y=2)", Some("https://example.com/a?x=1&y=2")),
+                        ("https://example.com/a_(b)).,;", Some("https://example.com/a_(b)")),
+                        ("http://example.com/path.", Some("http://example.com/path")),
+                        ("[Unsafe](javascript:alert%281%29)", None),
+                        ("[Local](file:///etc/passwd)", None),
+                    ] {
+                        view.update(cx, |v, cx| {
+                            v.messages = vec![ChatMessage {
+                                id: format!("url-{role:?}-{with_blocks}-{text}"), role, text: text.into(),
+                                blocks: if with_blocks { vec![MessageBlock::Text { text: text.into() }] } else { vec![] },
+                                ..Default::default()
+                            }];
+                            cx.notify();
+                        });
+                        window.render_frame(cx);
+                        if expected.is_some() {
+                            window.click_with_options("msg-bubble-0", gpui_kit::test::ClickOptions::new()
+                                .with_offset(gpui_kit::point(px(24.0), px(20.0)))
+                                .with_button(MouseButton::Right), cx);
+                            assert!(crate::external_url::take_opened_urls().is_empty());
+                            let bounds = window.find("msg-bubble-0").bounds();
+                            let from = bounds.origin + gpui_kit::point(px(24.0), px(20.0));
+                            window.drag(from, from + gpui_kit::point(px(30.0), px(0.0)), cx);
+                            assert!(crate::external_url::take_opened_urls().is_empty(), "dragging selects without opening");
+                        }
+                        window.click_at("msg-bubble-0", gpui_kit::point(px(24.0), px(20.0)), cx);
+                        assert_eq!(crate::external_url::take_opened_urls(), expected.into_iter().collect::<Vec<_>>(), "{role:?}, blocks={with_blocks}, {text}");
+                    }
+                }
+            }
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
     fn renders_rich_chat_blocks_and_toggles_tools_diff_and_todo_drawer(cx: &mut TestAppContext) {
         let (handle, view) = open_test_chat_window(cx);
         cx.update_window(handle, |_, window, cx| {
@@ -6634,6 +6841,12 @@ mod tests {
             window.click("chat-todo-pill", cx);
             window.render_frame(cx);
             assert!(window.try_find("chat-todo-drawer").is_some());
+
+            assert!(window.try_find("tool-cluster-0").is_some());
+            assert!(window.try_find("tool-row-0-1").is_none());
+            window.click("tool-cluster-0", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("tool-row-0-1").is_some());
 
             // Expand tool row -> diff toggle appears -> expand diff
             window.click("tool-row-0-1", cx);

@@ -129,7 +129,7 @@ fn run_job(job: AccountJob, local_key: &str) -> JobResult {
     }
     let result = (|| -> anyhow::Result<(Option<String>, String)> {
         if matches!(job, AccountJob::SignIn) {
-            client.sign_in(open_browser)?;
+            client.sign_in(crate::external_url::open_external_url)?;
         }
         if client.session.is_none() {
             anyhow::bail!("Sign in to your Multibot account first.");
@@ -167,55 +167,4 @@ fn run_job(job: AccountJob, local_key: &str) -> JobResult {
         Ok((key, status)) => Ok((email, key, status)),
         Err(error) => Err((email, error.to_string())),
     }
-}
-
-#[cfg(target_os = "windows")]
-fn open_browser(url: &str) -> anyhow::Result<()> {
-    use std::ffi::c_void;
-    #[link(name = "shell32")]
-    unsafe extern "system" {
-        fn ShellExecuteW(
-            window: *mut c_void,
-            operation: *const u16,
-            file: *const u16,
-            parameters: *const u16,
-            directory: *const u16,
-            show: i32,
-        ) -> *mut c_void;
-    }
-    let operation: Vec<u16> = "open\0".encode_utf16().collect();
-    let url: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            operation.as_ptr(),
-            url.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1,
-        )
-    };
-    if result as usize <= 32 {
-        anyhow::bail!("Could not open your browser. Try sign-in again.");
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn open_browser(url: &str) -> anyhow::Result<()> {
-    let program = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    let status = std::process::Command::new(program)
-        .arg(url)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|_| anyhow::anyhow!("Could not open your browser. Try sign-in again."))?;
-    if !status.success() {
-        anyhow::bail!("Could not open your browser. Try sign-in again.");
-    }
-    Ok(())
 }

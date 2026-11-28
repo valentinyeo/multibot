@@ -10,6 +10,12 @@ updated: 2026-10-03
 
 # Keyboard shortcuts
 
+## Multibot chat tools and links
+
+- Click the tool-call chip to reveal or hide a message's tool rows.
+- Ctrl+K → Chat: Show / hide tool call details expands or collapses details in the current chat. Ctrl+K still opens the command palette.
+- Click a chat link to open it in your default browser. In the terminal pane or a Windows shell session, use Ctrl+click. Only HTTP and HTTPS links open.
+
 ## Multibot workspace switcher
 
 | Shortcut | Action |

@@ -8,6 +8,7 @@ mod app;
 mod browser_pane;
 mod chat_view;
 mod computer_view;
+mod external_url;
 mod icons;
 mod inbox;
 mod palette;

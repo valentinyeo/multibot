@@ -15,6 +15,28 @@ use std::collections::HashMap;
 
 pub const SHELL_HEADER_HEIGHT: f32 = 44.0;
 
+#[cfg(any(windows, test))]
+fn console_url_at_cell(cells: &[u16], cols: usize, row: usize, col: usize) -> Option<String> {
+    if cols == 0 || col >= cols || row.checked_mul(cols)?.checked_add(col)? >= cells.len() {
+        return None;
+    }
+    let mut first = row;
+    while first > 0 && cells[first * cols - 1] > b' ' as u16 {
+        first -= 1;
+    }
+    let mut last = row;
+    while (last + 1) * cols < cells.len() && cells[(last + 1) * cols - 1] > b' ' as u16 {
+        last += 1;
+    }
+    let start = first * cols;
+    let clicked = row * cols + col;
+    let end = ((last + 1) * cols).min(cells.len());
+    let text = String::from_utf16_lossy(&cells[start..end]);
+    let byte = String::from_utf16_lossy(&cells[start..clicked]).len();
+    crate::external_url::url_at_byte(&text, byte).map(str::to_string)
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellLaunchSpec {
     pub program: String,
@@ -593,6 +615,27 @@ mod native;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_url_hit_test_uses_utf16_cells_and_wrapped_rows() {
+        let cols = 20;
+        let mut cells: Vec<u16> = "é https://example.com/abc_(def)).,;".encode_utf16().collect();
+        cells.resize(cols * 2, b' ' as u16);
+        for (row, col) in [(0, 6), (1, 2)] {
+            let url = console_url_at_cell(&cells, cols, row, col).unwrap();
+            assert_eq!(url, "https://example.com/abc_(def)");
+            crate::external_url::take_opened_urls();
+            crate::external_url::open_external_url(&url).unwrap();
+            assert_eq!(crate::external_url::take_opened_urls(), [url]);
+        }
+        for (row, col) in [(0, 0), (1, 19), (2, 0), (0, 20)] {
+            assert_eq!(console_url_at_cell(&cells, cols, row, col), None);
+        }
+        assert_eq!(console_url_at_cell(&[], 0, 0, 0), None);
+        let unsafe_url: Vec<_> = "file:///etc/passwd".encode_utf16().collect();
+        assert_eq!(console_url_at_cell(&unsafe_url, unsafe_url.len(), 0, 4), None);
+    }
+
     #[test]
     fn launch_is_exact_quoted_and_uses_host_identity() {
         let host = SshHostConfig {

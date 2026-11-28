@@ -8447,7 +8447,7 @@ mod tests {
                     cx,
                 );
                 v.execute_palette_row(
-                    mk_cmd("pal-cmd-toggle-tools", "Open / Fold All Tool Steps", ""),
+                    mk_cmd("pal-cmd-toggle-tools", "Chat: Show / hide tool call details", ""),
                     now,
                     Some(window),
                     cx,

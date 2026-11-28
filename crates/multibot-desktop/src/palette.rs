@@ -734,7 +734,7 @@ impl MultibotView {
             },
             PaletteCommandSpec {
                 id: "pal-cmd-toggle-tools".into(),
-                label: "Open / Fold All Tool Steps".into(),
+                label: "Chat: Show / hide tool call details".into(),
                 chord: String::new(),
                 category: PaletteCategory::ChatView,
                 destructive: false,
