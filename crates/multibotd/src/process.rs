@@ -26,6 +26,94 @@ use tokio::sync::mpsc;
 pub const MAX_QUEUED_PROMPTS_PER_SESSION: usize = 20;
 pub const MAX_SESSION_TITLE_CHARS: usize = 63;
 
+fn validate_client_tty(tty: &str) -> Result<&str> {
+    let tty = tty.trim();
+    if !tty.starts_with("/dev/")
+        || tty.len() > 1024
+        || tty.chars().any(|c| c.is_control() || c.is_whitespace())
+        || Path::new(tty)
+            .components()
+            .skip(1)
+            .any(|c| !matches!(c, Component::Normal(_)))
+    {
+        return Err(anyhow!("Invalid shell client TTY"));
+    }
+    Ok(tty)
+}
+
+async fn switch_shell_client_at(
+    home: &Path,
+    client_id: &str,
+    session_id: &str,
+    socket: Option<&str>,
+) -> Result<()> {
+    if !multibot_proto::valid_shell_client_id(client_id) {
+        return Err(anyhow!("Invalid shell client ID"));
+    }
+    if !multibot_proto::valid_shell_session_id(session_id) {
+        return Err(anyhow!("Invalid tmux session ID"));
+    }
+    let registration = home
+        .join(".multibot/clients")
+        .join(format!("{client_id}.tty"));
+    // A console HWND can appear before SSH has registered and attached its remote TTY.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let result = async {
+            let content = tokio::fs::read_to_string(&registration).await?;
+            if content.trim().is_empty() {
+                return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock).into());
+            }
+            let tty = validate_client_tty(&content)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileTypeExt;
+                if !tokio::fs::metadata(tty).await?.file_type().is_char_device() {
+                    return Err(anyhow!("Shell client TTY is not a device"));
+                }
+            }
+            let mut command = Command::new("tmux");
+            if let Some(socket) = socket {
+                command.args(["-S", socket]);
+            }
+            let output = command
+                .env_remove("TMUX")
+                .args(["switch-client", "-c", tty, "-t", &format!("={session_id}")])
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output()
+                .await?;
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "tmux switch-client: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            Ok(())
+        };
+        let result = tokio::time::timeout_at(deadline, result)
+            .await
+            .unwrap_or_else(|_| Err(anyhow!("Timed out switching shell client")));
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let waiting_for_attach = error.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                    matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::WouldBlock
+                    )
+                }) || error.to_string().contains("can't find client");
+                if waiting_for_attach && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                let _ = tokio::fs::remove_file(&registration).await;
+                return Err(error);
+            }
+        }
+    }
+}
+
 struct ActiveProcess {
     pid: u32,
     cwd: Option<String>,
@@ -1330,6 +1418,25 @@ impl ProcessManager {
         let _ = self.out_tx.send(ServerEvent::SessionUpdated { session });
     }
 
+    pub async fn switch_shell_client(&self, client_id: String, session_id: String) {
+        let socket = std::env::var("TMUX").ok().and_then(|value| {
+            value
+                .split(',')
+                .next()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        });
+        if let Err(error) =
+            switch_shell_client_at(&self.home, &client_id, &session_id, socket.as_deref()).await
+        {
+            let _ = self.out_tx.send(ServerEvent::Error {
+                code: "switch_shell_client_failed".into(),
+                // Correlate failures without changing the existing Error wire shape.
+                message: format!("{client_id}: {error}"),
+            });
+        }
+    }
+
     pub async fn archive_session(
         &self,
         session_id: String,
@@ -2129,6 +2236,176 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn shell_client_ids_and_ttys_reject_traversal_and_controls() {
+        for id in [
+            "",
+            "../",
+            "/",
+            "a..b",
+            "a/b",
+            "a\\b",
+            "a\n",
+            "$(evil)",
+            &"a".repeat(65),
+        ] {
+            assert!(!multibot_proto::valid_shell_client_id(id), "{id:?}");
+        }
+        assert!(multibot_proto::valid_shell_client_id("MB_client-123"));
+        for tty in [
+            "",
+            "/tmp/pts/1",
+            "/dev/../etc/passwd",
+            "/dev/pts/1\n/dev/pts/2",
+            "/dev/a b",
+        ] {
+            assert!(validate_client_tty(tty).is_err(), "{tty:?}");
+        }
+        assert_eq!(validate_client_tty("/dev/pts/12\n").unwrap(), "/dev/pts/12");
+    }
+
+    #[tokio::test]
+    async fn shell_client_invalid_requests_emit_correlated_errors() {
+        let home = temp_home("switch-invalid");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let manager = ProcessManager::new(home.clone(), tx);
+        for (client, session) in [
+            ("../", "ok"),
+            ("", "ok"),
+            ("/", "ok"),
+            ("client", "bad\nname"),
+        ] {
+            manager
+                .switch_shell_client(client.into(), session.into())
+                .await;
+            assert!(
+                matches!(rx.recv().await, Some(ServerEvent::Error { code, message })
+                if code == "switch_shell_client_failed" && message.starts_with(&format!("{client}:")))
+            );
+        }
+        let dir = home.join(".multibot/clients");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("client.tty"), "/tmp/not-a-tty\n").unwrap();
+        manager
+            .switch_shell_client("client".into(), "ok".into())
+            .await;
+        assert!(
+            matches!(rx.recv().await, Some(ServerEvent::Error { code, .. }) if code == "switch_shell_client_failed")
+        );
+        assert!(!dir.join("client.tty").exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_client_switches_a_real_tmux_client_in_place() {
+        if std::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let home = temp_home("switch-real");
+        let socket = home.join("tmux.sock");
+        let socket = socket.to_str().unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("tmux")
+                    .env_remove("TMUX")
+                    .args([
+                        "-S",
+                        self.0.join("tmux.sock").to_str().unwrap(),
+                        "kill-server",
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(home.clone());
+        for name in ["a", "b"] {
+            assert!(
+                Command::new("tmux")
+                    .env_remove("TMUX")
+                    .args([
+                        "-S",
+                        socket,
+                        "-f",
+                        "/dev/null",
+                        "new-session",
+                        "-d",
+                        "-s",
+                        name
+                    ])
+                    .status()
+                    .await
+                    .unwrap()
+                    .success()
+            );
+        }
+        let registration = home.join(".multibot/clients/client.tty");
+        fs::create_dir_all(registration.parent().unwrap()).unwrap();
+        fs::write(&registration, "").unwrap();
+        let mut client = Command::new("script")
+            .env_remove("TMUX")
+            .env("TERM", "xterm")
+            .args([
+                "-q",
+                "-c",
+                &format!(
+                    "sleep 0.1; tty > '{}' && exec tmux -S '{socket}' attach-session -t '=a'",
+                    registration.display()
+                ),
+                "/dev/null",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let clients = || async {
+            let output = Command::new("tmux")
+                .env_remove("TMUX")
+                .args([
+                    "-S",
+                    socket,
+                    "list-clients",
+                    "-F",
+                    "#{client_pid} #{session_name}",
+                ])
+                .output()
+                .await
+                .unwrap();
+            String::from_utf8(output.stdout).unwrap()
+        };
+        switch_shell_client_at(&home, "client", "b", Some(socket))
+            .await
+            .unwrap();
+        let initial = clients().await;
+        assert_eq!(initial.lines().count(), 1);
+        assert!(initial.trim().ends_with(" b"));
+        switch_shell_client_at(&home, "client", "a", Some(socket))
+            .await
+            .unwrap();
+        assert_eq!(clients().await, initial.replace(" b\n", " a\n"));
+        switch_shell_client_at(&home, "client", "b", Some(socket))
+            .await
+            .unwrap();
+        assert_eq!(clients().await, initial);
+        assert!(
+            switch_shell_client_at(&home, "client", "does-not-exist", Some(socket))
+                .await
+                .is_err()
+        );
+        assert!(!registration.exists());
+        client.kill().await.unwrap();
+        client.wait().await.unwrap();
+    }
 
     fn temp_home(tag: &str) -> PathBuf {
         let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);

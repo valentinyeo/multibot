@@ -3774,6 +3774,11 @@ impl MultibotView {
                     {
                         self.record_send_failure(msg_id, text, message.clone(), cx);
                     }
+                    if code == "switch_shell_client_failed" {
+                        self.shell_host.switch_failed(message);
+                        cx.notify();
+                        return;
+                    }
                     if code == "switch_harness_failed" {
                         self.chat_state.pending_harness_switch = None;
                     }
@@ -4181,6 +4186,14 @@ impl MultibotView {
     ) {
         self.sync_from_shared_store(cx);
         self.handle_outbox_event(host_label, &event);
+        if let ServerEvent::Error { code, message } = &event
+            && code == "switch_shell_client_failed"
+        {
+            if self.shell_host.switch_failed(message) {
+                cx.notify();
+            }
+            return;
+        }
         let matches_active_host = self
             .selected_session_host
             .as_deref()
@@ -4509,11 +4522,8 @@ impl MultibotView {
         self.chat_state.prepend_scroll_anchor = None;
         self.chat_state.newest_chord.reset();
         if session.agent == AgentKind::Shell && !session.archived {
-            self.shell_host.prepare_selection(&canonical_session_key(
-                &host,
-                session.agent,
-                &session.id,
-            ));
+            self.shell_host.prepare_selection(&host);
+            self.select_embedded_shell(&host, &session.id);
         }
         self.chat_state.composer_menu_open = false;
         // Reset per-session transient Chat View overlays, active inline rename & stale pagination
@@ -5508,9 +5518,9 @@ impl MultibotView {
                     .update(cx, |state, cx| state.focus(window, cx));
             } else if let Some(session) = &self.selected_session {
                 if session.agent == AgentKind::Shell {
-                    let key = self.session_key_for(session);
+                    let host = self.active_session_host().to_string();
                     self.focus_chat_panel(window, cx);
-                    self.shell_host.focus_session(&key);
+                    self.shell_host.focus_session(&host);
                 } else {
                     self.shell_host.focus_parent();
                     self.prompt_input
@@ -6527,7 +6537,7 @@ impl Render for MultibotView {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::slash_picker::TriggerMode;
     use gpui_kit::{TestAppContext, test::TestWindowExt};
@@ -6539,7 +6549,7 @@ mod tests {
 
     static APP_TEST_SEQ: AtomicU64 = AtomicU64::new(1);
 
-    fn open_test_view_with_entity(
+    pub(crate) fn open_test_view_with_entity(
         cx: &mut TestAppContext,
     ) -> (gpui_kit::AnyWindowHandle, Entity<MultibotView>) {
         open_test_view_with_settings(cx, MultibotSettings::default(), WindowOptions::default())

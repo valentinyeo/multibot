@@ -25,6 +25,27 @@ impl Drop for Job {
         }
     }
 }
+#[derive(Default)]
+pub(super) struct SpawnState {
+    cancelled: bool,
+    process: Option<Arc<Process>>,
+}
+
+#[derive(Default)]
+pub(super) struct SpawnControl(pub(super) Arc<Mutex<SpawnState>>);
+
+impl Drop for SpawnControl {
+    fn drop(&mut self) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.cancelled = true;
+        if let Some(process) = &state.process {
+            unsafe {
+                TerminateProcess(process.0 as HANDLE, 0);
+            }
+        }
+    }
+}
+
 pub(super) struct Process(usize);
 impl Process {
     pub(super) fn wait(&self) {
@@ -743,6 +764,7 @@ pub(super) fn spawn(
     spec: ShellLaunchSpec,
     job: Arc<Job>,
     parent: usize,
+    control: Arc<Mutex<SpawnState>>,
 ) -> Result<EmbeddedShellHandle> {
     let command = std::iter::once(spec.program.as_str())
         .chain(spec.args.iter().map(String::as_str))
@@ -756,6 +778,10 @@ pub(super) fn spawn(
         startup.dwFlags = STARTF_USESHOWWINDOW;
         startup.wShowWindow = SW_HIDE as u16;
         let mut info = PROCESS_INFORMATION::default();
+        let mut spawn_state = control.lock().unwrap_or_else(|e| e.into_inner());
+        if spawn_state.cancelled {
+            bail!("Shell connection cancelled");
+        }
         if CreateProcessW(
             null(),
             command.as_mut_ptr(),
@@ -772,6 +798,8 @@ pub(super) fn spawn(
             return Err(std::io::Error::last_os_error().into());
         }
         let process = Arc::new(Process(info.hProcess as usize));
+        spawn_state.process = Some(process.clone());
+        drop(spawn_state);
         if AssignProcessToJobObject(job.0 as HANDLE, info.hProcess) == 0 {
             let error = std::io::Error::last_os_error();
             TerminateProcess(info.hProcess, 1);
@@ -788,6 +816,9 @@ pub(super) fn spawn(
         {
             let _guard = CONSOLE_ATTACH.lock().unwrap_or_else(|e| e.into_inner());
             for _ in 0..50 {
+                if control.lock().unwrap_or_else(|e| e.into_inner()).cancelled {
+                    bail!("Shell connection cancelled");
+                }
                 FreeConsole();
                 if AttachConsole(info.dwProcessId) != 0 {
                     hwnd = GetConsoleWindow();

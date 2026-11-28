@@ -7,6 +7,7 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 
+- Share one SSH connection per server across live shells, switching instantly without opening extra console windows.
 - Queue follow-up messages across Claude, Codex, Antigravity, Pi, and Cursor; edit, remove, or interrupt and send any queued message immediately.
 - Show a visible Kill/Cancel confirmation for live server shells, with eight seconds to confirm Ctrl+Shift+W and Escape to cancel.
 - Remember full-width mode per session across restarts, restoring the sidebar when opening a normal-width session.

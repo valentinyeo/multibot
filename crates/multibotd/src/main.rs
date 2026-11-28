@@ -282,6 +282,12 @@ async fn async_main(
                     });
                 }
             },
+            ClientRequest::SwitchShellClient {
+                client_id,
+                session_id,
+            } => {
+                process_mgr.switch_shell_client(client_id, session_id).await;
+            }
             ClientRequest::InterruptSession { session_id, agent } => {
                 process_mgr.interrupt_session(session_id, agent).await;
             }

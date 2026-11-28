@@ -428,6 +428,21 @@ impl Default for ChatMessage {
     }
 }
 
+pub fn valid_shell_client_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+}
+
+pub fn valid_shell_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '\\'))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ClientRequest {
@@ -485,6 +500,12 @@ pub enum ClientRequest {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         options: Option<SessionOptions>,
+    },
+    SwitchShellClient {
+        #[serde(default)]
+        client_id: String,
+        #[serde(default)]
+        session_id: String,
     },
     InterruptSession {
         session_id: String,
@@ -1066,6 +1087,10 @@ mod tests {
         let requests = vec![
             ClientRequest::WatchDirectory,
             ClientRequest::UnwatchDirectory,
+            ClientRequest::SwitchShellClient {
+                client_id: "desktop-1".into(),
+                session_id: "shell-1".into(),
+            },
             ClientRequest::InterruptSession {
                 session_id: "s1".into(),
                 agent: AgentKind::Claude,

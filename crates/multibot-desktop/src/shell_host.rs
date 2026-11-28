@@ -11,7 +11,7 @@ use gpui_kit::{
     px,
 };
 use multibot_core::{SshHostConfig, daemon_client::validate_ssh_host};
-use multibot_proto::AgentKind;
+use multibot_proto::{AgentKind, ClientRequest, valid_shell_client_id, valid_shell_session_id};
 use std::collections::HashMap;
 
 pub const SHELL_HEADER_HEIGHT: f32 = 44.0;
@@ -84,9 +84,16 @@ pub struct ShellLaunchSpec {
 }
 
 impl ShellLaunchSpec {
-    pub fn from_host_and_session(host: &SshHostConfig, session_name: &str) -> Result<Self> {
+    pub fn from_host_and_session(
+        host: &SshHostConfig,
+        client_id: &str,
+        session_name: &str,
+    ) -> Result<Self> {
         validate_ssh_host(host)?;
-        if session_name.is_empty() || session_name.chars().any(char::is_control) {
+        if !valid_shell_client_id(client_id) {
+            bail!("Invalid shell client ID");
+        }
+        if !valid_shell_session_id(session_name) {
             bail!("Invalid tmux session name");
         }
         let mut args = vec![
@@ -107,7 +114,11 @@ impl ShellLaunchSpec {
             "--".into(),
             host.ssh_target(),
             format!(
-                "tmux attach-session -t '={}'",
+                // The outer shell owns cleanup; the subshell becomes tmux, not another SSH client.
+                "trap 'rm -f -- \"$HOME/.multibot/clients/{client_id}.tty\"' EXIT; trap 'exit 129' HUP INT TERM; \
+                 (mkdir -p \"$HOME/.multibot/clients\" && \
+                 tty > \"$HOME/.multibot/clients/{client_id}.tty\" && \
+                 exec tmux attach-session -t '={}')",
                 session_name.replace('\'', "'\\''")
             ),
         ]);
@@ -259,12 +270,66 @@ fn windows_quote(arg: &str) -> String {
     out
 }
 
-enum ShellState {
-    #[cfg(windows)]
+enum ShellConnection {
+    #[cfg(any(windows, test))]
     Connecting(u64),
     #[cfg(windows)]
-    Connected(native::EmbeddedShellHandle),
+    Connected {
+        handle: native::EmbeddedShellHandle,
+    },
+    #[cfg(test)]
+    TestConnected,
     Disconnected(String),
+}
+
+struct ShellState {
+    client_id: String,
+    current_session_id: String,
+    desired_session_id: String,
+    connection: ShellConnection,
+    #[cfg(windows)]
+    spawn_control: native::SpawnControl,
+}
+
+impl ShellState {
+    fn new(session_id: &str, connection: ShellConnection) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_CLIENT: AtomicU64 = AtomicU64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        Self {
+            client_id: format!(
+                "mb-{:x}-{now:x}-{:x}",
+                std::process::id(),
+                NEXT_CLIENT.fetch_add(1, Ordering::Relaxed)
+            ),
+            current_session_id: session_id.into(),
+            desired_session_id: session_id.into(),
+            connection,
+            #[cfg(windows)]
+            spawn_control: native::SpawnControl::default(),
+        }
+    }
+
+    fn switch_request(&mut self) -> Option<ClientRequest> {
+        let connected = match &self.connection {
+            #[cfg(windows)]
+            ShellConnection::Connected { .. } => true,
+            #[cfg(test)]
+            ShellConnection::TestConnected => true,
+            _ => false,
+        };
+        if connected && self.current_session_id != self.desired_session_id {
+            self.current_session_id.clone_from(&self.desired_session_id);
+            return Some(ClientRequest::SwitchShellClient {
+                client_id: self.client_id.clone(),
+                session_id: self.current_session_id.clone(),
+            });
+        }
+        None
+    }
 }
 
 #[derive(Default)]
@@ -277,23 +342,43 @@ pub(crate) struct ShellHost {
 }
 
 impl ShellHost {
-    fn status(&self, key: &str) -> String {
-        match self.entries.get(key) {
+    fn status(&self, host: &str) -> String {
+        match self.entries.get(host).map(|s| &s.connection) {
+            #[cfg(any(windows, test))]
+            Some(ShellConnection::Connecting(_)) => "Connecting to server shell...".into(),
             #[cfg(windows)]
-            Some(ShellState::Connecting(_)) => "Connecting to server shell...".into(),
-            #[cfg(windows)]
-            Some(ShellState::Connected(_)) => "Connected in native shell".into(),
-            Some(ShellState::Disconnected(error)) => {
+            Some(ShellConnection::Connected { .. }) => "Connected in native shell".into(),
+            #[cfg(test)]
+            Some(ShellConnection::TestConnected) => "Connected in native shell".into(),
+            Some(ShellConnection::Disconnected(error)) => {
                 format!("Disconnected — click Reconnect · {error}")
             }
             None => "Connecting to server shell...".into(),
         }
     }
 
-    pub(crate) fn prepare_selection(&mut self, key: &str) {
-        if matches!(self.entries.get(key), Some(ShellState::Disconnected(_))) {
-            self.entries.remove(key);
+    pub(crate) fn prepare_selection(&mut self, host: &str) {
+        if matches!(
+            self.entries.get(host).map(|s| &s.connection),
+            Some(ShellConnection::Disconnected(_))
+        ) {
+            self.entries.remove(host);
         }
+    }
+
+    fn select_session(&mut self, host: &str, session_id: &str) -> Option<ClientRequest> {
+        let state = self.entries.get_mut(host)?;
+        state.desired_session_id = session_id.into();
+        state.switch_request()
+    }
+
+    pub(crate) fn switch_failed(&mut self, message: &str) -> bool {
+        let Some((client_id, _)) = message.split_once(':') else {
+            return false;
+        };
+        let before = self.entries.len();
+        self.entries.retain(|_, state| state.client_id != client_id);
+        before != self.entries.len()
     }
 
     pub(crate) fn focus_parent(&self) {
@@ -303,13 +388,17 @@ impl ShellHost {
         }
     }
 
-    pub(crate) fn focus_session(&self, key: &str) {
+    pub(crate) fn focus_session(&self, host: &str) {
         #[cfg(windows)]
-        if let Some(ShellState::Connected(handle)) = self.entries.get(key) {
+        if let Some(ShellState {
+            connection: ShellConnection::Connected { handle },
+            ..
+        }) = self.entries.get(host)
+        {
             handle.focus();
         }
         #[cfg(not(windows))]
-        let _ = key;
+        let _ = host;
     }
 
     pub(crate) fn reconcile(
@@ -321,7 +410,7 @@ impl ShellHost {
         #[cfg(windows)]
         if let Some(host) = &self.native {
             for (key, state) in &mut self.entries {
-                if let ShellState::Connected(handle) = state {
+                if let ShellConnection::Connected { handle } = &mut state.connection {
                     handle.reconcile(
                         host.parent,
                         key.as_str() == active.unwrap_or(""),
@@ -335,12 +424,34 @@ impl ShellHost {
         let _ = (active, rect, focus_on_show);
     }
 
-    pub(crate) fn close_session(&mut self, key: &str) {
-        self.entries.remove(key);
+    pub(crate) fn close_session(
+        &mut self,
+        host: &str,
+        session_id: &str,
+        next: Option<&str>,
+    ) -> Option<ClientRequest> {
+        let Some(next) = next else {
+            self.entries.remove(host);
+            return None;
+        };
+        let state = self.entries.get(host)?;
+        #[cfg(any(windows, test))]
+        if matches!(state.connection, ShellConnection::Connecting(_))
+            && state.current_session_id == session_id
+        {
+            // The initial attach can no longer succeed after this session is killed.
+            self.entries.remove(host);
+            return None;
+        }
+        if state.current_session_id == session_id || state.desired_session_id == session_id {
+            self.select_session(host, next)
+        } else {
+            None
+        }
     }
 
-    pub(crate) fn retain_live(&mut self, keys: &[String]) {
-        self.entries.retain(|key, _| keys.contains(key));
+    pub(crate) fn retain_live(&mut self, hosts: &[String]) {
+        self.entries.retain(|host, _| hosts.contains(host));
     }
 }
 
@@ -394,28 +505,42 @@ impl MultibotView {
     }
 
     pub(crate) fn reconnect_embedded_shell(&mut self, cx: &mut Context<Self>) {
-        if let Some(session) = &self.selected_session {
-            let key = self.session_key_for(session);
-            self.shell_host.entries.remove(&key);
-            cx.notify();
+        let host = self.active_session_host().to_string();
+        self.shell_host.entries.remove(&host);
+        cx.notify();
+    }
+
+    fn send_shell_switch(&mut self, host: &str, request: ClientRequest) {
+        if self
+            .tx_for_host(host)
+            .is_none_or(|tx| tx.send(request).is_err())
+        {
+            self.shell_host.entries.remove(host);
+        }
+    }
+
+    pub(crate) fn select_embedded_shell(&mut self, host: &str, session_id: &str) {
+        if let Some(request) = self.shell_host.select_session(host, session_id) {
+            self.send_shell_switch(host, request);
+            self.shell_host.focus_session(host);
         }
     }
 
     pub(crate) fn sync_embedded_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let keys: Vec<_> = if self.host_sessions.is_empty() {
+        let hosts: Vec<_> = if self.host_sessions.is_empty() {
             self.sessions
                 .iter()
-                .filter(|s| s.agent == AgentKind::Shell)
-                .map(|s| self.session_key_for(s))
+                .filter(|s| s.agent == AgentKind::Shell && !s.archived)
+                .map(|_| self.active_session_host().to_string())
                 .collect()
         } else {
             self.host_sessions
                 .iter()
-                .filter(|(_, s)| s.agent == AgentKind::Shell)
-                .map(|(h, s)| multibot_core::workspaces::canonical_session_key(h, s.agent, &s.id))
+                .filter(|(_, s)| s.agent == AgentKind::Shell && !s.archived)
+                .map(|(h, _)| h.clone())
                 .collect()
         };
-        self.shell_host.retain_live(&keys);
+        self.shell_host.retain_live(&hosts);
         #[cfg(windows)]
         if let Some(host) = &self.shell_host.native {
             let text_input_focused = window.focused(cx).is_some_and(|focus| {
@@ -426,40 +551,30 @@ impl MultibotView {
             host.set_kill_confirmation(self.sidebar_state.pending_shell_dissolve.as_ref()
                 .is_some_and(|(key, _)| self.selected_session.as_ref().is_some_and(|session| self.session_key_for(session) == *key)));
         }
-        let visible = self.embedded_shell_visible();
-        let active = visible
-            .then(|| {
-                self.selected_session
-                    .as_ref()
-                    .map(|s| self.session_key_for(s))
-            })
-            .flatten();
+        let active = self
+            .embedded_shell_visible()
+            .then(|| self.active_session_host().to_string());
         self.shell_host
             .reconcile(active.as_deref(), None, !self.computer.is_open());
         let Some(key) = active else { return };
-        if !keys.contains(&key) {
-            self.shell_host
-                .entries
-                .insert(key, ShellState::Disconnected("Server session ended".into()));
+        let session_id = self.selected_session.as_ref().unwrap().id.clone();
+        if !hosts.contains(&key) {
             return;
         }
+        self.select_embedded_shell(&key, &session_id);
         if self.shell_host.entries.contains_key(&key) {
             return;
         }
-        let session = self.selected_session.as_ref().unwrap();
-        let host_label = self
-            .selected_session_host
-            .as_deref()
-            .or(self.connected_host.as_deref());
+        let state = ShellState::new(&session_id, ShellConnection::Disconnected(String::new()));
         let host = self
             .settings
             .ssh_hosts
             .iter()
-            .find(|h| Some(h.name.as_str()) == host_label)
+            .find(|h| h.name == key)
             .or_else(|| {
                 cx.global::<crate::state::SharedAppStore>()
                     .host_connections
-                    .get(host_label.unwrap_or(""))
+                    .get(&key)
                     .and_then(|c| {
                         if let multibot_core::DaemonTarget::RemoteSsh { host, .. } = &c.target {
                             Some(host)
@@ -470,23 +585,23 @@ impl MultibotView {
             });
         let spec = host
             .ok_or_else(|| anyhow::anyhow!("No SSH host configured for this shell"))
-            .and_then(|host| ShellLaunchSpec::from_host_and_session(host, &session.id));
+            .and_then(|host| {
+                ShellLaunchSpec::from_host_and_session(host, &state.client_id, &session_id)
+            });
+        self.shell_host.entries.insert(key.clone(), state);
         let spec = match spec {
             Ok(spec) => spec,
             Err(err) => {
-                self.shell_host
-                    .entries
-                    .insert(key, ShellState::Disconnected(err.to_string()));
+                self.shell_host.entries.get_mut(&key).unwrap().connection =
+                    ShellConnection::Disconnected(err.to_string());
                 return;
             }
         };
         #[cfg(not(windows))]
         {
             let _ = (spec, window, cx);
-            self.shell_host.entries.insert(
-                key,
-                ShellState::Disconnected("Native embedded shells require Windows".into()),
-            );
+            self.shell_host.entries.get_mut(&key).unwrap().connection =
+                ShellConnection::Disconnected("Native embedded shells require Windows".into());
         }
         #[cfg(windows)]
         {
@@ -494,10 +609,8 @@ impl MultibotView {
             let parent = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
                 Ok(RawWindowHandle::Win32(h)) => h.hwnd.get() as usize,
                 _ => {
-                    self.shell_host.entries.insert(
-                        key,
-                        ShellState::Disconnected("No Windows window handle".into()),
-                    );
+                    self.shell_host.entries.get_mut(&key).unwrap().connection =
+                        ShellConnection::Disconnected("No Windows window handle".into());
                     return;
                 }
             };
@@ -506,9 +619,8 @@ impl MultibotView {
                 match native::NativeHost::new(parent, shortcuts) {
                     Ok(host) => self.shell_host.native = Some(host),
                     Err(err) => {
-                        self.shell_host
-                            .entries
-                            .insert(key, ShellState::Disconnected(err.to_string()));
+                        self.shell_host.entries.get_mut(&key).unwrap().connection =
+                            ShellConnection::Disconnected(err.to_string());
                         return;
                     }
                 }
@@ -533,16 +645,16 @@ impl MultibotView {
             }
             self.shell_host.generation += 1;
             let generation = self.shell_host.generation;
-            self.shell_host
-                .entries
-                .insert(key.clone(), ShellState::Connecting(generation));
+            self.shell_host.entries.get_mut(&key).unwrap().connection =
+                ShellConnection::Connecting(generation);
             let job = self.shell_host.native.as_ref().unwrap().job.clone();
+            let control = self.shell_host.entries[&key].spawn_control.0.clone();
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
             let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
             let spawn = std::thread::Builder::new()
                 .name("native-shell".into())
                 .spawn(move || {
-                    let result = native::spawn(spec, job, parent);
+                    let result = native::spawn(spec, job, parent, control);
                     let process = result.as_ref().ok().map(|h| h.process.clone());
                     if ready_tx.send(result).is_err() {
                         return;
@@ -553,25 +665,35 @@ impl MultibotView {
                     let _ = exit_tx.send(());
                 });
             if let Err(error) = spawn {
-                self.shell_host
-                    .entries
-                    .insert(key, ShellState::Disconnected(error.to_string()));
+                self.shell_host.entries.get_mut(&key).unwrap().connection =
+                    ShellConnection::Disconnected(error.to_string());
                 return;
             }
             cx.spawn(async move |this, cx| {
                 let Ok(result) = ready_rx.await else { return };
                 let _ = this.update(cx, |view, cx| {
-                    if matches!(view.shell_host.entries.get(&key), Some(ShellState::Connecting(g)) if *g == generation) {
-                        view.shell_host.entries.insert(key.clone(), match result {
-                            Ok(mut handle) => { handle.generation = generation; ShellState::Connected(handle) }, Err(error) => ShellState::Disconnected(error.to_string()),
-                        });
+                    if let Some(state) = view.shell_host.entries.get_mut(&key)
+                        && matches!(state.connection, ShellConnection::Connecting(g) if g == generation)
+                    {
+                        state.connection = match result {
+                            Ok(mut handle) => {
+                                handle.generation = generation;
+                                ShellConnection::Connected { handle }
+                            }
+                            Err(error) => ShellConnection::Disconnected(error.to_string()),
+                        };
+                        if let Some(request) = state.switch_request() {
+                            view.send_shell_switch(&key, request);
+                        }
                         cx.notify();
                     }
                 });
                 if exit_rx.await.is_ok() {
                     let _ = this.update(cx, |view, cx| {
-                        if matches!(view.shell_host.entries.get(&key), Some(ShellState::Connected(h)) if h.generation == generation) {
-                            view.shell_host.entries.insert(key, ShellState::Disconnected("SSH exited".into()));
+                        if let Some(state) = view.shell_host.entries.get_mut(&key)
+                            && matches!(&state.connection, ShellConnection::Connected { handle } if handle.generation == generation)
+                        {
+                            state.connection = ShellConnection::Disconnected("SSH exited".into());
                             cx.notify();
                         }
                     });
@@ -619,7 +741,7 @@ impl MultibotView {
             })
             .map(|r| r.draft.clone());
         let body_index = 1 + usize::from(self.chat_state.find_open);
-        let active_key = key.clone();
+        let active_key = host.to_string();
         let weak = cx.entity().downgrade();
         v_flex()
             .flex_1()
@@ -751,7 +873,7 @@ impl MultibotView {
                     .p_3()
                     .text_xs()
                     .text_color(theme::text_muted())
-                    .child(self.shell_host.status(&key)),
+                    .child(self.shell_host.status(host)),
             )
             .when_some(self.render_terminal_pane(cx), |el, pane| el.child(pane))
             .on_children_prepainted(move |bounds, window, cx| {
@@ -786,6 +908,146 @@ mod native;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::AppContext;
+
+    #[test]
+    fn one_client_per_host_switches_and_retains_until_last_shell_closes() {
+        let mut host = ShellHost::default();
+        host.entries.insert(
+            "host-a".into(),
+            ShellState::new("a", ShellConnection::Connecting(1)),
+        );
+        let client_id = host.entries["host-a"].client_id.clone();
+        assert!(valid_shell_client_id(&client_id));
+        for session in ["b", "c", "a", "c"] {
+            assert!(host.select_session("host-a", session).is_none());
+            assert_eq!(host.entries.len(), 1);
+            assert_eq!(host.entries["host-a"].desired_session_id, session);
+        }
+        let state = host.entries.get_mut("host-a").unwrap();
+        assert!(matches!(state.connection, ShellConnection::Connecting(1)));
+        state.connection = ShellConnection::TestConnected;
+        assert_eq!(
+            state.switch_request(),
+            Some(ClientRequest::SwitchShellClient {
+                client_id: client_id.clone(),
+                session_id: "c".into(),
+            })
+        );
+        for session in ["a", "b", "c"] {
+            assert_eq!(
+                host.select_session("host-a", session),
+                Some(ClientRequest::SwitchShellClient {
+                    client_id: client_id.clone(),
+                    session_id: session.into(),
+                })
+            );
+            assert_eq!(host.entries.len(), 1);
+        }
+        assert!(host.select_session("host-a", "c").is_none());
+        host.entries.insert(
+            "host-b".into(),
+            ShellState::new("a", ShellConnection::TestConnected),
+        );
+        assert_eq!(host.entries.len(), 2);
+        assert_ne!(host.entries["host-b"].client_id, client_id);
+        assert!(host.close_session("host-a", "a", Some("b")).is_none());
+        assert_eq!(host.entries["host-a"].current_session_id, "c");
+        assert!(
+            matches!(host.close_session("host-a", "c", Some("b")), Some(ClientRequest::SwitchShellClient { session_id, .. }) if session_id == "b")
+        );
+        host.retain_live(&["host-a".into(), "host-b".into()]);
+        assert_eq!(host.entries.len(), 2);
+        host.close_session("host-a", "b", None);
+        assert_eq!(host.entries.len(), 1);
+        host.retain_live(&[]);
+        assert!(host.entries.is_empty());
+    }
+
+    #[test]
+    fn closing_the_initial_session_cancels_an_unfinished_attach() {
+        let mut host = ShellHost::default();
+        host.entries.insert(
+            "host-a".into(),
+            ShellState::new("a", ShellConnection::Connecting(1)),
+        );
+        assert!(host.select_session("host-a", "b").is_none());
+        assert!(host.close_session("host-a", "a", Some("b")).is_none());
+        assert!(host.entries.is_empty());
+    }
+
+    #[test]
+    fn stale_switch_errors_cannot_drop_a_reconnected_host() {
+        let mut host = ShellHost::default();
+        host.entries.insert(
+            "host-a".into(),
+            ShellState::new("a", ShellConnection::TestConnected),
+        );
+        let old_client = host.entries["host-a"].client_id.clone();
+        assert!(host.switch_failed(&format!("{old_client}: no client")));
+        host.entries.insert(
+            "host-a".into(),
+            ShellState::new("b", ShellConnection::TestConnected),
+        );
+        assert!(!host.switch_failed(&format!("{old_client}: late failure")));
+        assert_eq!(host.entries.len(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn selecting_live_shells_sends_switch_to_the_owning_host(cx: &mut gpui_kit::TestAppContext) {
+        let (window, view) = crate::app::tests::open_test_view_with_entity(cx);
+        let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+        cx.update_window(window, |_, _, cx| {
+            view.update(cx, |view, cx| {
+                let a = multibot_proto::SessionSummary {
+                    id: "a".into(),
+                    agent: AgentKind::Shell,
+                    ..Default::default()
+                };
+                let b = multibot_proto::SessionSummary {
+                    id: "b".into(),
+                    ..a.clone()
+                };
+                view.host_sessions =
+                    vec![("host-a".into(), a.clone()), ("host-a".into(), b.clone())];
+                view.sessions = vec![a.clone(), b.clone()];
+                view.host_txs.insert("host-a".into(), tx_a);
+                view.host_txs.insert("host-b".into(), tx_b);
+                view.shell_host.entries.insert(
+                    "host-a".into(),
+                    ShellState::new("a", ShellConnection::TestConnected),
+                );
+                let client_id = view.shell_host.entries["host-a"].client_id.clone();
+                view.select_session_on_host("host-a".into(), a, cx);
+                view.select_session_on_host("host-a".into(), b, cx);
+                let requests: Vec<_> = std::iter::from_fn(|| rx_a.try_recv().ok()).collect();
+                let switches: Vec<_> = requests
+                    .into_iter()
+                    .filter(|r| matches!(r, ClientRequest::SwitchShellClient { .. }))
+                    .collect();
+                assert_eq!(
+                    switches,
+                    vec![ClientRequest::SwitchShellClient {
+                        client_id,
+                        session_id: "b".into()
+                    }]
+                );
+                assert!(rx_b.try_recv().is_err());
+                assert_eq!(view.shell_host.entries.len(), 1);
+                assert_eq!(view.shell_host.entries["host-a"].current_session_id, "b");
+                let key = multibot_core::workspaces::canonical_session_key("host-a", AgentKind::Shell, "b");
+                view.dissolve_session_key(&key, cx);
+                view.dissolve_session_key(&key, cx);
+                let requests: Vec<_> = std::iter::from_fn(|| rx_a.try_recv().ok()).collect();
+                let lifecycle: Vec<_> = requests.into_iter().filter(|r| matches!(r, ClientRequest::SwitchShellClient { .. } | ClientRequest::ArchiveSession { .. })).collect();
+                assert!(matches!(&lifecycle[..], [ClientRequest::SwitchShellClient { session_id: next, .. }, ClientRequest::ArchiveSession { session_id: closed, .. }] if next == "a" && closed == "b"));
+                assert_eq!(view.shell_host.entries.len(), 1);
+                assert_eq!(view.shell_host.entries["host-a"].current_session_id, "a");
+            });
+        })
+        .unwrap();
+    }
 
     #[test]
     fn dissolve_chord_is_forwarded_on_each_distinct_press() {
@@ -967,11 +1229,15 @@ mod tests {
             identity_file: Some("C:/Users/A B/ZigShell/key".into()),
         };
         let spec =
-            ShellLaunchSpec::from_host_and_session(&host, "term-'$(touch /tmp/no)'").unwrap();
+            ShellLaunchSpec::from_host_and_session(&host, "mb-client_1", "term-'$(echo nope)'")
+                .unwrap();
         assert_eq!(spec.program, "ssh.exe");
         assert_eq!(
             spec.args.last().unwrap(),
-            "tmux attach-session -t '=term-'\\''$(touch /tmp/no)'\\''' ".trim_end()
+            "trap 'rm -f -- \"$HOME/.multibot/clients/mb-client_1.tty\"' EXIT; trap 'exit 129' HUP INT TERM; \
+             (mkdir -p \"$HOME/.multibot/clients\" && \
+             tty > \"$HOME/.multibot/clients/mb-client_1.tty\" && \
+             exec tmux attach-session -t '=term-'\\''$(echo nope)'\\''')"
         );
         assert!(
             spec.args
@@ -980,18 +1246,103 @@ mod tests {
         );
         assert!(spec.args.windows(2).any(|w| w == ["-p", "2222"]));
         assert_eq!(spec.args[spec.args.len() - 2], "valentin@example.com");
-        assert!(ShellLaunchSpec::from_host_and_session(&host, "bad\nname").is_err());
+        for session in ["bad\nname", "../bad", "bad\\name", ""] {
+            assert!(ShellLaunchSpec::from_host_and_session(&host, "mb-client_1", session).is_err());
+        }
+        for client in [
+            "",
+            "../",
+            "/",
+            "a..b",
+            "$(evil)",
+            "a'b",
+            "a\n",
+            &"a".repeat(65),
+        ] {
+            assert!(ShellLaunchSpec::from_host_and_session(&host, client, "ok").is_err());
+        }
         assert!(
             ShellLaunchSpec::from_host_and_session(
                 &SshHostConfig {
                     hostname: "-oProxyCommand=evil".into(),
                     ..host
                 },
+                "mb-client_1",
                 "ok"
             )
             .is_err()
         );
     }
+    #[cfg(unix)]
+    #[test]
+    fn launch_registers_tty_preserves_literal_target_and_cleans_up_on_exit() {
+        use std::os::unix::fs::PermissionsExt;
+        let state = ShellState::new("test", ShellConnection::TestConnected);
+        let home = std::env::temp_dir().join(&state.client_id);
+        std::fs::create_dir_all(&home).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(home.clone());
+        let tmux = home.join("tmux");
+        std::fs::write(&tmux, "#!/bin/sh\n[ -s \"$HOME/.multibot/clients/test-client.tty\" ] || exit 42\nprintf '%s\\n' \"$@\" > \"$HOME/args\"\nexit 7\n").unwrap();
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let host = SshHostConfig {
+            name: "test".into(),
+            hostname: "example.com".into(),
+            user: "test".into(),
+            port: 22,
+            identity_file: None,
+        };
+        let session = "term-'$(echo nope)'";
+        let spec = ShellLaunchSpec::from_host_and_session(&host, "test-client", session).unwrap();
+        let output = std::process::Command::new("script")
+            .args(["-q", "-e", "-c", spec.args.last().unwrap(), "/dev/null"])
+            .env("HOME", &home)
+            .env(
+                "PATH",
+                format!("{}:{}", home.display(), std::env::var("PATH").unwrap()),
+            )
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(
+            std::fs::read_to_string(home.join("args")).unwrap(),
+            format!("attach-session\n-t\n={session}\n")
+        );
+        let registration = home.join(".multibot/clients/test-client.tty");
+        assert!(!registration.exists());
+        std::fs::write(&registration, "/dev/pts/1\n").unwrap();
+        let traps = spec.args.last().unwrap().split_once("; (").unwrap().0;
+        let mut shell = std::process::Command::new("sh")
+            .args(["-c", &format!("{traps}; echo ready; read value")])
+            .env("HOME", &home)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(shell.stdout.take().unwrap()),
+            &mut ready,
+        )
+        .unwrap();
+        assert_eq!(ready, "ready\n");
+        assert!(
+            std::process::Command::new("kill")
+                .args(["-HUP", &shell.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(shell.wait().unwrap().code(), Some(129));
+        assert!(!registration.exists());
+    }
+
     #[test]
     fn viewport_handles_dpi_sidebar_modes_and_small_windows() {
         assert_eq!(

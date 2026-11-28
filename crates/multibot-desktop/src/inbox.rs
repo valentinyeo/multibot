@@ -576,9 +576,38 @@ impl MultibotView {
         {
             return;
         }
-        let Some(tx) = self.tx_for_host(&host) else {
+        let Some(tx) = self.tx_for_host(&host).cloned() else {
             return;
         };
+        if session.agent == multibot_proto::AgentKind::Shell {
+            let next_shell = if self.host_sessions.is_empty() {
+                self.sessions
+                    .iter()
+                    .find(|s| {
+                        s.agent == multibot_proto::AgentKind::Shell
+                            && !s.archived
+                            && s.id != session.id
+                    })
+                    .map(|s| s.id.clone())
+            } else {
+                self.host_sessions
+                    .iter()
+                    .find(|(h, s)| {
+                        h == &host
+                            && s.agent == multibot_proto::AgentKind::Shell
+                            && !s.archived
+                            && s.id != session.id
+                    })
+                    .map(|(_, s)| s.id.clone())
+            };
+            // Switch before killing the attached session, or tmux may detach the shared client.
+            if let Some(request) =
+                self.shell_host
+                    .close_session(&host, &session.id, next_shell.as_deref())
+            {
+                let _ = tx.send(request);
+            }
+        }
         if tx
             .send(multibot_proto::ClientRequest::ArchiveSession {
                 session_id: session.id.clone(),
@@ -592,7 +621,6 @@ impl MultibotView {
         }
         let next = self.sidebar_neighbor_after_removal(key, ReorderDirection::Up);
         self.notice = None;
-        self.shell_host.close_session(key);
         self.closed_sessions.push((host.clone(), session.clone()));
         self.sidebar_state
             .workspace_store
