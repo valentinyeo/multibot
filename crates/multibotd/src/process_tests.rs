@@ -822,7 +822,7 @@ fn permission_overrides_are_accepted_for_all_agent_harnesses() {
             );
         }
     }
-    for agent in [AgentKind::Pi, AgentKind::Cursor, AgentKind::Antigravity] {
+    for agent in [AgentKind::Pi, AgentKind::Cursor] {
         let options = SessionOptions {
             effort: Some(EffortLevel::High),
             permission: Some(PermissionLevel::FullAccess),
@@ -959,7 +959,7 @@ async fn composer_unsupported_options_fail_without_spawning_or_writing_metadata(
     assert!(
         mgr.send_prompt(
             "s1",
-            AgentKind::Antigravity,
+            AgentKind::Cursor,
             None,
             "hello",
             Some(options.clone())
@@ -968,7 +968,7 @@ async fn composer_unsupported_options_fail_without_spawning_or_writing_metadata(
         .is_err()
     );
     mgr.spawn_session(
-        AgentKind::Antigravity,
+        AgentKind::Cursor,
         home.to_string_lossy().into(),
         None,
         Some("hello".into()),
@@ -1013,6 +1013,7 @@ async fn done_keeps_process_alive_and_dissolve_stops_it_without_touching_history
         mgr.state.lock().unwrap().active.insert(
             "saved".into(),
             ActiveProcess {
+                options: SessionOptions::default(),
                 pid,
                 cwd: None,
                 source_path: transcript.clone(),
@@ -1319,6 +1320,7 @@ async fn interrupted_process_closes_stdin_and_force_prompt_resumes_first() {
         mgr.state.lock().unwrap().active.insert(
             "force-resume".into(),
             ActiveProcess {
+                options: SessionOptions::default(),
                 pid,
                 cwd: Some(home.to_string_lossy().into()),
                 source_path: hosted_history_path(&home, "force-resume"),
@@ -1583,6 +1585,7 @@ async fn agy_stale_stdin_fallback_does_not_duplicate_user_history_row() {
         guard.active.insert(
             sid.to_string(),
             ActiveProcess {
+                options: SessionOptions::default(),
                 pid: 999_999,
                 cwd: None,
                 source_path: hp.clone(),
@@ -1969,6 +1972,7 @@ async fn send_prompt_queues_behind_busy_chat_and_enforces_queue_limit() {
     mgr.state.lock().unwrap().active.insert(
         "busy".into(),
         ActiveProcess {
+            options: SessionOptions::default(),
             pid: 12345,
             cwd: None,
             source_path: home.join("chat.jsonl"),
@@ -2104,6 +2108,7 @@ async fn send_and_steer_bypass_queue_on_busy_live_agy() {
     mgr.state.lock().unwrap().active.insert(
         "s1".into(),
         ActiveProcess {
+            options: SessionOptions::default(),
             pid: 999_998,
             cwd: None,
             source_path: hosted_history_path(&home, "s1"),
@@ -2153,6 +2158,7 @@ async fn steer_session_on_busy_claude_still_queues() {
         guard.active.insert(
             "s1".into(),
             ActiveProcess {
+                options: SessionOptions::default(),
                 pid: 999_998,
                 cwd: None,
                 source_path: home.join("s1.jsonl"),
@@ -2235,5 +2241,219 @@ async fn agy_broken_stdin_reports_delivery_failure_and_evicts_stale_process() {
         .status()
         .await
         .unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn antigravity_models_resolve_families_concrete_ids_and_effort_defaults() {
+    assert_eq!(resolve_antigravity_model(None, None), None);
+    for (family, default, max) in [
+        ("gemini-4-neon", "high", "xhigh"),
+        ("gemini-4-carbon", "medium", "high"),
+        ("gemini-4-argon", "medium", "high"),
+        ("gemini-4-hydrogen", "high", "xhigh"),
+        ("gemini-3.8-flash", "medium", "high"),
+        ("claude-opus-5-5", "high", "high"),
+        ("claude-sonnet-5-5", "medium", "high"),
+    ] {
+        assert_eq!(
+            resolve_antigravity_model(Some(family), None),
+            Some(format!("{family}-{default}"))
+        );
+        for (effort, suffix) in [
+            (EffortLevel::Low, "low"),
+            (EffortLevel::Medium, "medium"),
+            (EffortLevel::High, "high"),
+            (EffortLevel::Max, max),
+        ] {
+            let expected = Some(format!("{family}-{suffix}"));
+            assert_eq!(
+                resolve_antigravity_model(Some(family), Some(effort)),
+                expected
+            );
+            for old in ["low", "medium", "high", "xhigh"] {
+                let concrete = format!("{family}-{old}");
+                assert_eq!(
+                    resolve_antigravity_model(Some(&concrete), None),
+                    Some(concrete.clone())
+                );
+                assert_eq!(
+                    resolve_antigravity_model(Some(&concrete), Some(effort)),
+                    expected
+                );
+            }
+            if family == "gemini-4-neon" {
+                assert_eq!(resolve_antigravity_model(None, Some(effort)), expected);
+            }
+        }
+    }
+    for effort in [None, Some(EffortLevel::Max)] {
+        assert_eq!(
+            resolve_antigravity_model(Some("gemini-pro-orchestrator-neon"), effort),
+            Some("gemini-pro-orchestrator-neon".into())
+        );
+    }
+    assert_eq!(
+        resolve_antigravity_model(Some("gpt-oss-120b-medium"), None),
+        Some("gpt-oss-120b-medium".into())
+    );
+    assert_eq!(
+        resolve_antigravity_model(Some("gpt-oss-120b-medium"), Some(EffortLevel::Low)),
+        Some("gpt-oss-120b-low".into())
+    );
+}
+
+#[test]
+fn antigravity_args_forward_model_effort_permissions_and_conversation() {
+    assert_eq!(
+        build_antigravity_args(None, None),
+        [
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--dangerously-skip-permissions",
+            "--print="
+        ]
+    );
+    for (permission, flags) in [
+        (None, vec!["--dangerously-skip-permissions"]),
+        (
+            Some(PermissionLevel::FullAccess),
+            vec!["--dangerously-skip-permissions"],
+        ),
+        (Some(PermissionLevel::Ask), vec!["--mode", "accept-edits"]),
+        (Some(PermissionLevel::Auto), vec!["--mode", "auto"]),
+    ] {
+        let options = SessionOptions {
+            model: Some("gemini-4-hydrogen".into()),
+            effort: Some(EffortLevel::Max),
+            permission,
+        };
+        assert!(validate_options(AgentKind::Antigravity, Some(&options)).is_ok());
+        assert!(validate_options(AgentKind::Codex, Some(&options)).is_ok());
+        assert!(validate_options(AgentKind::Claude, Some(&options)).is_err());
+        let mut expected = vec![
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--model",
+            "gemini-4-hydrogen-xhigh",
+        ];
+        expected.extend(flags);
+        expected.extend(["--print=", "--conversation", "conv-id"]);
+        assert_eq!(
+            build_antigravity_args(Some("conv-id"), Some(&options)),
+            expected
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn persistent_agy_restarts_on_each_option_change_and_resumes_conversation() {
+    let home = temp_home("agy-option-switch");
+    let (bin, log) = fake_agy(&home);
+    let conversation = "12345678-abcd-4321-abcd-123456789abc";
+    let script = fs::read_to_string(&bin).unwrap().replace("fake-conv", conversation);
+    fs::write(&bin, script).unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mgr = ProcessManager::new(home.clone(), tx);
+    mgr.set_test_bin_override(Some(bin));
+    let sid = "agy-switch";
+    let mut options = SessionOptions::default();
+    let mut previous_pid = None;
+    for step in 0..5 {
+        match step {
+            1 => options.model = Some("gemini-4-neon".into()),
+            2 => options.effort = Some(EffortLevel::Max),
+            3 => options.permission = Some(PermissionLevel::Ask),
+            4 => options = SessionOptions::default(),
+            _ => {}
+        }
+        mgr.send_prompt(
+            sid,
+            AgentKind::Antigravity,
+            None,
+            "switch",
+            Some(options.clone()),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    rx.recv().await,
+                    Some(ServerEvent::HistoryAppend {
+                        working: Some(false),
+                        ..
+                    })
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let pid = mgr.state.lock().unwrap().active.get(sid).unwrap().pid;
+        assert_ne!(Some(pid), previous_pid);
+        if let Some(old_pid) = previous_pid {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while Path::new(&format!("/proc/{old_pid}")).exists() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        previous_pid = Some(pid);
+        let body = fs::read_to_string(&log).unwrap();
+        let spawns: Vec<_> = body.lines().filter(|l| l.starts_with("ARGV ")).collect();
+        assert_eq!(spawns.len(), step + 1);
+        let args = spawns.last().unwrap();
+        if step > 0 {
+            assert!(args.contains(&format!("--conversation {conversation}")), "{args}");
+        }
+        if let Some(model) = resolve_antigravity_model(options.model.as_deref(), options.effort) {
+            assert!(args.contains(&format!("--model {model}")), "{args}");
+        } else {
+            assert!(!args.contains("--model"));
+        }
+        assert_eq!(args.contains("--mode accept-edits"), step == 3);
+        // Identical settings must keep using this same process.
+        mgr.send_prompt(
+            sid,
+            AgentKind::Antigravity,
+            None,
+            "reuse",
+            Some(options.clone()),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    rx.recv().await,
+                    Some(ServerEvent::HistoryAppend {
+                        working: Some(false),
+                        ..
+                    })
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(mgr.state.lock().unwrap().active.get(sid).unwrap().pid, pid);
+    }
+    mgr.archive_session(
+        sid.into(),
+        AgentKind::Antigravity,
+        hosted_history_path(&home, sid).to_string_lossy().into(),
+        true,
+    )
+    .await;
     fs::remove_dir_all(home).unwrap();
 }

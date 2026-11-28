@@ -21,6 +21,39 @@ fn sample_keys() -> Vec<String> {
 }
 
 #[test]
+fn inbox_preview_strips_markdown_and_collapses_whitespace() {
+    for (raw, expected) in [
+        (
+            "**bold** and __strong__ with *italics*",
+            "bold and strong with italics",
+        ),
+        ("Use `code` and ``more code``", "Use code and more code"),
+        (
+            "# heading\n## subheading\n> quote\n* bullet",
+            "heading subheading quote bullet",
+        ),
+        (
+            "Read [link](https://example.com) and [docs](https://example.com/docs)",
+            "Read link and docs",
+        ),
+        (
+            "```rust\nlet answer = 42;\n```\n~~~text\nready\n~~~",
+            "let answer = 42; ready",
+        ),
+        ("  one\t two\n\n three\u{a0}four  ", "one two three four"),
+        ("**Résumé** [文書](https://example.com)", "Résumé 文書"),
+        ("[link](https://example.com/docs_(v2)) next", "link next"),
+        ("> ## **Quoted heading**", "Quoted heading"),
+        ("plain /srv/my_app and C#", "plain /srv/my_app and C#"),
+        ("[unfinished](url", "[unfinished](url"),
+        ("", ""),
+        (" \n```rust\n```\n~~~\n~~~\n#\n> **__** ` ` *", ""),
+    ] {
+        assert_eq!(clean_inbox_preview(raw), expected, "preview {raw:?}");
+    }
+}
+
+#[test]
 fn inbox_clamped_rows_clamped_hl_and_wrapped_tab() {
     let mut st = InboxState::default();
     let splits = sample_splits();
@@ -1252,6 +1285,99 @@ fn inbox_row_timestamps_share_one_fixed_right_aligned_column(cx: &mut TestAppCon
             column_edges.windows(2).all(|pair| pair[0] == pair[1]),
             "every Inbox card must end its timestamp column on one line: {column_edges:?}"
         );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn inbox_content_reaches_960px_on_wide_windows(cx: &mut TestAppContext) {
+    let (handle, _view) = render_inbox_rows(cx, &[("wide", "Wide Inbox", 0)], |_| {});
+    for width in [1280.0, 1600.0] {
+        cx.simulate_window_resize(handle, gpui_kit::size(px(width), px(900.0)));
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let content = window.find("inbox-content").bounds();
+            assert_eq!(content.size.width, px(960.0));
+            let scroll = window.find("inbox-scroll").bounds();
+            assert_eq!(
+                content.origin.x - scroll.origin.x,
+                scroll.right() - content.right()
+            );
+        })
+        .unwrap();
+    }
+}
+
+#[gpui_kit::test]
+fn inbox_workspace_badges_only_render_across_workspaces(cx: &mut TestAppContext) {
+    let (handle, view) = render_inbox_rows(cx, &[("badge", "Workspace Badge", 0)], |v| {
+        let key = v.session_key_for(&v.connection.sessions[0]);
+        v.sidebar_state.workspace_store.toggle_favorite(&key);
+        v.sidebar_state
+            .workspace_store
+            .record_session_input(&key, now_unix_ms());
+    });
+    cx.update_window(handle, |_, window, cx| {
+        let workspace_id = view.read(cx).compute_inbox_rows(now_unix_ms())[0]
+            .workspace_id
+            .clone();
+        for split in [
+            InboxSplit::All,
+            InboxSplit::Frequent,
+            InboxSplit::Favorites,
+            InboxSplit::Workspace(workspace_id),
+            InboxSplit::All,
+        ] {
+            let show_badge = !matches!(split, InboxSplit::Workspace(_));
+            view.update(cx, |v, cx| {
+                v.inbox_state.active_split = split;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("inbox-row-0").is_some());
+            assert_eq!(
+                window.try_find("inbox-row-workspace-0").is_some(),
+                show_badge
+            );
+        }
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn inbox_renders_clean_preview_and_falls_back_when_empty(cx: &mut TestAppContext) {
+    let (handle, view) = render_inbox_rows(cx, &[("preview", "Preview Session", 0)], |_| {});
+    cx.update_window(handle, |_, window, cx| {
+        for (preview, cwd, expected) in [
+            (
+                Some("# **Ready**\nUse `code` and [docs](https://example.com)"),
+                Some("/srv/app"),
+                "Ready Use code and docs",
+            ),
+            (
+                Some("```rust\n```\n**__** ` `"),
+                Some("/srv/app"),
+                "/srv/app",
+            ),
+            (Some("  \n\t"), None, AgentKind::Claude.label()),
+            (None, Some("/srv/app"), "/srv/app"),
+        ] {
+            view.update(cx, |v, cx| {
+                v.connection.sessions[0].last_assistant_preview = preview.map(str::to_string);
+                v.connection.sessions[0].cwd = cwd.map(str::to_string);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let preview_id = gpui_kit::ElementId::from("inbox-row-preview-0");
+            let texts = gpui_kit::base::test_support::texts(window);
+            let text = texts
+                .iter()
+                .find(|text| text.visible() && text.path().contains(&preview_id))
+                .expect("rendered Inbox preview");
+            assert_eq!(text.text(), expected);
+            assert!(!text.text().contains("**"));
+            assert!(!text.text().contains('`'));
+        }
     })
     .unwrap();
 }

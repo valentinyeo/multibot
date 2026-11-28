@@ -139,6 +139,7 @@ async fn switch_shell_client_at(
 }
 
 struct ActiveProcess {
+    options: SessionOptions,
     pid: u32,
     cwd: Option<String>,
     source_path: PathBuf,
@@ -488,6 +489,30 @@ impl ProcessManager {
         validate_options(agent, options)?;
         // Fast path: persistent hosted `agy` process already running with open stdin.
         if agent == AgentKind::Antigravity {
+            let requested_options = options.cloned().unwrap_or_default();
+            let previous = {
+                let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if guard
+                    .active
+                    .get(session_id)
+                    .is_some_and(|p| p.options != requested_options)
+                {
+                    guard.active.remove(session_id)
+                } else {
+                    None
+                }
+            };
+            if let Some(mut previous) = previous {
+                previous.stdin_tx.take();
+                // The reaper is PID-guarded, so it cannot remove the replacement process.
+                std::process::Command::new("kill")
+                    .args(["-s", "TERM", &previous.pid.to_string()])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .context("terminate previous agy process")?;
+            }
             let existing_tx = {
                 let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(proc) = guard.active.get_mut(session_id)
@@ -627,6 +652,7 @@ impl ProcessManager {
                         .insert(
                             sid.clone(),
                             ActiveProcess {
+                                options: options.cloned().unwrap_or_default(),
                                 pid,
                                 cwd: cwd.map(String::from),
                                 source_path,
@@ -737,6 +763,7 @@ impl ProcessManager {
                         .insert(
                             sid.clone(),
                             ActiveProcess {
+                                options: options.cloned().unwrap_or_default(),
                                 pid,
                                 cwd: cwd.map(String::from),
                                 source_path: sink.clone(),
@@ -772,23 +799,7 @@ impl ProcessManager {
                 let conversation = self.resolve_agy_conversation(session_id, is_new_session);
                 let history_path = self.agy_history_sink(session_id, conversation.as_deref());
 
-                let mut args = vec![
-                    "--input-format".to_string(),
-                    "stream-json".to_string(),
-                    "--output-format".to_string(),
-                    "stream-json".to_string(),
-                ];
-                if matches!(
-                    options.and_then(|o| o.permission),
-                    None | Some(PermissionLevel::FullAccess)
-                ) {
-                    args.push("--dangerously-skip-permissions".to_string());
-                }
-                args.push("--print=".to_string());
-                if let Some(conv_id) = conversation.as_deref() {
-                    args.push("--conversation".to_string());
-                    args.push(conv_id.to_string());
-                }
+                let args = build_antigravity_args(conversation.as_deref(), options);
 
                 let wire = serde_json::to_string(&json!({
                     "event": "user",
@@ -852,6 +863,7 @@ impl ProcessManager {
                     guard.active.insert(
                         session_id.to_string(),
                         ActiveProcess {
+                            options: options.cloned().unwrap_or_default(),
                             pid,
                             cwd: cwd.map(String::from),
                             source_path: history_path.clone(),
@@ -967,6 +979,7 @@ impl ProcessManager {
             guard.active.insert(
                 session_id.clone(),
                 ActiveProcess {
+                    options: SessionOptions::default(),
                     pid,
                     cwd,
                     source_path,
@@ -2080,11 +2093,73 @@ fn effort_value(effort: EffortLevel, codex: bool) -> &'static str {
     }
 }
 
+fn resolve_antigravity_model(model: Option<&str>, effort: Option<EffortLevel>) -> Option<String> {
+    let model = model.or(effort.map(|_| "gemini-4-neon"))?;
+    let default_effort = match model {
+        "gemini-4-neon" | "gemini-4-hydrogen" | "claude-opus-5-5" => Some(EffortLevel::High),
+        "gemini-4-carbon" | "gemini-4-argon" | "gemini-3.8-flash" | "claude-sonnet-5-5" => {
+            Some(EffortLevel::Medium)
+        }
+        _ => None,
+    };
+    let family = if default_effort.is_some() {
+        model
+    } else if effort.is_some() {
+        ["-xhigh", "-high", "-medium", "-low"]
+            .iter()
+            .find_map(|suffix| model.strip_suffix(suffix))
+            .unwrap_or(model)
+    } else {
+        return Some(model.to_string());
+    };
+    if default_effort.is_none() && family == model {
+        return Some(model.to_string());
+    }
+    let suffix = match effort.or(default_effort)? {
+        EffortLevel::Low => "low",
+        EffortLevel::Medium => "medium",
+        EffortLevel::High => "high",
+        EffortLevel::Max if matches!(family, "gemini-4-neon" | "gemini-4-hydrogen") => "xhigh",
+        EffortLevel::Max => "high",
+    };
+    Some(format!("{family}-{suffix}"))
+}
+
+fn build_antigravity_args(
+    conversation: Option<&str>,
+    options: Option<&SessionOptions>,
+) -> Vec<String> {
+    let mut args = vec![
+        "--input-format".into(),
+        "stream-json".into(),
+        "--output-format".into(),
+        "stream-json".into(),
+    ];
+    if let Some(model) = resolve_antigravity_model(
+        options.and_then(|o| o.model.as_deref()),
+        options.and_then(|o| o.effort),
+    ) {
+        args.extend(["--model".into(), model]);
+    }
+    match options.and_then(|o| o.permission) {
+        None | Some(PermissionLevel::FullAccess) => {
+            args.push("--dangerously-skip-permissions".into())
+        }
+        Some(PermissionLevel::Auto) => args.extend(["--mode".into(), "auto".into()]),
+        Some(PermissionLevel::Ask) => args.extend(["--mode".into(), "accept-edits".into()]),
+    }
+    args.push("--print=".into());
+    if let Some(id) = conversation {
+        args.extend(["--conversation".into(), id.into()]);
+    }
+    args
+}
+
 fn validate_options(agent: AgentKind, options: Option<&SessionOptions>) -> Result<()> {
     let Some(options) = options.filter(|o| !o.is_default()) else {
         return Ok(());
     };
-    if (matches!(agent, AgentKind::Antigravity | AgentKind::Cursor)
+    if (agent == AgentKind::Cursor
         && (options.model.is_some() || options.effort.is_some()))
         || (agent == AgentKind::Pi && options.effort.is_some())
     {
@@ -2102,7 +2177,7 @@ fn validate_options(agent: AgentKind, options: Option<&SessionOptions>) -> Resul
         return Err(anyhow!("invalid model name"));
     }
     if agent == AgentKind::Claude && options.effort == Some(EffortLevel::Max) {
-        return Err(anyhow!("Max effort is only available for Codex"));
+        return Err(anyhow!("Max effort is only available for Codex and Antigravity"));
     }
     Ok(())
 }
