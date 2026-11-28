@@ -7,6 +7,7 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window,
     component::{h_flex, input::InlineToken, v_flex},
     div, px,
+    prelude::FluentBuilder,
 };
 use multibot_core::workspaces::parse_session_key;
 use std::ops::Range;
