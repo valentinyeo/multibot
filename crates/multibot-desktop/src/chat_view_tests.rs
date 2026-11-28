@@ -7178,7 +7178,10 @@ fn scrolling_near_top_loads_once_and_preserves_reading_anchor(cx: &mut TestAppCo
         );
         window.scroll(
             "chat-scroll",
-            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.0), scroll.max_offset().y - px(150.0))),
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
+                px(0.0),
+                scroll.max_offset().y - px(150.0),
+            )),
             cx,
         );
         window.render_frame(cx);

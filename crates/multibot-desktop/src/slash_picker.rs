@@ -354,14 +354,12 @@ pub fn detect_trigger(text: &str, caret_byte: usize, agent: AgentKind) -> Option
     let token = &text[start..caret];
     let first = token.chars().next()?;
     match first {
-        '/' => {
-            Some(SlashTrigger {
-                mode: TriggerMode::Slash,
-                start_byte: start,
-                end_byte: caret,
-                query: token[1..].to_string(),
-            })
-        }
+        '/' => Some(SlashTrigger {
+            mode: TriggerMode::Slash,
+            start_byte: start,
+            end_byte: caret,
+            query: token[1..].to_string(),
+        }),
         '$' => {
             if agent != AgentKind::Codex {
                 return None;

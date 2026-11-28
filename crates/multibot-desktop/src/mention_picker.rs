@@ -7,8 +7,9 @@ use gpui_kit::{
     AnyElement, Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Role,
     SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window,
     component::{h_flex, input::InlineToken, v_flex},
-    div, px,
+    div,
     prelude::FluentBuilder,
+    px,
 };
 use multibot_core::workspaces::parse_session_key;
 use multibot_proto::AgentKind;

@@ -253,7 +253,8 @@ impl MultibotView {
                                 .bg(theme::bg_hover())
                                 .text_xs()
                                 .text_color(theme::text_muted())
-                                .child(lang.clone()).test_text(lang),
+                                .child(lang.clone())
+                                .test_text(lang),
                         )
                     })
                     .child(
