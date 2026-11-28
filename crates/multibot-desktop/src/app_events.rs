@@ -3,7 +3,6 @@ use super::*;
 impl MultibotView {
     /// Handles daemon `ServerEvent`s fanned out from the App-scoped connection consumer (or from
     /// another `Ctrl+N` window in tests) uniformly across ALL open windows without spurious redraws.
-
     pub(crate) fn handle_daemon_server_event_with_hint(
         &mut self,
         host_label: &str,

@@ -48,6 +48,7 @@ pub(crate) struct ViewOutboxState {
 }
 
 pub(crate) struct ViewSyncState {
+    #[cfg(test)]
     pub(crate) view_id: u64,
     pub(crate) last_synced_revision: u64,
     pub(crate) last_synced_connection_gen: u64,

@@ -26,6 +26,7 @@ pub(crate) fn parse_outbox_session_key(key: &str) -> Option<(&str, AgentKind, &s
 
 impl MultibotView {
     /// Sends an idle session's prompt, or persists it in the shared FIFO while busy or offline.
+    #[cfg(test)]
     pub(crate) fn send_or_queue_prompt(
         &mut self,
         session: &SessionSummary,
@@ -143,6 +144,7 @@ impl MultibotView {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn flush_outbox_for_current_host(&mut self) -> usize {
         let host = self.current_host_label().to_string();
         self.flush_outbox_for_host(&host)

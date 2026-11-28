@@ -1,6 +1,7 @@
 pub(crate) use actions::*;
 use focus::FocusLayoutSignature;
-pub(crate) use outbox::parse_outbox_session_key;
+#[cfg(test)]
+use outbox::parse_outbox_session_key;
 use shared::backfill_zigshel_workspaces;
 #[cfg(test)]
 #[path = "app_test_support.rs"]
@@ -33,10 +34,8 @@ mod shared;
 mod surfaces;
 #[path = "app_updates.rs"]
 mod updates;
-use updates::DesktopUpdaterPlatform;
 #[cfg(test)]
-use updates::GENERIC_UPDATE_ERROR_COPY;
-pub(crate) use updates::sanitize_update_error_copy;
+use updates::{DesktopUpdaterPlatform, GENERIC_UPDATE_ERROR_COPY, sanitize_update_error_copy};
 
 use crate::chat_view::{ChatViewState, FailedSend};
 use crate::computer_view::ComputerViewState;
@@ -487,6 +486,7 @@ impl MultibotView {
                 remote_search_truncated: false,
             },
             sync: ViewSyncState {
+                #[cfg(test)]
                 view_id,
                 last_synced_revision: revision,
                 last_synced_connection_gen: connection_gen,

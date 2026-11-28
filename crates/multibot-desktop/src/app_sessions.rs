@@ -22,6 +22,7 @@ impl MultibotView {
         self.cleanup_unmounted_surface_state();
     }
 
+    #[cfg(test)]
     pub(crate) fn select_session(&mut self, session: SessionSummary, cx: &mut Context<Self>) {
         let host = self.host_for_summary(&session);
         self.select_session_on_host(host, session, cx);
