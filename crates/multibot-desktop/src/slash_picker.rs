@@ -661,7 +661,8 @@ impl MultibotView {
         self.slash_picker_state.promote_mru(&item.name);
         self.slash_picker_state.close();
         self.prompt_input.update(cx, |state, cx| {
-            state.set_value(next_text, window, cx);
+            state.select_all(window, cx);
+            state.replace(next_text, window, cx);
             state.focus(window, cx);
         });
         cx.notify();

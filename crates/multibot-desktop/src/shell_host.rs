@@ -135,9 +135,7 @@ fn shell_shortcut(key: u32, ctrl: bool, alt: bool, shift: bool) -> Option<ShellS
     if key == 0x56 && ctrl && !alt {
         return Some(ShellShortcut::Paste);
     }
-    registered_native_shortcut(key, ctrl, alt, shift)
-        .filter(|spec| spec.category != multibot_keys::ShortcutCategory::Browser)
-        .map(|spec| ShellShortcut::Forward(spec.gpui_key))
+    registered_native_shortcut(key, ctrl, alt, shift).map(|spec| ShellShortcut::Forward(spec.gpui_key))
 }
 
 #[cfg(any(windows, test))]
@@ -250,17 +248,36 @@ impl ShellHost {
         }
     }
 
-    pub(crate) fn reconcile(&mut self, active: Option<&str>, rect: Option<ShellViewportRect>) {
+    pub(crate) fn focus_session(&self, key: &str) {
+        #[cfg(windows)]
+        if let Some(ShellState::Connected(handle)) = self.entries.get(key) {
+            handle.focus();
+        }
+        #[cfg(not(windows))]
+        let _ = key;
+    }
+
+    pub(crate) fn reconcile(
+        &mut self,
+        active: Option<&str>,
+        rect: Option<ShellViewportRect>,
+        focus_on_show: bool,
+    ) {
         #[cfg(windows)]
         if let Some(host) = &self.native {
             for (key, state) in &mut self.entries {
                 if let ShellState::Connected(handle) = state {
-                    handle.reconcile(host.parent, key.as_str() == active.unwrap_or(""), rect);
+                    handle.reconcile(
+                        host.parent,
+                        key.as_str() == active.unwrap_or(""),
+                        rect,
+                        focus_on_show,
+                    );
                 }
             }
         }
         #[cfg(not(windows))]
-        let _ = (active, rect);
+        let _ = (active, rect, focus_on_show);
     }
 
     pub(crate) fn close_session(&mut self, key: &str) {
@@ -273,6 +290,18 @@ impl ShellHost {
 }
 
 impl MultibotView {
+    pub(crate) fn embedded_shell_visible(&self) -> bool {
+        should_show_embedded_shell(
+            self.main_surface,
+            self.active_modal,
+            self.selected_session.as_ref().map(|s| s.agent),
+            self.chat_state.find_open,
+            self.sidebar_state.rename.is_some() || self.sidebar_state.new_workspace_draft.is_some(),
+        ) && !self.table_modal_state.is_open()
+            && !self.slash_picker_state.is_open()
+            && !(self.sidebar_rendered() && self.sidebar_state.dev_stats_expanded)
+    }
+
     pub(crate) fn reconnect_embedded_shell(&mut self, cx: &mut Context<Self>) {
         if let Some(session) = &self.selected_session {
             let key = self.session_key_for(session);
@@ -296,16 +325,7 @@ impl MultibotView {
                 .collect()
         };
         self.shell_host.retain_live(&keys);
-        let visible = should_show_embedded_shell(
-            self.main_surface,
-            self.active_modal,
-            self.selected_session.as_ref().map(|s| s.agent),
-            self.chat_state.find_open,
-            self.sidebar_state.rename.is_some() || self.sidebar_state.new_workspace_draft.is_some(),
-        ) && !self.table_modal_state.is_open()
-            && !self.computer.is_open()
-            && !self.slash_picker_state.is_open()
-            && !(self.sidebar_rendered() && self.sidebar_state.dev_stats_expanded);
+        let visible = self.embedded_shell_visible();
         let active = visible
             .then(|| {
                 self.selected_session
@@ -313,7 +333,8 @@ impl MultibotView {
                     .map(|s| self.session_key_for(s))
             })
             .flatten();
-        self.shell_host.reconcile(active.as_deref(), None);
+        self.shell_host
+            .reconcile(active.as_deref(), None, !self.computer.is_open());
         let Some(key) = active else { return };
         if !keys.contains(&key) {
             self.shell_host
@@ -498,7 +519,7 @@ impl MultibotView {
         let active_key = key.clone();
         let weak = cx.entity().downgrade();
         v_flex()
-            .w_full()
+            .flex_1()
             .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
             .mx_auto()
             .min_w_0()
@@ -588,19 +609,12 @@ impl MultibotView {
                     window.scale_factor(),
                 );
                 let _ = weak.update(cx, |view, _| {
-                    let visible = should_show_embedded_shell(
-                        view.main_surface,
-                        view.active_modal,
-                        view.selected_session.as_ref().map(|s| s.agent),
-                        view.chat_state.find_open,
-                        view.sidebar_state.rename.is_some()
-                            || view.sidebar_state.new_workspace_draft.is_some(),
-                    ) && !view.table_modal_state.is_open()
-                        && !view.computer.is_open()
-                        && !view.slash_picker_state.is_open()
-                        && !(view.sidebar_rendered() && view.sidebar_state.dev_stats_expanded);
-                    view.shell_host
-                        .reconcile(visible.then_some(active_key.as_str()), Some(rect));
+                    let visible = view.embedded_shell_visible();
+                    view.shell_host.reconcile(
+                        visible.then_some(active_key.as_str()),
+                        Some(rect),
+                        !view.computer.is_open(),
+                    );
                 });
             })
             .id("server-shell-panel")
@@ -724,6 +738,15 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn daily_driver_browser_shortcuts_are_forwarded_without_changing_terminal_keys() {
+        assert_eq!(shell_shortcut(0x41, false, true, false), Some(ShellShortcut::Forward("alt-a")));
+        assert_eq!(shell_shortcut(0x51, false, true, false), Some(ShellShortcut::Forward("alt-q")));
+        assert_eq!(shell_shortcut(0x42, true, false, true), Some(ShellShortcut::Forward("ctrl-shift-b")));
+        assert!(shell_shortcut(0x57, true, false, false).is_none());
+        assert!(shell_shortcut(0x4C, true, false, false).is_none());
+    }
+
     #[test]
     fn keyboard_escape_preserves_terminal_control_keys() {
         for key in [0x4B, 0x31, 0x39, 0xBC, 0x4E] {

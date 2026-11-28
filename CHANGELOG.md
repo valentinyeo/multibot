@@ -12,6 +12,11 @@ This file is embedded in Multibot so Changelog works offline.
 - Keep closed Codex chats and unused transcripts out of the live sidebar; handle /exit and /quit without sending prompts.
 - Cycle Frequent sessions in sidebar order with Ctrl+Tab and Ctrl+Shift+Tab, without changing workspaces or reshuffling the list.
 - Show each sidebar session’s CLI abbreviation and working directory below its title, including pinned chats.
+- Type immediately after switching chats or live server shells, without clicking the input first.
+- Grow the chat composer upward as text wraps, up to ten lines, then scroll within it; Enter still sends and Shift+Enter adds a line.
+- Keep live server shells beside the docked browser or Computer View, with working keyboard focus in both panes.
+- Search keyboard shortcuts by action, section, or key combination; F1 and Esc still close the modal.
+
 - Hide tool calls behind a compact expandable chip; show or hide all details through Ctrl+K → Chat: Show / hide tool call details.
 - Open chat links with a click and terminal or native shell URLs with Ctrl+click; only HTTP and HTTPS links can open.
 - Use the classic robot icon for the Windows app, title bar, taskbar, installer, and shortcuts.

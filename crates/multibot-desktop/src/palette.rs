@@ -2332,8 +2332,28 @@ impl MultibotView {
     }
 
     pub(crate) fn render_shortcuts_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let query = self.shortcuts_search_input.read(cx).value().to_string();
+        let tokens: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
         let mut rows = v_flex().gap_1().p_3();
+        let mut match_count = 0;
         for cat in ALL_CATEGORIES {
+            let matches: Vec<_> = by_category(cat)
+                .filter(|spec| {
+                    let searchable = format!(
+                        "{} {} {} {}",
+                        spec.description,
+                        cat.label(),
+                        spec.display,
+                        spec.gpui_key
+                    )
+                    .to_lowercase();
+                    tokens.iter().all(|token| searchable.contains(token))
+                })
+                .collect();
+            if matches.is_empty() {
+                continue;
+            }
+            match_count += matches.len();
             rows = rows.child(
                 div()
                     .px_3()
@@ -2344,9 +2364,11 @@ impl MultibotView {
                     .text_color(theme::text_muted())
                     .child(cat.label()),
             );
-            for spec in by_category(cat) {
+            for spec in matches {
                 rows = rows.child(
                     h_flex()
+                        .id(format!("shortcut-{}", spec.id))
+                        .test_support()
                         .px_3()
                         .py_1p5()
                         .rounded(RADIUS_ROW)
@@ -2385,6 +2407,18 @@ impl MultibotView {
                         ),
                 );
             }
+        }
+
+        if match_count == 0 {
+            rows = rows.child(
+                div()
+                    .id("shortcuts-empty")
+                    .test_support()
+                    .p_3()
+                    .text_sm()
+                    .text_color(theme::text_muted())
+                    .child(format!("No shortcuts match \"{query}\"")),
+            );
         }
 
         div()
@@ -2444,8 +2478,16 @@ impl MultibotView {
                     )
                     .child(
                         div()
+                            .px_4()
+                            .py_2()
+                            .flex_shrink_0()
+                            .child(Input::new(&self.shortcuts_search_input).id("shortcuts-search")),
+                    )
+                    .child(
+                        div()
                             .id("shortcuts-scroll")
                             .flex_1()
+                            .min_h_0()
                             .overflow_y_scroll()
                             .child(rows),
                     ),

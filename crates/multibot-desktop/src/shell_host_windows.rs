@@ -347,11 +347,20 @@ pub(super) struct EmbeddedShellHandle {
     _job: Arc<Job>,
 }
 impl EmbeddedShellHandle {
+    pub(super) fn focus(&self) {
+        if self.visible {
+            unsafe {
+                SetFocus(self.hwnd as HWND);
+            }
+        }
+    }
+
     pub(super) fn reconcile(
         &mut self,
         parent: usize,
         active: bool,
         rect: Option<ShellViewportRect>,
+        focus_on_show: bool,
     ) {
         unsafe {
             if !active {
@@ -372,7 +381,7 @@ impl EmbeddedShellHandle {
                 return;
             };
             if rect.width == 0 || rect.height == 0 {
-                self.reconcile(parent, false, None);
+                self.reconcile(parent, false, None, false);
                 return;
             }
             if self.rect != Some(rect) || !self.visible {
@@ -389,8 +398,10 @@ impl EmbeddedShellHandle {
             }
             if !self.visible {
                 ShowWindow(self.hwnd as HWND, SW_SHOWNA);
-                SetFocus(self.hwnd as HWND);
                 self.visible = true;
+                if focus_on_show {
+                    self.focus();
+                }
                 VISIBLE.with(|v| {
                     if let Some(shell) = v.borrow_mut().get_mut(&parent) {
                         shell.hwnd = self.hwnd;

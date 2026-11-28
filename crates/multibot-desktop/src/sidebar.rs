@@ -1934,7 +1934,7 @@ impl MultibotView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui_kit::{AppContext, Entity, TestAppContext, WindowOptions, test::TestWindowExt};
+    use gpui_kit::{AppContext, Entity, Focusable, TestAppContext, WindowOptions, test::TestWindowExt};
     use multibot_core::workspaces::DEFAULT_WORKSPACE_ID;
     use multibot_core::workspaces::canonicalize_session_title;
     use multibot_proto::AgentKind;
@@ -2450,6 +2450,7 @@ mod tests {
             ] {
                 window.press("alt-e", cx);
                 window.render_frame(cx);
+                assert!(view.read(cx).prompt_input.read(cx).focus_handle(cx).is_focused(window));
                 view.read_with(cx, |v, _| {
                     assert_eq!(
                         v.session_key_for(v.selected_session.as_ref().unwrap()),
@@ -2509,6 +2510,7 @@ mod tests {
             ] {
                 window.press("ctrl-shift-w", cx);
                 window.render_frame(cx);
+                assert!(view.read(cx).prompt_input.read(cx).focus_handle(cx).is_focused(window));
                 view.read_with(cx, |v, _| {
                     assert_eq!(
                         v.session_key_for(v.selected_session.as_ref().unwrap()),

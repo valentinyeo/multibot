@@ -30,6 +30,22 @@ impl Drop for VoiceState {
 }
 
 impl MultibotView {
+    pub(crate) fn append_dictation_transcript(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let next = append_transcript(self.prompt_input.read(cx).value().as_str(), text);
+        self.prompt_input.update(cx, |input, cx| {
+            input.select_all(window, cx);
+            input.replace(next, window, cx);
+        });
+    }
+
     pub(crate) fn toggle_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.voice.phase {
             DictationPhase::Listening => {
@@ -70,15 +86,7 @@ impl MultibotView {
                     .update_in(cx, |view, window, cx| {
                         match event {
                             VoiceEvent::Transcript(text) => {
-                                if !text.is_empty() {
-                                    let next = append_transcript(
-                                        view.prompt_input.read(cx).value().as_str(),
-                                        &text,
-                                    );
-                                    view.prompt_input.update(cx, |input, cx| {
-                                        input.replace_all(next, window, cx)
-                                    });
-                                }
+                                view.append_dictation_transcript(&text, window, cx);
                             }
                             VoiceEvent::Error(error) => {
                                 view.voice.capture = None;

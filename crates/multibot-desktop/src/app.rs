@@ -18,7 +18,12 @@ use gpui_kit::{
     App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement,
     IntoElement, KeyDownEvent, ModifiersChangedEvent, ParentElement, Render, Styled, Subscription,
     Task, TestSupportExt, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
-    component::{Sizable, button::Button, h_flex, input::InputState},
+    component::{
+        Sizable,
+        button::Button,
+        h_flex,
+        input::{InputEvent, InputState, TextareaState},
+    },
     div,
     prelude::FluentBuilder,
     px, size,
@@ -387,7 +392,10 @@ pub struct MultibotView {
     pub(crate) deepgram_language_input: Entity<InputState>,
 
     // Inputs
-    pub(crate) prompt_input: Entity<InputState>,
+    pub(crate) prompt_input: Entity<TextareaState>,
+    pub(crate) pending_focus_input: bool,
+    pub(crate) shortcuts_search_input: Entity<InputState>,
+    pub(crate) _shortcuts_search_sub: Subscription,
     pub(crate) host_input: Entity<InputState>,
     pub(crate) palette_input: Entity<InputState>,
     pub(crate) notice: Option<String>,
@@ -507,8 +515,19 @@ impl MultibotView {
         let footprint_label = format_footprint(&footprint);
         let mut last_footprint_label = footprint_label.clone();
 
-        let prompt_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Message this session"));
+        let prompt_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("Message this session")
+                .auto_grow(1, 10)
+                .soft_wrap(true)
+        });
+        let shortcuts_search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search shortcuts..."));
+        let shortcuts_search_sub = cx.subscribe(&shortcuts_search_input, |_, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
         let host_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("user@vps-host (or user@host:22)"));
         let palette_input =
@@ -748,6 +767,9 @@ impl MultibotView {
             deepgram_key_input,
             deepgram_language_input,
             prompt_input,
+            pending_focus_input: false,
+            shortcuts_search_input,
+            _shortcuts_search_sub: shortcuts_search_sub,
             host_input,
             palette_input,
             notice: None,
@@ -4402,6 +4424,7 @@ impl MultibotView {
         self.active_switch_token = Some(token.clone());
         self.pending_switch_tokens.insert(session.id.clone(), token);
         self.selected_session = Some(session.clone());
+        self.pending_focus_input = true;
         self.set_main_surface(MainSurface::Chat);
         self.active_modal = ActiveModal::None;
         self.remote_search_hits.clear();
@@ -5192,8 +5215,10 @@ impl MultibotView {
     pub(crate) fn is_focused_on_mounted_known_handle(&self, window: &Window, cx: &App) -> bool {
         self.root_focus_handle.is_focused(window)
             || (self.active_modal == ActiveModal::Palette
+                && self.palette_input.read(cx).focus_handle(cx).is_focused(window))
+            || (self.active_modal == ActiveModal::Shortcuts
                 && self
-                    .palette_input
+                    .shortcuts_search_input
                     .read(cx)
                     .focus_handle(cx)
                     .is_focused(window))
@@ -5237,13 +5262,14 @@ impl MultibotView {
     /// Restores focus to the active surface's default mounted `FocusHandle`:
     /// - `table_modal_state.focus_handle` if the expanded table modal is open
     /// - `palette_input` if the Command Palette modal is open
-    /// - `prompt_input` if on `MainSurface::Chat` with no modal open and the Slash Picker is open
+    /// - `shortcuts_search_input` if the Shortcuts modal is open
+    /// - `prompt_input` for chat sessions, or the native input for shell sessions
     /// - `chat_state.focus_handle` (`#chat-panel-root`) if on `MainSurface::Chat` with no modal
     ///   open and Chat Find or Message Navigation / Action Menu is active
     /// - `sidebar_state.focus_handle` if no modal/chat overlay is active and an Open-sidebar
     ///   inline rename or new-workspace draft is visibly mounted
     /// - `inbox_state.focus_handle` if on `MainSurface::Inbox` with no modal open
-    /// - `root_focus_handle` otherwise (including while `ActiveModal::Shortcuts` is open)
+    /// - `root_focus_handle` otherwise
     pub(crate) fn focus_active_surface_default(
         &mut self,
         window: &mut Window,
@@ -5255,6 +5281,10 @@ impl MultibotView {
             self.palette_input.update(cx, |state, cx| {
                 state.focus(window, cx);
             });
+        } else if self.active_modal == ActiveModal::Shortcuts {
+            self.shell_host.focus_parent();
+            self.shortcuts_search_input
+                .update(cx, |state, cx| state.focus(window, cx));
         } else if self.active_modal == ActiveModal::None
             && self.main_surface == MainSurface::Settings
         {
@@ -5281,6 +5311,24 @@ impl MultibotView {
         } else if self.main_surface == MainSurface::Inbox && self.active_modal == ActiveModal::None
         {
             self.focus_inbox(window, cx);
+        } else if self.main_surface == MainSurface::Chat && self.active_modal == ActiveModal::None {
+            if let Some(open) = self.computer.open() {
+                self.shell_host.focus_parent();
+                open.url_input
+                    .update(cx, |state, cx| state.focus(window, cx));
+            } else if let Some(session) = &self.selected_session {
+                if session.agent == AgentKind::Shell {
+                    let key = self.session_key_for(session);
+                    self.focus_chat_panel(window, cx);
+                    self.shell_host.focus_session(&key);
+                } else {
+                    self.shell_host.focus_parent();
+                    self.prompt_input
+                        .update(cx, |state, cx| state.focus(window, cx));
+                }
+            } else {
+                window.focus(&self.root_focus_handle, cx);
+            }
         } else {
             window.focus(&self.root_focus_handle, cx);
         }
@@ -5290,12 +5338,18 @@ impl MultibotView {
     /// is unmounted in the current state (which would otherwise cause GPUI to fall back to
     /// `gpui_base::Root` above `#multibot-root`, breaking all global shortcuts).
     fn has_focused_unmounted_child(&self, window: &Window, cx: &Context<Self>) -> bool {
-        (self.active_modal != ActiveModal::Palette
+        (self.active_modal != ActiveModal::Shortcuts
             && self
-                .palette_input
+                .shortcuts_search_input
                 .read(cx)
                 .focus_handle(cx)
                 .is_focused(window))
+            || (self.active_modal != ActiveModal::Palette
+                && self
+                    .palette_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window))
             || (!self.table_modal_state.is_open()
                 && self
                     .table_modal_state
@@ -5360,6 +5414,28 @@ impl Render for MultibotView {
         let current_sig = self.focus_layout_signature();
         let prev_sig = self.last_focus_layout_sig.replace(current_sig.clone());
         let layout_changed = prev_sig.as_ref().is_some_and(|prev| prev != &current_sig);
+        if self.active_modal == ActiveModal::Shortcuts
+            && prev_sig
+                .as_ref()
+                .is_none_or(|prev| prev.active_modal != ActiveModal::Shortcuts)
+        {
+            self.shortcuts_search_input
+                .update(cx, |state, cx| state.set_value("", window, cx));
+            self.focus_active_surface_default(window, cx);
+        }
+        if std::mem::take(&mut self.pending_focus_input)
+            && self.main_surface == MainSurface::Chat
+            && self.active_modal == ActiveModal::None
+            && !self.table_modal_state.is_open()
+            && !self.chat_state.find_open
+            && self.chat_state.focused_message_idx.is_none()
+            && !self.chat_state.message_action_menu_open
+            && self.sidebar_state.rename.is_none()
+            && self.sidebar_state.new_workspace_draft.is_none()
+            && !self.computer.is_open()
+        {
+            self.focus_active_surface_default(window, cx);
+        }
         let stale_sidebar_focus = self.active_modal == ActiveModal::None
             && !self.table_modal_state.is_open()
             && (!self.is_sidebar_inline_edit_mounted() || self.has_mounted_chat_overlay())
@@ -5417,6 +5493,17 @@ impl Render for MultibotView {
                 }),
             )
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                if this.active_modal == ActiveModal::Shortcuts
+                    && !this.table_modal_state.is_open()
+                    && ev.keystroke.key == "escape"
+                {
+                    this.active_modal = ActiveModal::None;
+                    this.focus_active_surface_default(window, cx);
+                    cx.stop_propagation();
+                    window.prevent_default();
+                    cx.notify();
+                    return;
+                }
                 if this.handle_lifecycle_keydown(ev, window, cx) {
                     return;
                 }
@@ -6303,6 +6390,413 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn daily_driver_session_switch_paths_focus_composer(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            let alpha = make_session("focus-alpha", AgentKind::Claude, "Focus Alpha", false);
+            let beta = make_session("focus-beta", AgentKind::Codex, "Focus Beta", false);
+            let shell = make_session("focus-shell", AgentKind::Shell, "Focus Shell", false);
+            view.update(cx, |v, cx| {
+                v.sessions = vec![alpha.clone(), beta.clone(), shell.clone()];
+                v.set_sidebar_mode_synced(SidebarMode::Open, cx);
+            });
+            for path in [
+                "sidebar",
+                "next",
+                "previous",
+                "digit",
+                "palette",
+                "inbox-enter",
+                "inbox-click",
+                "shell-to-chat",
+            ] {
+                view.update(cx, |v, cx| {
+                    v.select_session(
+                        match path {
+                            "shell-to-chat" => shell.clone(),
+                            "previous" => beta.clone(),
+                            _ => alpha.clone(),
+                        },
+                        cx,
+                    );
+                    v.prompt_input
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                });
+                window.render_frame(cx);
+                view.update(cx, |v, cx| {
+                    window.focus(&v.root_focus_handle, cx);
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                match path {
+                    "sidebar" => window.click("session-1", cx),
+                    "next" => window.press("ctrl-tab", cx),
+                    "previous" => window.press("ctrl-shift-tab", cx),
+                    "digit" => window.press("ctrl-2", cx),
+                    "palette" => {
+                        window.press("ctrl-k", cx);
+                        window.input("Focus Beta", cx);
+                        window.press("enter", cx);
+                    }
+                    "inbox-enter" | "inbox-click" => {
+                        window.press("alt-i", cx);
+                        window.render_frame(cx);
+                        if path == "inbox-enter" {
+                            window.press("enter", cx);
+                        } else {
+                            window.click("inbox-row-1", cx);
+                        }
+                    }
+                    "shell-to-chat" => window.press("ctrl-1", cx),
+                    _ => unreachable!(),
+                }
+                window.render_frame(cx);
+                assert_eq!(view.read(cx).main_surface, MainSurface::Chat, "{path}");
+                assert!(
+                    view.read(cx)
+                        .prompt_input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window),
+                    "{path}"
+                );
+                window.input("ready", cx);
+                assert_eq!(
+                    view.read(cx).prompt_input.read(cx).value(),
+                    "ready",
+                    "{path}"
+                );
+            }
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn daily_driver_composer_grows_upward_caps_scrolls_and_sends(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                let session = make_session("growing", AgentKind::Claude, "Growing", false);
+                v.daemon_tx = Some(tx);
+                v.sessions = vec![session.clone()];
+                v.select_session(session, cx);
+            });
+            window.render_frame(cx);
+            let initial = window.find("prompt-input").bounds();
+            window.input("first", cx);
+            window.press("shift-enter", cx);
+            window.input("second", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).prompt_input.read(cx).value(), "first\nsecond");
+            let grown = window.find("prompt-input").bounds();
+            assert!(grown.size.height > initial.size.height);
+            assert!((grown.bottom() - initial.bottom()).abs() <= px(1.0));
+            while let Ok(request) = rx.try_recv() {
+                assert!(!matches!(request, ClientRequest::SendPrompt { .. }));
+            }
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).prompt_input.read(cx).value(), "");
+            let mut sent = false;
+            while let Ok(request) = rx.try_recv() {
+                sent |= matches!(request, ClientRequest::SendPrompt { text, .. } if text == "first\nsecond");
+            }
+            assert!(sent);
+            assert_eq!(window.find("prompt-input").bounds().size.height, initial.size.height);
+
+            window.input(&"dictated words ".repeat(50), cx);
+            window.render_frame(cx);
+            assert!(window.find("prompt-input").bounds().size.height > initial.size.height);
+            view.update(cx, |v, cx| {
+                v.prompt_input.update(cx, |input, cx| input.replace_all((1..=10).map(|n| n.to_string()).collect::<Vec<_>>().join("\n"), window, cx));
+            });
+            window.render_frame(cx);
+            let capped = window.find("prompt-input").bounds().size.height;
+            window.press("ctrl-end", cx);
+            for _ in 0..8 {
+                window.press("shift-enter", cx);
+                window.input("more", cx);
+            }
+            window.render_frame(cx);
+            assert_eq!(window.find("prompt-input").bounds().size.height, capped);
+            let input = view.read(cx).prompt_input.read(cx);
+            assert!(input.scroll_offset().y < px(0.0));
+            let caret = input.cursor_layout().unwrap().0;
+            assert!(caret.top() + input.scroll_offset().y >= input.input_bounds().top() - px(1.0));
+            assert!(caret.bottom() + input.scroll_offset().y <= input.input_bounds().bottom() + px(1.0));
+            view.update(cx, |v, cx| v.append_dictation_transcript(&"dictation continues ".repeat(80), window, cx));
+            window.render_frame(cx);
+            let input = view.read(cx).prompt_input.read(cx);
+            assert_eq!(input.cursor(), input.value().len());
+            assert_eq!(window.find("prompt-input").bounds().size.height, capped);
+            let caret = input.cursor_layout().unwrap().0;
+            assert!(caret.top() + input.scroll_offset().y >= input.input_bounds().top() - px(1.0));
+            assert!(caret.bottom() + input.scroll_offset().y <= input.input_bounds().bottom() + px(1.0), "caret={caret:?} scroll={:?} bounds={:?}", input.scroll_offset(), input.input_bounds());
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn daily_driver_shell_and_computer_view_share_the_split(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                let session = make_session("split-shell", AgentKind::Shell, "Split Shell", false);
+                v.sessions = vec![session.clone()];
+                v.select_session(session, cx);
+            });
+            window.render_frame(cx);
+            let full_width = window.find("server-shell-panel").bounds().size.width;
+            window.press("ctrl-k", cx);
+            window.input("Toggle Computer View", cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert!(view.read(cx).embedded_shell_visible());
+            assert!(window.find("computer-header").visible());
+            let shell = window.find("server-shell-panel").bounds();
+            let computer = window.find("computer-pane").bounds();
+            assert!(shell.size.width < full_width);
+            assert!(shell.right() <= computer.left() + px(1.0));
+            let input = view.read(cx).computer.open().unwrap().url_input.clone();
+            assert!(input.read(cx).focus_handle(cx).is_focused(window));
+            window.input("https://example.com", cx);
+            assert_eq!(input.read(cx).value(), "https://example.com");
+            window.render_frame(cx);
+            assert!(input.read(cx).focus_handle(cx).is_focused(window));
+            window.click("computer-close", cx);
+            window.render_frame(cx);
+            assert!(!view.read(cx).computer.is_open());
+            assert!(view.read(cx).embedded_shell_visible());
+            assert_eq!(
+                window.find("server-shell-panel").bounds().size.width,
+                full_width
+            );
+            assert!(
+                view.read(cx)
+                    .chat_state
+                    .focus_handle
+                    .as_ref()
+                    .unwrap()
+                    .is_focused(window)
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn daily_driver_shortcuts_search_filters_and_never_changes_the_draft(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                let session = make_session("search-shortcuts", AgentKind::Claude, "Shortcuts", false);
+                v.select_session(session, cx);
+                v.prompt_input
+                    .update(cx, |input, cx| input.set_value("unsent draft", window, cx));
+            });
+            window.render_frame(cx);
+            for open_from_palette in [false, true] {
+                if open_from_palette {
+                    window.press("ctrl-k", cx);
+                    window.input("Show Keyboard Shortcuts", cx);
+                    window.press("enter", cx);
+                } else {
+                    window.press("f1", cx);
+                }
+                window.render_frame(cx);
+                let input = view.read(cx).shortcuts_search_input.clone();
+                assert!(input.read(cx).focus_handle(cx).is_focused(window));
+                assert_eq!(input.read(cx).value(), "");
+                for spec in multibot_keys::SHORTCUTS {
+                    assert!(
+                        window.try_find(format!("shortcut-{}", spec.id)).is_some(),
+                        "{}",
+                        spec.id
+                    );
+                }
+                for query in [
+                    "workspace",
+                    "CTRL+SHIFT+W",
+                    "ctrl-shift-w",
+                    "workspace switch",
+                    "no-such-shortcut",
+                ] {
+                    window.press("ctrl-a", cx);
+                    window.input(query, cx);
+                    window.render_frame(cx);
+                    let tokens: Vec<_> = query
+                        .to_lowercase()
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect();
+                    for spec in multibot_keys::SHORTCUTS {
+                        let searchable = format!(
+                            "{} {} {} {}",
+                            spec.description,
+                            spec.category.label(),
+                            spec.display,
+                            spec.gpui_key
+                        )
+                        .to_lowercase();
+                        let expected = tokens.iter().all(|t| searchable.contains(t));
+                        assert_eq!(
+                            window.try_find(format!("shortcut-{}", spec.id)).is_some(),
+                            expected,
+                            "{query}: {}",
+                            spec.id
+                        );
+                    }
+                }
+                assert!(window.find("shortcuts-empty").visible());
+                window.press("ctrl-a", cx);
+                window.press("backspace", cx);
+                window.render_frame(cx);
+                assert!(window.try_find("shortcuts-empty").is_none());
+                for spec in multibot_keys::SHORTCUTS {
+                    assert!(window.try_find(format!("shortcut-{}", spec.id)).is_some());
+                }
+                window.input("workspace", cx);
+                window.press("escape", cx);
+                window.render_frame(cx);
+                assert_eq!(view.read(cx).active_modal, ActiveModal::None);
+                assert_eq!(view.read(cx).prompt_input.read(cx).value(), "unsent draft");
+                assert!(
+                    view.read(cx)
+                        .prompt_input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window)
+                );
+            }
+            window.press("f1", cx);
+            window.input("workspace", cx);
+            window.press("f1", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::None);
+            assert!(
+                view.read(cx)
+                    .prompt_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn daily_driver_spawned_chat_and_shell_switches_focus_the_active_input(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            let first = make_session("shell-one", AgentKind::Shell, "Shell One", false);
+            let second = make_session("shell-two", AgentKind::Shell, "Shell Two", false);
+            view.update(cx, |v, cx| {
+                v.sessions = vec![first.clone(), second.clone()];
+                v.select_session(first.clone(), cx);
+            });
+            window.render_frame(cx);
+            for session in [second, first] {
+                view.update(cx, |v, cx| v.select_session(session.clone(), cx));
+                window.render_frame(cx);
+                assert!(
+                    view.read(cx)
+                        .chat_state
+                        .focus_handle
+                        .as_ref()
+                        .unwrap()
+                        .is_focused(window)
+                );
+                assert!(!view.read(cx).pending_focus_input);
+            }
+            let (tx, _rx) = mpsc::unbounded_channel();
+            view.update(cx, |v, cx| {
+                v.daemon_tx = Some(tx);
+                assert!(v.spawn_new_session(AgentKind::Claude, "/srv/app".into(), None, None, cx));
+                v.handle_daemon_server_event(
+                    ServerEvent::SessionSpawned {
+                        session: make_session("spawned-chat", AgentKind::Claude, "Spawned", false),
+                    },
+                    cx,
+                );
+            });
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).selected_session.as_ref().unwrap().id,
+                "spawned-chat"
+            );
+            assert!(
+                view.read(cx)
+                    .prompt_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+            window.input("new chat ready", cx);
+            assert_eq!(
+                view.read(cx).prompt_input.read(cx).value(),
+                "new chat ready"
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn daily_driver_pending_focus_yields_to_find_rename_and_computer(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            let session = make_session("focus-guards", AgentKind::Claude, "Focus Guards", false);
+            view.update(cx, |v, cx| {
+                v.sessions = vec![session.clone()];
+                v.select_session(session.clone(), cx);
+            });
+            window.render_frame(cx);
+            window.press("ctrl-f", cx);
+            window.render_frame(cx);
+            view.update(cx, |v, cx| {
+                v.pending_focus_input = true;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(view.read(cx).chat_state.find_open);
+            assert!(
+                view.read(cx)
+                    .chat_state
+                    .focus_handle
+                    .as_ref()
+                    .unwrap()
+                    .is_focused(window)
+            );
+            window.press("escape", cx);
+            window.press("f2", cx);
+            window.render_frame(cx);
+            view.update(cx, |v, cx| {
+                v.pending_focus_input = true;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(view.read(cx).sidebar_state.rename.is_some());
+            assert!(
+                !view
+                    .read(cx)
+                    .prompt_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+            window.press("escape", cx);
+            view.update(cx, |v, cx| {
+                v.open_computer_view(window, cx);
+                v.select_session(session, cx);
+            });
+            window.render_frame(cx);
+            let input = view.read(cx).computer.open().unwrap().url_input.clone();
+            assert!(input.read(cx).focus_handle(cx).is_focused(window));
+            window.input("https://example.com", cx);
+            assert_eq!(input.read(cx).value(), "https://example.com");
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
     fn lifecycle_each_view_keeps_workspace_and_favorites_splits(cx: &mut TestAppContext) {
         use multibot_core::workspaces::{InboxSplit, SessionLifecycle};
         let (handle, view) = open_test_view_with_entity(cx);
@@ -6383,7 +6877,7 @@ mod tests {
                 v.sessions = vec![session.clone()];
                 v.select_session(session, cx);
                 v.prompt_input
-                    .update(cx, |input, cx| input.set_value("draft", window, cx));
+                    .update(cx, |input, cx| input.replace("draft", window, cx));
                 let focus = v.prompt_input.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
             });
@@ -12825,7 +13319,7 @@ mod tests {
                 "Ctrl+Shift+I (ToggleInbox) must close open Table Modal"
             );
             assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
-            assert!(view.read(cx).root_focus_handle.is_focused(window));
+            assert!(view.read(cx).prompt_input.read(cx).focus_handle(cx).is_focused(window));
 
             // 2b. Ctrl+Shift+I (ToggleInbox) from Chat with Table Modal open closes modal and opens interactive Inbox
             open_and_focus_table(window, cx);
@@ -12887,7 +13381,7 @@ mod tests {
                 "F1 (OpenShortcuts) must close open Table Modal"
             );
             assert_eq!(view.read(cx).active_modal, ActiveModal::Shortcuts);
-            assert!(view.read(cx).root_focus_handle.is_focused(window));
+            assert!(view.read(cx).shortcuts_search_input.read(cx).focus_handle(cx).is_focused(window));
             window.press("escape", cx);
             window.render_frame(cx);
             assert_eq!(view.read(cx).active_modal, ActiveModal::None);

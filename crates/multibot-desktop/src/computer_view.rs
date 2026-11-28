@@ -718,6 +718,7 @@ impl crate::app::MultibotView {
         });
         // Focus lands in the URL bar so the first keystroke is the address, not a Tab.
         let input_focus = url_input.read(cx).focus_handle(cx);
+        self.shell_host.focus_parent();
         window.focus(&input_focus, cx);
         let _ = focus_handle;
         cx.notify();
@@ -727,6 +728,7 @@ impl crate::app::MultibotView {
     /// process, no thread and no native window.
     pub(crate) fn close_computer_view(&mut self, cx: &mut Context<Self>) {
         self.teardown_computer_view();
+        self.pending_focus_input = true;
         cx.notify();
     }
 

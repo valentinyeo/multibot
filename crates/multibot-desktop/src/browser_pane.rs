@@ -141,7 +141,6 @@ mod windows {
                 && !self.computer.is_open())
             .then(|| self.selected_session.as_ref())
             .flatten()
-            .filter(|session| session.agent != multibot_proto::AgentKind::Shell)
             .map(|session| self.session_key_for(session))
         }
 
@@ -162,8 +161,7 @@ mod windows {
             if let Some(parent) = parent_handle(window) {
                 native::focus(parent);
             }
-            self.prompt_input
-                .update(cx, |input, cx| input.focus(window, cx));
+            self.focus_active_surface_default(window, cx);
         }
 
         pub(crate) fn focus_browser_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -14,7 +14,7 @@ use gpui_kit::{
         Disableable, Selectable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
-        input::{self, Input},
+        input::{self, Textarea},
         text::{TableData, TextView},
         v_flex,
     },
@@ -2632,7 +2632,8 @@ impl MultibotView {
                 self.chat_state.reply_quote = quote;
             }
             self.prompt_input.update(cx, |state, cx| {
-                state.set_value(raw_prompt, window, cx);
+                state.select_all(window, cx);
+                state.replace(raw_prompt, window, cx);
             });
         }
         cx.notify();
@@ -2828,7 +2829,8 @@ impl MultibotView {
 
         if staged_any {
             self.prompt_input.update(cx, |state, cx| {
-                state.set_value(current, window, cx);
+                state.select_all(window, cx);
+                state.replace(current, window, cx);
             });
         }
         cx.notify();
@@ -5428,7 +5430,7 @@ impl MultibotView {
                 )
             ))
             .child(
-                div().w_full().px_5().pb_4().pt_2().child(
+                div().w_full().flex_shrink_0().px_5().pb_4().pt_2().child(
                     h_flex()
                         .w_full()
                         .max_w(px(760.0))
@@ -5436,8 +5438,8 @@ impl MultibotView {
                         .px_3()
                         .py_1p5()
                         .gap_2()
-                        .items_center()
-                        .rounded(RADIUS_CHIP)
+                        .items_end()
+                        .rounded(px(20.0))
                         .bg(theme::bg_surface())
                         .border_1()
                         .border_color(theme::border_subtle())
@@ -5472,9 +5474,8 @@ impl MultibotView {
                                 .text_color(theme::text_muted()).child(options_summary)
                         ))
                         .child(
-                            div().flex_1().child(
-                                Input::new(&self.prompt_input)
-                                    .id("prompt-input")
+                            div().id("prompt-input").test_support().flex_1().min_w_0().child(
+                                Textarea::new(&self.prompt_input)
                                     .appearance(false),
                             ),
                         )
@@ -7614,7 +7615,8 @@ mod tests {
             // 6. Mid-sentence Claude "please /pl" + Enter -> "please /plan "
             view.update(cx, |v, cx| {
                 v.prompt_input.update(cx, |input, cx| {
-                    input.set_value("please ", window, cx);
+                    input.select_all(window, cx);
+                    input.replace("please ", window, cx);
                     input.focus(window, cx);
                 });
                 cx.notify();
@@ -7649,7 +7651,8 @@ mod tests {
                     }],
                 );
                 v.prompt_input.update(cx, |input, cx| {
-                    input.set_value("run ", window, cx);
+                    input.select_all(window, cx);
+                    input.replace("run ", window, cx);
                     input.focus(window, cx);
                 });
                 cx.notify();
@@ -7678,7 +7681,8 @@ mod tests {
                     ..Default::default()
                 });
                 v.prompt_input.update(cx, |input, cx| {
-                    input.set_value("hello ", window, cx);
+                    input.select_all(window, cx);
+                    input.replace("hello ", window, cx);
                     input.focus(window, cx);
                 });
                 cx.notify();
@@ -7710,7 +7714,8 @@ mod tests {
             // 9. Ctrl+/ browse mode: "hello " -> Ctrl+/ -> Backspace past anchor immediately closes picker
             view.update(cx, |v, cx| {
                 v.prompt_input.update(cx, |input, cx| {
-                    input.set_value("hello ", window, cx);
+                    input.select_all(window, cx);
+                    input.replace("hello ", window, cx);
                     input.focus(window, cx);
                 });
                 cx.notify();
