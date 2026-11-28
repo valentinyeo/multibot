@@ -23,9 +23,7 @@ use multibot_core::workspaces::{
     DEFAULT_WORKSPACE_NAME, STARRED_WORKSPACE_ID, now_unix_ms, rank_palette,
 };
 use multibot_keys::{ALL_CATEGORIES, by_category};
-use multibot_proto::AgentKind;
-#[cfg(test)]
-use multibot_proto::ClientRequest;
+use multibot_proto::{AgentKind, ClientRequest};
 
 pub(crate) struct SessionDirectoryPicker {
     agent: AgentKind,
@@ -40,6 +38,8 @@ pub(crate) enum ReminderTarget {
 
 #[derive(Default)]
 pub(crate) struct PaletteState {
+    pub server_shells: bool,
+    pub shell_kill_target: Option<String>,
     pub stats: PaletteStats,
     pub reminder_target: Option<ReminderTarget>,
     pub hibernate_wake_on_reply: bool,
@@ -63,6 +63,8 @@ impl MultibotView {
         self.active_modal = ActiveModal::Palette;
         self.palette_state.provider_picker = false;
         self.palette_state.mode = PaletteMode::Global;
+        self.palette_state.server_shells = false;
+        self.palette_state.shell_kill_target = None;
         self.palette_state.reminder_target = None;
         self.palette_state.directory_picker = None;
         self.palette_state.dissolve_workspace_id = None;
@@ -238,6 +240,17 @@ impl MultibotView {
                 .into_iter()
                 .map(String::from)
                 .collect(),
+                tab_context: false,
+                global: true,
+            },
+            PaletteCommandSpec {
+                id: "pal-cmd-server-shells".into(),
+                label: "Server shells".into(),
+                chord: String::new(),
+                category: PaletteCategory::Sessions,
+                destructive: false,
+                aliases: ["tmux", "shells", "detached", "unattached", "kill shell", "recover shells", "server shells"]
+                    .into_iter().map(str::to_string).collect(),
                 tab_context: false,
                 global: true,
             },
@@ -914,6 +927,38 @@ impl MultibotView {
         if self.palette_state.provider_picker {
             return self.provider_picker_rows(query);
         }
+        if self.palette_state.shell_kill_target.is_some() {
+            return [("pal-shell-kill-confirm", "End shell permanently", true),
+                    ("pal-shell-kill-cancel", "Cancel", false)]
+                .into_iter().map(|(id, label, destructive)| PaletteRow::Command {
+                    id: id.into(), label: label.into(), chord: "Enter · Esc cancels".into(),
+                    category: PaletteCategory::Sessions, destructive, match_rank: 0, frecency: 0,
+                }).collect();
+        }
+        if self.palette_state.server_shells {
+            let query = query.trim().to_lowercase();
+            return self.session_inputs().into_iter()
+                .filter(|input| input.summary.agent == AgentKind::Shell
+                    && (!input.summary.archived || input.summary.shell_attached.is_some())
+                    && self.tx_for_host(input.host).is_some())
+                .filter_map(|input| {
+                    let shell = input.summary;
+                    let title = self.sidebar_state.workspace_store.effective_title(&input.key, &shell.title);
+                    let preview = shell.last_assistant_preview.clone().or_else(|| shell.cwd.clone()).unwrap_or_default();
+                    let attached = match shell.shell_attached {
+                        Some(true) => "Attached", Some(false) => "Detached", None => "Live",
+                    };
+                    let title = format!("{title} · {}", shell.id);
+                    let host = format!("{} · {attached}", input.host);
+                    if !format!("{title} {host} {preview}").to_lowercase().contains(&query) {
+                        return None;
+                    }
+                    Some(PaletteRow::Session {
+                        session_key: input.key, title, agent: AgentKind::Shell,
+                        cwd: Some(preview), workspace_name: host, match_rank: 0, frecency: 0,
+                    })
+                }).collect();
+        }
         if self.palette_state.dissolve_workspace_id.is_some() {
             return vec![PaletteRow::Command {
                 id: "workspace.dissolve.confirm".into(),
@@ -1062,6 +1107,48 @@ impl MultibotView {
             }
             self.palette_state.provider_picker = false;
             self.active_modal = ActiveModal::None;
+            return;
+        }
+        if let Some(key) = self.palette_state.shell_kill_target.take() {
+            if matches!(row, PaletteRow::Command { ref id, .. } if id == "pal-shell-kill-confirm") {
+                self.dissolve_session_key_confirmed(&key, cx);
+            }
+            self.palette_state.selected_index = 0;
+            if let Some(window) = window {
+                self.palette_input.update(cx, |input, cx| input.set_value("", window, cx));
+            }
+            cx.notify();
+            return;
+        }
+        if matches!(row, PaletteRow::Command { ref id, .. } if id == "pal-cmd-server-shells") {
+            self.palette_state.server_shells = true;
+            self.palette_state.selected_index = 0;
+            self.active_modal = ActiveModal::Palette;
+            let hosts: std::collections::HashSet<_> = self.session_inputs().iter()
+                .map(|input| input.host.to_string()).chain(self.host_txs.keys().cloned())
+                .chain(std::iter::once(self.current_host_label().to_string())).collect();
+            for host in hosts {
+                if let Some(tx) = self.tx_for_host(&host) {
+                    let _ = tx.send(ClientRequest::ListSessions { limit: Some(200), include_archived: Some(true) });
+                }
+            }
+            if let Some(window) = window {
+                self.palette_input.update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                    input.focus(window, cx);
+                });
+            }
+            cx.notify();
+            return;
+        }
+        if self.palette_state.server_shells
+            && let PaletteRow::Session { ref session_key, .. } = row {
+            let key = session_key.clone();
+            if self.reactivate_session_key(&key, cx) {
+                self.open_session_key_with_tracking(&key, false, cx);
+            }
+            self.palette_state.server_shells = false;
+            cx.notify();
             return;
         }
         if let Some(id) = self.palette_state.dissolve_workspace_id.take() {
@@ -1904,7 +1991,11 @@ impl MultibotView {
                         let row_clone = row.clone();
                         let title_owned = title.clone();
                         let ws_owned = workspace_name.clone();
-                        let _ = session_key;
+                        let shell_key = session_key.clone();
+                        let shell_preview = match &row {
+                            PaletteRow::Session { cwd, .. } => cwd.clone().unwrap_or_default(),
+                            _ => String::new(),
+                        };
 
                         list = list.child(
                             div()
@@ -1973,8 +2064,26 @@ impl MultibotView {
                                                 .text_xs()
                                                 .text_color(theme::text_muted())
                                                 .child(ws_owned),
-                                        ),
-                                ),
+                                        )
+                                        .when(self.palette_state.server_shells, |el| el.child(
+                                            Button::new(format!("pal-shell-end-{s_idx}"))
+                                                .small().label("End")
+                                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                                .on_click(cx.listener(move |this, _, window, cx| {
+                                                    cx.stop_propagation();
+                                                    this.palette_state.shell_kill_target = Some(shell_key.clone());
+                                                    this.palette_state.selected_index = 0;
+                                                    this.palette_input.update(cx, |input, cx| {
+                                                        input.set_value("", window, cx);
+                                                        input.focus(window, cx);
+                                                    });
+                                                    cx.notify();
+                                                })),
+                                        )),
+                                )
+                                .when(self.palette_state.server_shells, |el| el.child(
+                                    div().text_xs().text_color(theme::text_muted()).child(shell_preview),
+                                )),
                         );
                     }
                     PaletteRow::Command {
@@ -2173,6 +2282,12 @@ impl MultibotView {
         } else {
             context_banner
         };
+
+        let context_banner = if self.palette_state.shell_kill_target.is_some() {
+            Some("End this server shell permanently? Running work will stop.".into())
+        } else if self.palette_state.server_shells {
+            Some("Server shells · Enter to attach · End to kill".into())
+        } else { context_banner };
 
         div()
             .id("palette-backdrop")

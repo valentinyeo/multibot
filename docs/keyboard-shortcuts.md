@@ -86,7 +86,10 @@ Source of truth for the F1 overlay is `SHORTCUT_ROWS` in `src/shortcuts.zig`. Th
 - Ctrl+Shift+3: New VPS Remote host 1 tab
 - Ctrl+Shift+4: New VPS Remote host 2 tab
 - Ctrl+Shift+5: New PowerShell tab
-- Ctrl+Shift+F: Toggle full-width ("fullscreen") for the active shell — fills the content pane instead of the centered column. Also a Ctrl+K entry ("Toggle Full-Width").
+- Ctrl+Shift+F: Toggle full-width for the active session. Hides the sidebar and fills the content pane; remembered per session across restarts. Also a Ctrl+K entry ("Toggle Full-Width").
+- Ctrl+K → Server shells: attach or permanently end live shells on any connected host, including detached shells.
+- While an agent works, the send shortcut queues a follow-up. The queued tray offers Send now (interrupt and send), Edit, and Remove; Stop remains a separate button.
+- Ctrl+Shift+W on a live shell: show Kill/Cancel confirmation; press again within eight seconds or click Kill to end it. Escape cancels.
 - Ctrl+Shift+R: Reconnect/reattach the active SSH/tmux tab (recovers a dropped/black session by respawning ssh + reattaching the tmux session). No-op on cmd/pwsh tabs.
 - Ctrl+Shift+E: Archive the active tmux tab (press TWICE within 2.5s — the thread band shows the confirm prompt). Kills the remote tmux session (frees VPS RAM), saves {name, tmux session, host, Claude session id, cwd} to archive.json, closes the tab. Resurrect via Ctrl+K: type the archived name -> '\u21A9 <name>' row recreates the tmux session and relaunches `claude --resume <sid>` (or --continue without a stored id). The Claude session id arrives via the SESSION: hook broadcast (v0.28.247). Also available as Ctrl+K 'Archive Session' and in the right-click tab menu (explicit pick = confirmed, no double-press; v0.28.249)
 - Ctrl+Shift+B: Cycle sidebar: open -> collapsed -> hidden (0px focus mode) -> open. Ctrl+K 'Sidebar: Expand/Collapse/Hide' jump to a state directly

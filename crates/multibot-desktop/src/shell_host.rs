@@ -423,6 +423,8 @@ impl MultibotView {
                     && self.chat_state.focus_handle.as_ref() != Some(&focus)
             });
             host.set_text_input_focus(text_input_focused);
+            host.set_kill_confirmation(self.sidebar_state.pending_shell_dissolve.as_ref()
+                .is_some_and(|(key, _)| self.selected_session.as_ref().is_some_and(|session| self.session_key_for(session) == *key)));
         }
         let visible = self.embedded_shell_visible();
         let active = visible
@@ -581,6 +583,8 @@ impl MultibotView {
     pub(crate) fn render_shell_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let session = self.selected_session.as_ref().unwrap();
         let key = self.session_key_for(session);
+        let confirming_kill = self.sidebar_state.pending_shell_dissolve.as_ref()
+            .is_some_and(|(pending, _)| pending == &key);
         let title = self
             .sidebar_state
             .workspace_store
@@ -670,11 +674,11 @@ impl MultibotView {
                                 }),
                             )
                             .text_sm()
-                            .max_w(px(250.0))
+                            .max_w(px(if confirming_kill { 140.0 } else { 250.0 }))
                             .truncate()
                             .child(title)
                     })
-                    .child(
+                    .when(!confirming_kill, |el| el.child(
                         div()
                             .text_xs()
                             .max_w(px(320.0))
@@ -691,16 +695,43 @@ impl MultibotView {
                             .py_1()
                             .text_color(theme::text_secondary())
                             .child(workspace),
-                    )
+                    ))
                     .child(div().flex_1())
-                    .child(
+                    .when(confirming_kill, |el| {
+                        let kill_key = key.clone();
+                        el.child(
+                            h_flex()
+                                .id("shell-kill-confirmation")
+                                .flex_shrink_0()
+                                .test_support()
+                                .gap_2()
+                                .px_3()
+                                .py_1()
+                                .rounded(theme::RADIUS_CHIP)
+                                .bg(theme::bg_surface())
+                                .text_xs()
+                                .text_color(theme::accent_amber())
+                                .child("Press Ctrl+Shift+W again to kill shell")
+                                .child(Button::new("shell-kill").small().label("Kill")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.dissolve_session_key_confirmed(&kill_key, cx);
+                                    })))
+                                .child(Button::new("shell-kill-cancel").small().label("Cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.sidebar_state.pending_shell_dissolve = None;
+                                        this.notice = None;
+                                        cx.notify();
+                                    }))),
+                        )
+                    })
+                    .when(!confirming_kill, |el| el.child(
                         Button::new("shell-reconnect")
                             .small()
                             .label("Reconnect")
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.reconnect_embedded_shell(cx)),
                             ),
-                    ),
+                    )),
             )
             .when_some(self.render_find_bar(cx), |el, bar| el.child(bar))
             .child(
@@ -755,6 +786,15 @@ mod native;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dissolve_chord_is_forwarded_on_each_distinct_press() {
+        for _ in 0..2 {
+            assert_eq!(shell_shortcut(0x57, true, false, true),
+                Some(ShellShortcut::Forward("ctrl-shift-w")));
+        }
+        assert!(shell_shortcut(0x57, true, false, false).is_none());
+    }
 
     #[test]
     fn console_paste_encodes_urls_multiline_empty_and_bounded_utf16_chunks() {

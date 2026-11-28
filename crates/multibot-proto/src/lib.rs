@@ -336,6 +336,8 @@ pub struct SessionSummary {
     pub updated_at_ms: i64,
     pub working: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_attached: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_assistant_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_assistant_preview: Option<String>,
@@ -377,6 +379,7 @@ impl Default for SessionSummary {
             source_path: String::new(),
             updated_at_ms: 0,
             working: false,
+            shell_attached: None,
             last_assistant_id: None,
             last_assistant_preview: None,
             last_assistant_ms: None,
@@ -1126,6 +1129,7 @@ mod tests {
             source_path: "/p.jsonl".into(),
             updated_at_ms: 999,
             working: false,
+            shell_attached: None,
             last_assistant_id: Some("m-rich".into()),
             last_assistant_preview: Some("Summary".into()),
             last_assistant_ms: Some(123456),

@@ -843,6 +843,28 @@ async fn shell_sessions_spawn_open_refresh_and_disappear_without_transcripts() {
     })
     .await
     .unwrap();
+    input.write_all(encode_line(&ClientRequest::ArchiveSession {
+        session_id: "external-shell".into(), agent: AgentKind::Shell,
+        source_path: "tmux:external-shell".into(), kill_process: false,
+    }).unwrap().as_bytes()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let ServerEvent::SessionArchived { session_id, archived: true } =
+                decode_line::<ServerEvent>(&output.next_line().await.unwrap().unwrap()).unwrap()
+                && session_id == "external-shell" { break; }
+        }
+    }).await.unwrap();
+    input.write_all(encode_line(&ClientRequest::ListSessions {
+        limit: Some(20), include_archived: Some(true),
+    }).unwrap().as_bytes()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let ServerEvent::Sessions { sessions } =
+                decode_line::<ServerEvent>(&output.next_line().await.unwrap().unwrap()).unwrap()
+                && sessions.iter().any(|shell| shell.id == "external-shell"
+                    && shell.archived && shell.shell_attached == Some(false)) { break; }
+        }
+    }).await.unwrap();
     assert!(
         Command::new("tmux")
             .args(["kill-session", "-t", "=external-shell"])

@@ -562,7 +562,8 @@ impl MultibotView {
         self.dissolve_session_key_confirmed(key, cx);
     }
 
-    fn dissolve_session_key_confirmed(&mut self, key: &str, cx: &mut Context<Self>) {
+    pub(crate) fn dissolve_session_key_confirmed(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.sidebar_state.pending_shell_dissolve = None;
         let Some((host, session)) = self.host_for_session_key(key) else {
             return;
         };
@@ -571,6 +572,7 @@ impl MultibotView {
             .workspace_store
             .session_lifecycle(key, &session, now_unix_ms())
             == SessionLifecycle::Dissolved
+            && session.agent != multibot_proto::AgentKind::Shell
         {
             return;
         }
@@ -624,6 +626,7 @@ impl MultibotView {
             if h == host && s.id == session.id && s.agent == session.agent {
                 s.archived = archived;
                 s.archive_kill_process = archived;
+                if archived && s.agent == multibot_proto::AgentKind::Shell { s.shell_attached = None; }
                 s.working = false;
             }
         }
@@ -632,6 +635,7 @@ impl MultibotView {
                 if s.id == session.id && s.agent == session.agent {
                     s.archived = archived;
                     s.archive_kill_process = archived;
+                    if archived && s.agent == multibot_proto::AgentKind::Shell { s.shell_attached = None; }
                     s.working = false;
                 }
             }
@@ -647,6 +651,7 @@ impl MultibotView {
             if let Some(s) = &mut self.selected_session {
                 s.archived = archived;
                 s.archive_kill_process = archived;
+                if archived && s.agent == multibot_proto::AgentKind::Shell { s.shell_attached = None; }
                 s.working = false;
             }
         }

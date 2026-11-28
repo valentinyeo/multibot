@@ -4373,7 +4373,7 @@ impl MultibotView {
 
         let mut wrapper = v_flex()
             .w_full()
-            .max_w(px(760.0))
+            .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
             .mx_auto()
             .px_4()
             .pt_1()
@@ -4471,7 +4471,7 @@ impl MultibotView {
         Some(
             div()
                 .w_full()
-                .max_w(px(760.0))
+                .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
                 .mx_auto()
                 .px_4()
                 .pt_1()
@@ -4582,6 +4582,7 @@ impl MultibotView {
         let trailing_prose_options = detect_trailing_prose_options(&self.messages);
         let active_find_idx = self.chat_state.active_find_message_index();
 
+        let mut queued_entries = Vec::new();
         let mut queued_previews = Vec::new();
         if let Some(session) = &self.selected_session {
             let key = self.session_key_for(session);
@@ -4593,19 +4594,18 @@ impl MultibotView {
                 session.agent,
                 &session.id,
             );
-            queued_previews.extend(
-                self.chat_outbox
-                    .entries
-                    .iter()
-                    .filter(|entry| entry.session_key == outbox_key)
-                    .map(|entry| entry.text.clone()),
-            );
+            let outbox = self.shared_chat_outbox.lock().ok();
+            let outbox = outbox.as_ref().map(|shared| &shared.outbox).unwrap_or(&self.chat_outbox);
+            queued_entries = outbox.entries.iter()
+                .filter(|entry| entry.session_key == outbox_key).cloned().collect();
         }
         let mut queue_bar = v_flex()
             .id("queued-messages-bar")
             .test_support()
+            .max_h(px(180.0))
+            .overflow_y_scroll()
             .w_full()
-            .max_w(px(760.0))
+            .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
             .mx_auto()
             .p_3()
             .gap_2()
@@ -4616,7 +4616,7 @@ impl MultibotView {
             .child(
                 div()
                     .text_xs()
-                    .child(format!("Queued messages · {}", queued_previews.len())),
+                    .child(format!("Queued messages · {}", queued_previews.len() + queued_entries.len())),
             );
         for preview in &queued_previews {
             queue_bar = queue_bar.child(
@@ -4625,6 +4625,48 @@ impl MultibotView {
                     .text_color(theme::text_secondary())
                     .truncate()
                     .child(preview.clone()),
+            );
+        }
+
+        for (index, entry) in queued_entries.iter().enumerate() {
+            let force_id = entry.id.clone();
+            let edit_id = entry.id.clone();
+            let remove_id = entry.id.clone();
+            queue_bar = queue_bar.child(
+                h_flex().gap_2().items_center().text_xs()
+                    .child(div().rounded(RADIUS_CHIP).px_2().py_1()
+                        .text_color(theme::accent_amber()).child("Queued"))
+                    .child(div().flex_1().min_w_0().truncate().child(entry.text.clone()))
+                    .child(Button::new(format!("queue-send-{index}")).small().label("Send now")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.force_send_queued_entry(&force_id, cx);
+                        })))
+                    .child(Button::new(format!("queue-edit-{index}")).small().label("Edit")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let draft = this.prompt_input.read(cx).value().to_string();
+                            if let Some(mut entry) = this.remove_queued_entry(&edit_id) {
+                                let text = std::mem::replace(&mut entry.text, draft.clone());
+                                if !draft.is_empty()
+                                    && let Ok(mut shared) = this.shared_chat_outbox.lock() {
+                                    let _ = shared.outbox.enqueue_entry(entry);
+                                    if shared.persist_to_disk || this.persist_outbox_to_disk {
+                                        if let Err(err) = shared.outbox.save() { this.notice = Some(err.to_string()); }
+                                    }
+                                    this.chat_outbox = shared.outbox.clone();
+                                }
+                                this.prompt_input.update(cx, |input, cx| {
+                                    input.set_value(text, window, cx);
+                                    input.focus(window, cx);
+                                });
+                            }
+                            cx.notify();
+                        })))
+                    .child(Button::new(format!("queue-remove-{index}")).small().icon(lucide_icon(icons::X, 12.0)).accessibility_label("Remove queued message")
+                        .tooltip("Remove queued message")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.remove_queued_entry(&remove_id);
+                            cx.notify();
+                        }))),
             );
         }
 
@@ -4687,7 +4729,7 @@ impl MultibotView {
             msg_col = msg_col.child(
                 v_flex()
                     .w_full()
-                    .max_w(px(760.0))
+                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
                     .mx_auto()
                     .p_5()
                     .gap_2()
@@ -5079,7 +5121,7 @@ impl MultibotView {
 
                 let mut msg_wrapper = v_flex()
                     .w_full()
-                    .max_w(px(760.0))
+                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
                     .mx_auto()
                     .flex_shrink_0()
                     .gap_1();
@@ -5212,7 +5254,7 @@ impl MultibotView {
                     .flex_shrink_0()
                     .test_support()
                     .w_full()
-                    .max_w(px(760.0))
+                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
                     .mx_auto()
                     .px_2()
                     .py_1()
@@ -5524,7 +5566,7 @@ impl MultibotView {
                 el.child(
                     div()
                         .w_full()
-                        .max_w(px(760.0))
+                        .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
                         .mx_auto()
                         .px_4()
                         .pb_1()
@@ -5537,7 +5579,7 @@ impl MultibotView {
                 el.child(
                     div()
                         .w_full()
-                        .max_w(px(760.0))
+                        .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
                         .mx_auto()
                         .px_5()
                         .pb_1()
@@ -5588,7 +5630,7 @@ impl MultibotView {
             .when(!self.chat_state.pending_attachments.is_empty(), |el| {
                 let mut chips = h_flex()
                     .w_full()
-                    .max_w(px(760.0))
+                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
                     .mx_auto()
                     .px_5()
                     .pb_1()
@@ -5639,7 +5681,7 @@ impl MultibotView {
                 el.child(chips)
             })
             .when(lifecycle != multibot_core::workspaces::SessionLifecycle::Active, |el| el.child(
-                h_flex().id("lifecycle-peek-banner").test_support().w_full().max_w(px(760.0)).mx_auto()
+                h_flex().id("lifecycle-peek-banner").test_support().w_full().when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0))).mx_auto()
                     .px_4().py_2().gap_3().items_center().justify_between().rounded(RADIUS_ROW).bg(theme::bg_surface())
                     .child(div().text_xs().text_color(theme::text_muted()).child(
                         if lifecycle == multibot_core::workspaces::SessionLifecycle::Dissolved {
@@ -5656,10 +5698,10 @@ impl MultibotView {
                             }
                         })))
             ))
-            .when(!queued_previews.is_empty(), |el| el.child(div().w_full().px_5().pt_2().child(queue_bar)))
+            .when(!queued_previews.is_empty() || !queued_entries.is_empty(), |el| el.child(div().w_full().px_5().pt_2().child(queue_bar)))
             .when_some(self.render_slash_picker(cx), |el, picker| el.child(picker))
             .when(self.chat_state.composer_menu_open, |el| el.child(
-                div().w_full().max_w(px(760.0)).mx_auto().px_5().child(
+                div().w_full().when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0))).mx_auto().px_5().child(
                     self.render_composer_options(cx)
                 )
             ))
@@ -5667,7 +5709,7 @@ impl MultibotView {
                 div().w_full().flex_shrink_0().px_5().pb_4().pt_2().child(
                     h_flex()
                         .w_full()
-                        .max_w(px(760.0))
+                        .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
                         .mx_auto()
                         .px_3()
                         .py_1p5()
@@ -5743,6 +5785,11 @@ impl MultibotView {
                                     this.toggle_dictation(window, cx);
                                 })),
                         )
+                        .when(is_working, |el| el.child(
+                            Button::new("stop-agent").small().label("Stop")
+                                .tooltip("Stop response")
+                                .on_click(cx.listener(|this, _, _, cx| { this.interrupt_active_session(cx); })),
+                        ))
                         .child(
                             Button::new("send-prompt")
                                 .small()
@@ -5752,16 +5799,11 @@ impl MultibotView {
                                 .rounded(RADIUS_CHIP)
                                 .bg(rgb(0xA66335))
                                 .text_color(rgb(0xFFFFFF))
-                                .icon(lucide_icon(
-                                    if is_working { icons::SQUARE } else { icons::ARROW_UP },
-                                    16.0,
-                                ))
-                                .accessibility_label(if is_working { "Stop" } else { "Send" })
-                                .tooltip(if is_working { "Stop response" } else { "Send message · Ctrl+Enter" })
+                                .icon(lucide_icon(icons::ARROW_UP, 16.0))
+                                .accessibility_label(if is_working { "Queue" } else { "Send" })
+                                .tooltip(if is_working { "Queue message · Ctrl+Enter" } else { "Send message · Ctrl+Enter" })
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    if this.selected_session.as_ref().is_some_and(|s| s.working) {
-                                        this.interrupt_active_session(cx);
-                                    } else { this.send_current_prompt(window, cx); }
+                                    this.send_current_prompt(window, cx);
                                 })),
                         ),
                 ),
@@ -6692,7 +6734,8 @@ mod tests {
                 cx.notify();
             });
             window.render_frame(cx);
-            assert_eq!(window.find("send-prompt").label(), Some("Stop"));
+            assert_eq!(window.find("send-prompt").label(), Some("Queue"));
+            assert!(window.find("stop-agent").visible());
         })
         .unwrap();
     }
@@ -7119,7 +7162,8 @@ mod tests {
                 working.working = true;
                 v.settings.queue_while_working = true;
                 v.send_or_queue_prompt(&working, "q1".into(), "queued".into());
-                assert!(matches!(rx.try_recv(), Ok(ClientRequest::SteerSession { options: Some(ref o), .. }) if o == &expected));
+                assert!(rx.try_recv().is_err());
+                assert_eq!(v.chat_outbox.entries.last().unwrap().options.as_ref(), Some(&expected));
                 assert!(v.spawn_new_session(AgentKind::Claude, ".".into(), None, Some("new chat".into()), cx));
                 assert!(matches!(rx.try_recv(), Ok(ClientRequest::SpawnSession { options: Some(ref o), .. }) if o == &expected));
                 let spawned = SessionSummary { id: "new-composer-session".into(), agent: AgentKind::Claude, ..Default::default() };

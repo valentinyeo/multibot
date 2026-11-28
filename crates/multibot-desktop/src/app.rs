@@ -932,10 +932,16 @@ impl MultibotView {
         }
 
         if settings_diff {
+            let mut next_settings = next_settings;
+            if self.selected_session.is_some() {
+                next_settings.shell_fullscreen = self.settings.shell_fullscreen;
+            }
             let visible_changed = !settings_visible_eq(&self.settings, &next_settings);
             self.settings = next_settings;
             if visible_changed {
-                self.sidebar_state.set_mode(self.settings.sidebar_mode);
+                self.sidebar_state.set_mode(if self.settings.shell_fullscreen {
+                    SidebarMode::Hidden
+                } else { self.settings.sidebar_mode });
                 self.cleanup_unmounted_surface_state();
                 self.chat_state.font_size_pt = self
                     .settings
@@ -1045,6 +1051,13 @@ impl MultibotView {
             if self.sidebar_state.workspace_store != workspace_store {
                 self.sidebar_state.recents_collapsed = workspace_store.recents_section_collapsed;
                 self.sidebar_state.workspace_store = workspace_store;
+                if let Some(session) = &self.selected_session {
+                    let full_width = self.sidebar_state.workspace_store.session_meta
+                        .get(&self.session_key_for(session)).is_some_and(|meta| meta.full_width);
+                    if full_width != self.settings.shell_fullscreen {
+                        self.apply_session_full_width(full_width);
+                    }
+                }
                 changed = true;
             }
             if self.palette_state.stats != palette_stats {
@@ -1314,20 +1327,32 @@ impl MultibotView {
     }
 
     pub(crate) fn toggle_shell_fullscreen(&mut self, cx: &mut Context<Self>) {
-        if self.main_surface != MainSurface::Chat
-            || !self
-                .selected_session
-                .as_ref()
-                .is_some_and(|s| s.agent == AgentKind::Shell)
-        {
+        if self.main_surface != MainSurface::Chat {
             return;
         }
-        self.settings.shell_fullscreen = !self.settings.shell_fullscreen;
-        self.sync_settings_to_shared(cx);
-        if self.sidebar_state.persist_to_disk {
-            let _ = self.settings.save();
-        }
+        let Some(session) = self.selected_session.as_ref() else {
+            return;
+        };
+        let key = self.session_key_for(session);
+        let meta = self.sidebar_state.workspace_store.session_meta.entry(key).or_default();
+        meta.full_width = !meta.full_width;
+        let full_width = meta.full_width;
+        self.apply_session_full_width(full_width);
+        self.persist_workspace_store_if_enabled();
+        self.sync_workspace_to_shared(cx);
         cx.notify();
+    }
+
+    fn apply_session_full_width(&mut self, full_width: bool) {
+        self.settings.shell_fullscreen = full_width;
+        self.sidebar_state.set_mode(if full_width {
+            SidebarMode::Hidden
+        } else if self.settings.sidebar_mode == SidebarMode::Hidden {
+            SidebarMode::Open
+        } else {
+            self.settings.sidebar_mode
+        });
+        self.cleanup_unmounted_surface_state();
     }
 
     pub(crate) fn cycle_sidebar_mode_synced(&mut self, cx: &mut Context<Self>) {
@@ -2413,6 +2438,9 @@ impl MultibotView {
                 if matches!(server_ev, ServerEvent::Pong { .. }) {
                     return true;
                 }
+                if let Ok(mut shared) = cx.global::<SharedAppStore>().shared_chat_outbox.lock() {
+                    shared.outbox.observe_server_event(host_label, &server_ev);
+                }
                 match &server_ev {
                     ServerEvent::HelloAck {
                         hostname,
@@ -2846,6 +2874,12 @@ impl MultibotView {
             UiBridgeEvent::Server(server_ev) => {
                 if matches!(server_ev, ServerEvent::Pong { .. }) {
                     return true;
+                }
+                {
+                    let store = cx.global::<SharedAppStore>();
+                    if let Ok(mut shared) = store.shared_chat_outbox.lock() {
+                        shared.outbox.observe_server_event(store.connected_host.as_deref().unwrap_or("local"), &server_ev);
+                    }
                 }
                 match &server_ev {
                     ServerEvent::HelloAck {
@@ -3298,6 +3332,13 @@ impl MultibotView {
             }
         }
 
+        if let UiBridgeEvent::Server(ref server_event) = event {
+            let host = self.current_host_label().to_string();
+            if let Ok(mut shared) = self.shared_chat_outbox.lock() {
+                shared.outbox.observe_server_event(&host, server_event);
+            }
+            self.handle_outbox_event(&host, server_event);
+        }
         match event {
             UiBridgeEvent::Connected { host_label, req_tx } => {
                 self.daemon_tx = Some(req_tx);
@@ -4139,6 +4180,7 @@ impl MultibotView {
         cx: &mut Context<Self>,
     ) {
         self.sync_from_shared_store(cx);
+        self.handle_outbox_event(host_label, &event);
         let matches_active_host = self
             .selected_session_host
             .as_deref()
@@ -4510,6 +4552,10 @@ impl MultibotView {
         self.active_switch_token = Some(token.clone());
         self.pending_switch_tokens.insert(session.id.clone(), token);
         self.selected_session = Some(session.clone());
+        let full_width = self.sidebar_state.workspace_store.session_meta
+            .get(&canonical_session_key(&host, session.agent, &session.id))
+            .is_some_and(|meta| meta.full_width);
+        self.apply_session_full_width(full_width);
         self.pending_focus_input = true;
         self.set_main_surface(MainSurface::Chat);
         self.active_modal = ActiveModal::None;
@@ -4546,8 +4592,7 @@ impl MultibotView {
         cx.notify();
     }
 
-    /// Sends a prompt immediately (`SteerSession` if working, `SendPrompt` if idle) or enqueues
-    /// it in the persisted offline `ChatOutbox` when disconnected.
+    /// Sends an idle session's prompt, or persists it in the shared FIFO while busy or offline.
     pub(crate) fn send_or_queue_prompt(
         &mut self,
         session: &SessionSummary,
@@ -4572,40 +4617,28 @@ impl MultibotView {
             .get(&key)
             .filter(|options| !options.is_default())
             .cloned();
-        if let Some(tx) = self.tx_for_host(host) {
-            let req = if session.working && self.settings.queue_while_working {
-                ClientRequest::SteerSession {
+        let outbox_key = ChatOutbox::session_key(host, session.agent, &session.id);
+        if let Ok(mut shared) = self.shared_chat_outbox.lock() {
+            let busy = session.working || shared.outbox.dispatching.contains_key(&outbox_key);
+            if !busy && shared.outbox.count_for_session(&outbox_key) == 0
+                && let Some(tx) = self.tx_for_host(host)
+                && tx.send(ClientRequest::SendPrompt {
                     session_id: session.id.clone(),
                     agent: session.agent,
                     cwd: session.cwd.clone(),
                     text: text.clone(),
                     options: options.clone(),
-                }
-            } else {
-                ClientRequest::SendPrompt {
-                    session_id: session.id.clone(),
-                    agent: session.agent,
-                    cwd: session.cwd.clone(),
-                    text: text.clone(),
-                    options: options.clone(),
-                }
-            };
-            if tx.send(req).is_ok() {
-                if self.host_statuses.is_empty()
-                    || (host == self.active_session_host()
-                        && self
-                            .selected_session
-                            .as_ref()
-                            .is_some_and(|s| s.id == session.id && s.agent == session.agent))
-                {
+                }).is_ok()
+            {
+                shared.outbox.mark_dispatched(&outbox_key, msg_id.clone());
+                if host == self.active_session_host() && self.selected_session.as_ref()
+                    .is_some_and(|selected| selected.id == session.id && selected.agent == session.agent) {
                     self.last_dispatched_prompt = Some((msg_id, text));
                 }
                 return;
             }
         }
 
-        // Offline or broken pipe: enqueue in App-scoped FIFO ChatOutbox (max 20/session).
-        let outbox_key = ChatOutbox::session_key(host, session.agent, &session.id);
         let enqueue_res = if let Ok(mut shared) = self.shared_chat_outbox.lock() {
             let res = shared.outbox.enqueue_with_options(
                 &outbox_key,
@@ -4635,6 +4668,7 @@ impl MultibotView {
         match enqueue_res {
             Ok(entry) => {
                 self.outbox_msg_map.insert(msg_id, entry.id);
+                self.flush_outbox_for_host(host);
             }
             Err(err) => {
                 self.chat_state.failed_sends.insert(
@@ -4675,84 +4709,143 @@ impl MultibotView {
         let Some(tx) = self.tx_for_host(host).cloned() else {
             return 0;
         };
-        let current_host = host;
         let Ok(mut shared) = self.shared_chat_outbox.lock() else {
             return 0;
         };
-        let mut flushed = 0usize;
-        let mut remaining = Vec::with_capacity(shared.outbox.entries.len());
-        let mut broken = false;
-
-        for entry in std::mem::take(&mut shared.outbox.entries) {
-            if broken {
-                remaining.push(entry);
-                continue;
-            }
-            let Some((host, agent, sid)) = parse_outbox_session_key(&entry.session_key) else {
-                remaining.push(entry);
+        let keys: std::collections::HashSet<_> = shared.outbox.entries.iter()
+            .map(|entry| entry.session_key.clone()).collect();
+        let mut flushed = 0;
+        for outbox_key in keys {
+            let Some((entry_host, agent, sid)) = parse_outbox_session_key(&outbox_key) else {
                 continue;
             };
-            if host != current_host {
-                remaining.push(entry);
+            if entry_host != host {
                 continue;
             }
-            let matched_sess = if self.host_statuses.is_empty() {
-                self.sessions
-                    .iter()
-                    .find(|s| s.id == sid && s.agent == agent)
+            let session = if self.host_statuses.is_empty() {
+                self.sessions.iter().find(|s| s.id == sid && s.agent == agent)
             } else {
-                self.host_sessions
-                    .iter()
-                    .find(|(h, s)| h == host && s.id == sid && s.agent == agent)
+                self.host_sessions.iter().find(|(h, s)| h == host && s.id == sid && s.agent == agent)
                     .map(|(_, s)| s)
             };
+            let Some(session) = session else { continue; };
             let key = canonical_session_key(host, agent, sid);
-            if self
-                .sidebar_state
-                .workspace_store
-                .session_meta
-                .get(&key)
-                .is_some_and(|m| m.dissolved_at_ms.is_some())
-                || matched_sess.is_some_and(|s| s.archived && s.archive_kill_process)
-            {
-                remaining.push(entry);
+            if session.archived || self.sidebar_state.workspace_store.session_meta.get(&key)
+                .is_some_and(|meta| meta.dissolved_at_ms.is_some()) {
                 continue;
             }
-            let cwd = matched_sess.and_then(|s| s.cwd.clone());
-            let is_working = matched_sess.is_some_and(|s| s.working);
-            let req = if is_working && self.settings.queue_while_working {
-                ClientRequest::SteerSession {
-                    session_id: sid.to_string(),
-                    agent,
-                    cwd,
-                    text: entry.text.clone(),
-                    options: entry.options.clone(),
-                }
-            } else {
-                ClientRequest::SendPrompt {
-                    session_id: sid.to_string(),
-                    agent,
-                    cwd,
-                    text: entry.text.clone(),
-                    options: entry.options.clone(),
-                }
+            let Some(entry) = shared.outbox.take_next_for_dispatch(&outbox_key, session.working) else {
+                continue;
             };
-            if tx.send(req).is_ok() {
-                flushed += 1;
-            } else {
-                broken = true;
-                remaining.push(entry);
+            if (shared.persist_to_disk || self.persist_outbox_to_disk)
+                && let Err(err) = shared.outbox.save() {
+                shared.outbox.dispatching.remove(&outbox_key);
+                shared.outbox.entries.insert(0, entry);
+                self.notice = Some(err.to_string());
+                break;
             }
+            if tx.send(ClientRequest::SendPrompt {
+                session_id: sid.into(), agent, cwd: session.cwd.clone(),
+                text: entry.text.clone(), options: entry.options.clone(),
+            }).is_err() {
+                shared.outbox.dispatching.remove(&outbox_key);
+                shared.outbox.entries.insert(0, entry);
+                break;
+            }
+            flushed += 1;
         }
-
-        shared.outbox.entries = remaining;
         if flushed > 0 && (shared.persist_to_disk || self.persist_outbox_to_disk) {
             let _ = shared.outbox.save();
         }
-        self.outbox_msg_map
-            .retain(|_, oid| shared.outbox.entries.iter().any(|e| &e.id == oid));
+        self.outbox_msg_map.retain(|_, id| shared.outbox.entries.iter().any(|e| &e.id == id));
         self.chat_outbox = shared.outbox.clone();
         flushed
+    }
+
+    fn handle_outbox_event(&mut self, host: &str, event: &ServerEvent) {
+        let updates: Vec<_> = match event {
+            ServerEvent::SessionUpdated { session } => vec![(session.id.clone(), Some(session.agent), session.working)],
+            ServerEvent::HistoryAppend { session_id, working: Some(working), .. } =>
+                vec![(session_id.clone(), None, *working)],
+            ServerEvent::Sessions { sessions } => sessions.iter()
+                .map(|s| (s.id.clone(), Some(s.agent), s.working)).collect(),
+            _ => return,
+        };
+        for (id, agent, working) in updates {
+            let agent = agent.or_else(|| self.host_sessions.iter()
+                .find(|(h, s)| h == host && s.id == id).map(|(_, s)| s.agent))
+                .or_else(|| self.sessions.iter().find(|s| s.id == id).map(|s| s.agent));
+            let Some(agent) = agent else { continue; };
+            for (h, session) in &mut self.host_sessions {
+                if h == host && session.id == id && session.agent == agent {
+                    session.working = working;
+                }
+            }
+            if self.host_statuses.is_empty() {
+                for session in &mut self.sessions {
+                    if session.id == id && session.agent == agent { session.working = working; }
+                }
+            }
+            if self.active_session_host() == host
+                && let Some(session) = self.selected_session.as_mut()
+                && session.id == id && session.agent == agent {
+                session.working = working;
+            }
+        }
+        self.flush_outbox_for_host(host);
+    }
+
+    pub(crate) fn remove_queued_entry(&mut self, id: &str) -> Option<multibot_core::outbox::OutboxEntry> {
+        let mut shared = self.shared_chat_outbox.lock().ok()?;
+        let entry = shared.outbox.remove_by_id(id)?;
+        if shared.persist_to_disk || self.persist_outbox_to_disk {
+            if let Err(err) = shared.outbox.save() {
+                self.notice = Some(err.to_string());
+            }
+        }
+        self.chat_outbox = shared.outbox.clone();
+        let message_ids: Vec<_> = self.outbox_msg_map.iter()
+            .filter(|(_, entry_id)| entry_id.as_str() == id).map(|(id, _)| id.clone()).collect();
+        self.messages.retain(|message| !message_ids.contains(&message.id));
+        self.outbox_msg_map.retain(|_, entry_id| entry_id != id);
+        Some(entry)
+    }
+
+    pub(crate) fn force_send_queued_entry(&mut self, id: &str, cx: &mut Context<Self>) {
+        let entry = self.shared_chat_outbox.lock().ok()
+            .and_then(|shared| shared.outbox.entries.iter().find(|e| e.id == id).cloned());
+        let Some(entry) = entry else { return; };
+        let Some((host, agent, sid)) = parse_outbox_session_key(&entry.session_key) else { return; };
+        let key = canonical_session_key(host, agent, sid);
+        let Some((_, session)) = self.host_for_session_key(&key) else { return; };
+        let Some(tx) = self.tx_for_host(host).cloned() else { return; };
+        let Ok(mut shared) = self.shared_chat_outbox.lock() else { return; };
+        let Some(entry) = shared.outbox.remove_by_id(id) else { return; };
+        shared.outbox.mark_dispatched(&entry.session_key, entry.id.clone());
+        if (shared.persist_to_disk || self.persist_outbox_to_disk)
+            && let Err(err) = shared.outbox.save() {
+            shared.outbox.dispatching.remove(&entry.session_key);
+            shared.outbox.entries.insert(0, entry);
+            self.chat_outbox = shared.outbox.clone();
+            self.notice = Some(err.to_string());
+            cx.notify();
+            return;
+        }
+        let sent = tx.send(ClientRequest::InterruptSession { session_id: sid.into(), agent }).is_ok()
+            && tx.send(ClientRequest::SendPrompt {
+                session_id: sid.into(), agent, cwd: session.cwd,
+                text: entry.text.clone(), options: entry.options.clone(),
+            }).is_ok();
+        if !sent {
+            shared.outbox.dispatching.remove(&entry.session_key);
+            shared.outbox.entries.insert(0, entry);
+            self.notice = Some("Could not force send. Message remains queued.".into());
+        }
+        if shared.persist_to_disk || self.persist_outbox_to_disk {
+            if let Err(err) = shared.outbox.save() { self.notice = Some(err.to_string()); }
+        }
+        self.chat_outbox = shared.outbox.clone();
+        cx.notify();
     }
 
     pub(crate) fn default_spawn_cwd(&self) -> String {
@@ -5782,7 +5875,9 @@ impl Render for MultibotView {
                 this.toggle_dictation(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseOverlay, window, cx| {
-                if this.active_modal == ActiveModal::ChatInfo {
+                if this.sidebar_state.pending_shell_dissolve.take().is_some() {
+                    this.notice = None;
+                } else if this.active_modal == ActiveModal::ChatInfo {
                     this.active_modal = ActiveModal::None;
                     this.focus_active_surface_default(window, cx);
                 } else if this.voice.phase != multibot_core::voice::DictationPhase::Off {
@@ -6490,6 +6585,218 @@ mod tests {
             source_path: format!("/tmp/{id}.jsonl"),
             ..Default::default()
         }
+    }
+
+    #[gpui_kit::test]
+    fn busy_composer_queues_fifo_once_for_every_chat_client(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        for agent in [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity, AgentKind::Pi, AgentKind::Cursor] {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            cx.update_window(handle, |_, window, cx| {
+                let mut session = make_session(agent.label(), agent, agent.label(), true);
+                view.update(cx, |v, cx| {
+                    v.daemon_tx = Some(tx);
+                    v.sessions = vec![session.clone()];
+                    v.select_session(session.clone(), cx);
+                });
+                while rx.try_recv().is_ok() {}
+                for text in ["first follow-up", "second follow-up"] {
+                    view.update(cx, |v, cx| v.prompt_input.update(cx, |input, cx| {
+                        input.set_value(text, window, cx);
+                        input.focus(window, cx);
+                    }));
+                    window.render_frame(cx);
+                    window.press("ctrl-enter", cx);
+                    window.render_frame(cx);
+                    assert!(view.read(cx).prompt_input.read(cx).value().is_empty());
+                    assert!(window.find("stop-agent").visible());
+                    assert_eq!(window.find("send-prompt").label(), Some("Queue"));
+                    let tray = window.find("queued-messages-bar").bounds();
+                    assert!(tray.bottom() <= window.find("prompt-input").bounds().top());
+                }
+                assert!(rx.try_recv().is_err());
+                session.working = false;
+                for _ in 0..3 {
+                    view.update(cx, |v, cx| v.handle_bridge_event(UiBridgeEvent::Server(
+                        ServerEvent::SessionUpdated { session: session.clone() }), cx));
+                }
+                assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, agent: actual, .. })
+                    if text == "first follow-up" && actual == agent));
+                assert!(rx.try_recv().is_err(), "duplicate idle events must not drain the queue");
+                view.update(cx, |v, cx| {
+                    v.handle_bridge_event(UiBridgeEvent::Server(ServerEvent::HistoryAppend {
+                        session_id: session.id.clone(), messages: vec![], latest_offset: None,
+                        working: Some(true), todos: vec![], probe_sha256: None,
+                    }), cx);
+                    for _ in 0..3 {
+                        v.handle_bridge_event(UiBridgeEvent::Server(ServerEvent::HistoryAppend {
+                            session_id: session.id.clone(), messages: vec![], latest_offset: None,
+                            working: Some(false), todos: vec![], probe_sha256: None,
+                        }), cx);
+                    }
+                });
+                assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "second follow-up"));
+                assert!(rx.try_recv().is_err());
+                window.render_frame(cx);
+                assert!(window.try_find("queued-messages-bar").is_none());
+            }).unwrap();
+        }
+    }
+
+    #[gpui_kit::test]
+    fn queued_message_edit_remove_and_force_send_are_clickable(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                let session = make_session("queue-actions", AgentKind::Claude, "Queue actions", true);
+                v.sessions = vec![session.clone()];
+                v.daemon_tx = Some(tx);
+                v.select_session(session.clone(), cx);
+                v.send_or_queue_prompt(&session, "edit".into(), "edit this".into());
+                v.send_or_queue_prompt(&session, "remove".into(), "remove this".into());
+                v.send_or_queue_prompt(&session, "force".into(), "urgent steering".into());
+                v.send_or_queue_prompt(&session, "next".into(), "after forced turn".into());
+            });
+            while rx.try_recv().is_ok() {}
+            window.render_frame(cx);
+            window.click("queue-edit-0", cx);
+            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "edit this");
+            assert!(view.read(cx).prompt_input.read(cx).focus_handle(cx).is_focused(window));
+            window.render_frame(cx);
+            window.click("queue-remove-0", cx);
+            window.render_frame(cx);
+            let force_id = view.read(cx).chat_outbox.entries[0].id.clone();
+            window.click("queue-send-0", cx);
+            window.render_frame(cx);
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::InterruptSession { session_id, agent: AgentKind::Claude }) if session_id == "queue-actions"));
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "urgent steering"));
+            assert_eq!(view.read(cx).shared_chat_outbox.lock().unwrap().outbox.entries.len(), 1);
+            view.update(cx, |v, cx| {
+                v.force_send_queued_entry(&force_id, cx);
+                assert_eq!(v.flush_outbox_for_current_host(), 0);
+            });
+            assert!(rx.try_recv().is_err());
+            view.update(cx, |v, cx| {
+                for working in [false, false, true, false, false] {
+                    let mut session = v.selected_session.clone().unwrap();
+                    session.working = working;
+                    v.handle_bridge_event(UiBridgeEvent::Server(ServerEvent::SessionUpdated { session }), cx);
+                }
+            });
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "after forced turn"));
+            assert!(rx.try_recv().is_err());
+            window.render_frame(cx);
+            assert!(window.try_find("queued-messages-bar").is_none());
+            view.update(cx, |v, _| {
+                let mut session = v.selected_session.clone().unwrap();
+                session.working = true;
+                v.send_or_queue_prompt(&session, "edit-with-draft".into(), "queued edit".into());
+            });
+            window.render_frame(cx);
+            window.click("queue-edit-0", cx);
+            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "queued edit");
+            assert_eq!(view.read(cx).chat_outbox.entries[0].text, "edit this");
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn full_width_roundtrip_restores_btop_in_a_fresh_view(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let btop = make_session("btop", AgentKind::Shell, "BTOP", false);
+        let normal = make_session("normal-width", AgentKind::Claude, "Normal", false);
+        let path = std::env::temp_dir().join(format!("mbru-full-width-{}-{}.json", std::process::id(), APP_TEST_SEQ.fetch_add(1, Ordering::Relaxed)));
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.sessions = vec![btop.clone(), normal.clone()];
+                v.set_sidebar_mode_synced(SidebarMode::Collapsed, cx);
+                v.select_session(btop.clone(), cx);
+            });
+            window.render_frame(cx);
+            window.press("ctrl-shift-f", cx);
+            assert_eq!(view.read(cx).sidebar_state.mode, SidebarMode::Hidden);
+            view.read(cx).sidebar_state.workspace_store.save_to(&path).unwrap();
+            view.update(cx, |v, cx| v.select_session(normal.clone(), cx));
+            assert_eq!(view.read(cx).sidebar_state.mode, SidebarMode::Collapsed);
+        }).unwrap();
+        let loaded = multibot_core::workspaces::WorkspaceStore::load_from(&path).unwrap();
+        let rt = cx.read(|cx| view.read(cx).runtime.clone());
+        let (fresh_handle, fresh) = cx.update(|cx| {
+            cx.global_mut::<SharedAppStore>().workspace_store = loaded;
+            gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
+                cx.new(|cx| MultibotView::new(rt, window, cx))
+            }).unwrap()
+        });
+        cx.update_window(fresh_handle, |_, window, cx| {
+            fresh.update(cx, |v, cx| v.select_session(btop.clone(), cx));
+            window.render_frame(cx);
+            assert_eq!(fresh.read(cx).sidebar_state.mode, SidebarMode::Hidden);
+            assert!(fresh.read(cx).settings.shell_fullscreen);
+            fresh.update(cx, |v, cx| v.select_session(normal, cx));
+            assert_eq!(fresh.read(cx).sidebar_state.mode, SidebarMode::Collapsed);
+            assert!(!fresh.read(cx).settings.shell_fullscreen);
+        }).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn server_shell_manager_recovers_and_ends_on_the_owning_host(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let (mut rx_a, _) = cx.update(|cx| install_test_host(cx, "host-a"));
+        let (mut rx_b, _) = cx.update(|cx| install_test_host(cx, "host-b"));
+        let mut a = make_session("same-id", AgentKind::Shell, "Btop A", false);
+        a.shell_attached = Some(true);
+        a.source_path = "tmux:same-id".into();
+        a.last_assistant_preview = Some("btop · projects".into());
+        let mut b = a.clone();
+        b.title = "Btop B".into();
+        b.archived = true;
+        b.shell_attached = Some(false);
+        cx.update(|cx| {
+            let store = cx.global_mut::<SharedAppStore>();
+            store.host_connections.get_mut("host-a").unwrap().sessions = vec![a.clone()];
+            store.host_connections.get_mut("host-b").unwrap().sessions = vec![b.clone()];
+            store.host_sessions = vec![("host-a".into(), a.clone()), ("host-b".into(), b.clone())];
+            store.sessions = vec![a.clone(), b.clone()];
+            store.workspace_store.dissolve_session(&canonical_session_key("host-b", AgentKind::Shell, "same-id"), now_unix_ms());
+            store.bump_revision();
+        });
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| v.sync_from_shared_store(cx));
+            window.press("ctrl-k", cx);
+            window.input("server shells", cx);
+            window.render_frame(cx);
+            window.click("pal-cmd-server-shells", cx);
+            window.render_frame(cx);
+            let rows = view.read(cx).build_palette_rows("", now_unix_ms());
+            assert_eq!(rows.len(), 2);
+            for (host, attached) in [("host-a", "Attached"), ("host-b", "Detached")] {
+                assert!(rows.iter().any(|row| matches!(row, PaletteRow::Session { title, workspace_name, cwd, .. }
+                    if title.contains("same-id") && workspace_name.contains(host) && workspace_name.contains(attached)
+                        && cwd.as_deref() == Some("btop · projects"))));
+            }
+            window.input("Btop B", cx);
+            window.render_frame(cx);
+            window.press("enter", cx);
+            assert_eq!(view.read(cx).selected_session_host.as_deref(), Some("host-b"));
+            assert!(!view.read(cx).selected_session.as_ref().unwrap().archived);
+            while rx_a.try_recv().is_ok() {}
+            while rx_b.try_recv().is_ok() {}
+            window.press("ctrl-k", cx);
+            window.input("server shells", cx);
+            window.render_frame(cx);
+            window.click("pal-cmd-server-shells", cx);
+            window.input("Btop A", cx);
+            window.render_frame(cx);
+            window.click("pal-shell-end-0", cx);
+            window.render_frame(cx);
+            assert!(!std::iter::from_fn(|| rx_a.try_recv().ok()).any(|req| matches!(req, ClientRequest::ArchiveSession { .. })));
+            window.click("pal-shell-kill-confirm", cx);
+            assert!(std::iter::from_fn(|| rx_a.try_recv().ok()).any(|req| matches!(req,
+                ClientRequest::ArchiveSession { session_id, kill_process: true, agent: AgentKind::Shell, source_path }
+                    if session_id == "same-id" && source_path == "tmux:same-id")));
+            assert!(!std::iter::from_fn(|| rx_b.try_recv().ok()).any(|req| matches!(req, ClientRequest::ArchiveSession { .. })));
+        }).unwrap();
     }
 
     #[gpui_kit::test]
@@ -7301,6 +7608,14 @@ mod tests {
             window.press("ctrl-enter", cx);
             window.render_frame(cx);
             assert!(matches!(rx.try_recv(), Ok(ClientRequest::UnarchiveSession { ref session_id }) if session_id == "saved"));
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { ref session_id, ref text, .. }) if session_id == "saved" && text == "queued before dissolve"));
+            view.update(cx, |v, cx| {
+                for working in [true, false] {
+                    let mut session = v.selected_session.clone().unwrap();
+                    session.working = working;
+                    v.handle_bridge_event(UiBridgeEvent::Server(ServerEvent::SessionUpdated { session }), cx);
+                }
+            });
             assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { ref session_id, ref text, .. }) if session_id == "saved" && text == "Continue saved chat"));
             assert!(!view.read(cx).selected_session.as_ref().unwrap().archived);
 
@@ -7614,6 +7929,14 @@ mod tests {
         let (mut rx_a, _shutdown_a) = cx.update(|cx| install_test_host(cx, "host-a"));
         let (mut rx_b, _shutdown_b) = cx.update(|cx| install_test_host(cx, "host-b"));
         let session = make_session("same-session", AgentKind::Claude, "Same", false);
+        cx.update(|cx| {
+            let store = cx.global_mut::<SharedAppStore>();
+            for host in ["host-a", "host-b"] {
+                store.host_connections.get_mut(host).unwrap().sessions = vec![session.clone()];
+            }
+            store.rebuild_merged_sessions();
+            store.bump_revision();
+        });
         let options_a = multibot_proto::SessionOptions {
             model: Some("opus".into()),
             effort: Some(multibot_proto::EffortLevel::High),
@@ -7646,6 +7969,16 @@ mod tests {
                     assert!(other.try_recv().is_err());
                 }
                 v.send_or_queue_prompt_on_host("host-a", &session, "delayed".into(), "uploaded".into());
+                assert!(rx_a.try_recv().is_err());
+                assert_eq!(v.chat_outbox.entries.last().unwrap().options.as_ref(), Some(&options_a));
+                for working in [true, false] {
+                    let mut updated = session.clone();
+                    updated.working = working;
+                    let event = ServerEvent::SessionUpdated { session: updated };
+                    MultibotView::apply_host_bridge_event_to_app("host-a", 1,
+                        UiBridgeEvent::Server(event.clone()), &v.runtime, cx);
+                    v.handle_daemon_server_event_with_hint("host-a", event, false, cx);
+                }
                 assert!(matches!(rx_a.try_recv(), Ok(ClientRequest::SendPrompt { options: Some(ref o), .. }) if o == &options_a));
                 assert!(rx_b.try_recv().is_err());
 
@@ -7856,9 +8189,6 @@ mod tests {
             window.press("ctrl-,", cx);
             window.render_frame(cx);
             window.render_frame(cx);
-            window.click("send-messages-immediately", cx);
-            window.render_frame(cx);
-            assert!(!view.read(cx).settings.queue_while_working);
             for _ in 0..20 {
                 window.press("tab", cx);
                 window.render_frame(cx);
@@ -7873,14 +8203,16 @@ mod tests {
             assert!(rx.try_recv().is_err(), "Enter must not send in Ctrl+Enter mode");
             window.press("ctrl-enter", cx);
             window.render_frame(cx);
-            assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "Send now"));
+            assert!(rx.try_recv().is_err());
+            assert_eq!(view.read(cx).chat_outbox.entries[0].text, "Send now");
             view.update(cx, |v, cx| {
                 v.settings.queue_while_working = true;
                 v.prompt_input.update(cx, |input, cx| input.set_value("Wait for agent", window, cx));
             });
             window.press("ctrl-enter", cx);
             window.render_frame(cx);
-            assert!(matches!(rx.try_recv(), Ok(ClientRequest::SteerSession { text, .. }) if text == "Wait for agent"));
+            assert!(rx.try_recv().is_err());
+            assert_eq!(view.read(cx).chat_outbox.entries[1].text, "Wait for agent");
         }).unwrap();
     }
 
@@ -8185,6 +8517,8 @@ mod tests {
                     false,
                 );
                 v.sessions = vec![shell.clone()];
+                let key = v.session_key_for(&shell);
+                v.sidebar_state.workspace_store.session_meta.entry(key).or_default().full_width = true;
                 v.select_session(shell, cx);
             });
             window.render_frame(cx);
@@ -8197,27 +8531,15 @@ mod tests {
             window.press("ctrl-shift-f", cx);
             window.render_frame(cx);
             assert!(!view.read(cx).settings.shell_fullscreen);
-            assert!(!cx.global::<SharedAppStore>().settings.shell_fullscreen);
+            assert!(!cx.global::<SharedAppStore>().workspace_store.session_meta.values().any(|meta| meta.full_width));
             assert_eq!(
                 window.find("server-shell-panel").bounds().size.width,
                 px(760.0)
             );
-            let saved = serde_json::to_string(&cx.global::<SharedAppStore>().settings).unwrap();
-            assert!(
-                !serde_json::from_str::<MultibotSettings>(&saved)
-                    .unwrap()
-                    .shell_fullscreen
-            );
             window.press("ctrl-shift-f", cx);
             window.render_frame(cx);
             assert_eq!(window.find("server-shell-panel").bounds().size.width, wide);
-            assert!(cx.global::<SharedAppStore>().settings.shell_fullscreen);
-            let saved = serde_json::to_string(&cx.global::<SharedAppStore>().settings).unwrap();
-            assert!(
-                serde_json::from_str::<MultibotSettings>(&saved)
-                    .unwrap()
-                    .shell_fullscreen
-            );
+            assert!(cx.global::<SharedAppStore>().workspace_store.session_meta.values().any(|meta| meta.full_width));
             window.press("ctrl-k", cx);
             window.input("Toggle Full-Width", cx);
             window.render_frame(cx);
@@ -8233,7 +8555,7 @@ mod tests {
             });
             window.render_frame(cx);
             window.press("ctrl-shift-f", cx);
-            assert!(!view.read(cx).settings.shell_fullscreen);
+            assert!(view.read(cx).settings.shell_fullscreen);
         })
         .unwrap();
     }
@@ -8549,7 +8871,7 @@ mod tests {
             window.render_frame(cx);
             assert_eq!(window.find("composer-effort-3").checked(), Some(true));
             assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "Unsent draft");
-            window.click("send-prompt", cx);
+            window.click("stop-agent", cx);
             window.render_frame(cx);
             assert!(matches!(rx.try_recv(), Ok(ClientRequest::InterruptSession { session_id, .. }) if session_id == "active"));
             assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "Unsent draft");
@@ -10038,6 +10360,12 @@ mod tests {
                     }),
                     cx,
                 );
+                assert_eq!(v.chat_outbox.entries.len(), 1);
+                for working in [true, false] {
+                    let mut session = sess.clone();
+                    session.working = working;
+                    v.handle_bridge_event(UiBridgeEvent::Server(ServerEvent::SessionUpdated { session }), cx);
+                }
                 assert!(v.chat_outbox.entries.is_empty());
             });
         })
@@ -12184,6 +12512,7 @@ mod tests {
             view2.update(cx, |v, _| {
                 v.selected_session = Some(sess.clone());
                 v.send_or_queue_prompt(&sess, "w2-local-0".into(), "Offline prompt 2".into());
+                v.send_or_queue_prompt(&sess, "w2-local-1".into(), "Offline prompt 3".into());
             });
         })
         .unwrap();
@@ -12198,7 +12527,7 @@ mod tests {
                     .entries
                     .len()
             }),
-            2,
+            3,
             "both windows must enqueue into the single App-scoped SharedChatOutbox"
         );
 
@@ -12236,6 +12565,19 @@ mod tests {
         });
         cx.run_until_parked();
 
+        for remaining in [1, 0] {
+            for working in [true, false] {
+                cx.update(|cx| {
+                    let mut session = sess.clone();
+                    session.working = working;
+                    MultibotView::apply_daemon_bridge_event_to_app(1,
+                        UiBridgeEvent::Server(ServerEvent::SessionUpdated { session }), &rt, cx);
+                });
+            }
+            cx.run_until_parked();
+            assert_eq!(cx.update(|cx| cx.global::<SharedAppStore>().shared_chat_outbox.lock().unwrap().outbox.entries.len()), remaining);
+        }
+
         // Each queued prompt MUST have been sent EXACTLY ONCE over daemon_tx (zero duplicates!)
         let mut sent_texts = Vec::new();
         while let Ok(req) = req_rx.try_recv() {
@@ -12245,7 +12587,7 @@ mod tests {
         }
         assert_eq!(
             sent_texts,
-            vec!["Offline prompt 1", "Offline prompt 2"],
+            vec!["Offline prompt 1", "Offline prompt 2", "Offline prompt 3"],
             "multi-window HelloAck must flush each queued offline prompt exactly once in FIFO order"
         );
 

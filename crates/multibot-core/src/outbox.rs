@@ -1,5 +1,5 @@
 use crate::settings::MultibotSettings;
-use multibot_proto::{AgentKind, SessionOptions};
+use multibot_proto::{AgentKind, ServerEvent, SessionOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -76,6 +76,14 @@ impl Default for OutboxFile {
 pub struct ChatOutbox {
     #[serde(default)]
     pub entries: Vec<OutboxEntry>,
+    #[serde(skip)]
+    pub dispatching: HashMap<String, OutboxDispatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxDispatch {
+    pub entry_id: String,
+    pub seen_working: bool,
 }
 
 impl ChatOutbox {
@@ -166,6 +174,53 @@ impl ChatOutbox {
         }
         self.entries.push(entry);
         Ok(())
+    }
+
+    pub fn mark_dispatched(&mut self, session_key: &str, entry_id: String) {
+        self.dispatching.insert(session_key.into(), OutboxDispatch {
+            entry_id,
+            seen_working: false,
+        });
+    }
+
+    pub fn observe_working(&mut self, session_key: &str, working: bool) {
+        if let Some(dispatch) = self.dispatching.get_mut(session_key) {
+            if working {
+                dispatch.seen_working = true;
+            } else if dispatch.seen_working {
+                self.dispatching.remove(session_key);
+            }
+        }
+    }
+
+    // Observe once before broadcasting to windows, so a slow sibling's old idle event
+    // cannot release the next window's newly dispatched prompt.
+    pub fn observe_server_event(&mut self, host: &str, event: &ServerEvent) {
+        match event {
+            ServerEvent::SessionUpdated { session } => {
+                self.observe_working(&Self::session_key(host, session.agent, &session.id), session.working);
+            }
+            ServerEvent::Sessions { sessions } => {
+                for session in sessions {
+                    self.observe_working(&Self::session_key(host, session.agent, &session.id), session.working);
+                }
+            }
+            ServerEvent::HistoryAppend { session_id, working: Some(working), .. } => {
+                for agent in [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity, AgentKind::Pi, AgentKind::Cursor] {
+                    self.observe_working(&Self::session_key(host, agent, session_id), *working);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn take_next_for_dispatch(&mut self, session_key: &str, working: bool) -> Option<OutboxEntry> {
+        if working || self.dispatching.contains_key(session_key) {
+            return None;
+        }
+        let entry = self.pop_next(session_key)?;
+        self.mark_dispatched(session_key, entry.id.clone());
+        Some(entry)
     }
 
     pub fn peek_next(&self, session_key: &str) -> Option<&OutboxEntry> {
@@ -299,7 +354,7 @@ impl ChatOutbox {
             sanitized.push(entry);
         }
 
-        Self { entries: sanitized }
+        Self { entries: sanitized, ..Default::default() }
     }
 }
 
@@ -365,6 +420,40 @@ fn quarantine_outbox(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatch_waits_for_a_new_turn_and_duplicate_idle_events_do_not_drain_fifo() {
+        for agent in [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity, AgentKind::Pi, AgentKind::Cursor] {
+            let mut outbox = ChatOutbox::default();
+            let key = ChatOutbox::session_key("host", agent, "session");
+            let first = outbox.enqueue(&key, "first", 1).unwrap();
+            let second = outbox.enqueue(&key, "second", 2).unwrap();
+            assert!(outbox.take_next_for_dispatch(&key, true).is_none());
+            assert_eq!(outbox.take_next_for_dispatch(&key, false).unwrap().id, first.id);
+            for _ in 0..3 {
+                outbox.observe_working(&key, false);
+                assert!(outbox.take_next_for_dispatch(&key, false).is_none());
+            }
+            outbox.observe_working(&key, true);
+            outbox.observe_working(&key, false);
+            assert_eq!(outbox.take_next_for_dispatch(&key, false).unwrap().id, second.id);
+            assert!(outbox.take_next_for_dispatch(&key, false).is_none());
+        }
+    }
+
+    #[test]
+    fn pending_fifo_survives_reload_without_replaying_a_dispatched_entry() {
+        let dir = TempDir::new("pending-reload");
+        let path = dir.0.join("outbox.json");
+        let mut outbox = ChatOutbox::default();
+        outbox.enqueue("session", "sent", 1).unwrap();
+        outbox.enqueue("session", "pending", 2).unwrap();
+        outbox.take_next_for_dispatch("session", false).unwrap();
+        outbox.save_to(&path).unwrap();
+        let loaded = ChatOutbox::load_from(&path);
+        assert_eq!(loaded.entries.len(), 1);
+        assert_eq!(loaded.peek_next("session").unwrap().text, "pending");
+    }
 
     static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(1);
 

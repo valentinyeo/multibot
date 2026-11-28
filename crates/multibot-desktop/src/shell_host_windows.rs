@@ -48,6 +48,7 @@ struct VisibleShell {
     urls: std::sync::mpsc::Sender<ConsoleClick>,
     pastes: std::sync::mpsc::Sender<ConsolePaste>,
     text_input_focused: bool,
+    confirming_kill: bool,
 }
 
 struct ConsolePaste {
@@ -162,6 +163,7 @@ impl NativeHost {
                         urls,
                         pastes: host.pastes.clone(),
                         text_input_focused: false,
+                        confirming_kill: false,
                     },
                 )
             });
@@ -185,6 +187,13 @@ impl NativeHost {
         VISIBLE.with(|visible| {
             if let Some(shell) = visible.borrow_mut().get_mut(&self.parent) {
                 shell.text_input_focused = focused;
+            }
+        });
+    }
+    pub(super) fn set_kill_confirmation(&self, confirming: bool) {
+        VISIBLE.with(|visible| {
+            if let Some(shell) = visible.borrow_mut().get_mut(&self.parent) {
+                shell.confirming_kill = confirming;
             }
         });
     }
@@ -219,9 +228,17 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                 let ctrl = GetAsyncKeyState(0x11) < 0;
                 let alt = GetAsyncKeyState(0x12) < 0;
                 let shift = GetAsyncKeyState(0x10) < 0;
-                if let Some(shortcut) = shell_shortcut(key, ctrl, alt, shift) {
-                    let foreground = GetForegroundWindow();
-                    let root = GetAncestor(foreground, GA_ROOT) as usize;
+                let foreground = GetForegroundWindow();
+                let root = GetAncestor(foreground, GA_ROOT) as usize;
+                let confirming = VISIBLE.with(|v| v.borrow().get(&root).is_some_and(|shell| shell.confirming_kill));
+                let shortcut = if key == 0x1B && !ctrl && !alt && !shift && confirming {
+                    Some(ShellShortcut::Forward("escape"))
+                } else { shell_shortcut(key, ctrl, alt, shift) };
+                if let Some(shortcut) = shortcut {
+                    // A held key is not the second confirmation press; key-up rearms it.
+                    if key == 0x57 && ctrl && shift && FORWARDED.with(|v| v.borrow().contains_key(&key)) {
+                        return 1;
+                    }
                     let parent = VISIBLE.with(|v| {
                         v.borrow()
                             .get(&root)

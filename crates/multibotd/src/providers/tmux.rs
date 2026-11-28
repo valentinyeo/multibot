@@ -40,6 +40,7 @@ pub fn parse_tmux_sessions_output(stdout: &str) -> Vec<SessionSummary> {
                 title: title.into(),
                 cwd: (!cwd.is_empty()).then(|| cwd.into()),
                 source_path: format!("tmux:{name}"),
+                shell_attached: Some(fields[4].parse::<u32>().ok()? > 0),
                 updated_at_ms: activity,
                 working: !command.is_empty()
                     && !matches!(command, "bash" | "sh" | "zsh" | "fish" | "dash"),
@@ -126,6 +127,16 @@ impl AgentProvider for TmuxProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shell_inventory_keeps_attachment_and_command_details() {
+        let shells = parse_tmux_sessions_output("first\t1\tbtop\t/srv/projects\t0\tBTOP\nsecond\t2\tagy\t/srv/multibot\t2\tagy");
+        assert_eq!(shells.len(), 2);
+        assert_eq!(shells[0].shell_attached, Some(false));
+        assert_eq!(shells[0].last_assistant_preview.as_deref(), Some("btop · projects"));
+        assert_eq!(shells[1].shell_attached, Some(true));
+        assert_eq!(shells[1].last_assistant_preview.as_deref(), Some("agy · multibot"));
+    }
+
     #[test]
     fn rediscovered_shell_retains_saved_archive_after_daemon_restart() {
         let home =

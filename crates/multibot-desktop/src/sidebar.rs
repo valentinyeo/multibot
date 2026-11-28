@@ -206,7 +206,7 @@ impl SidebarState {
             .pending_shell_dissolve
             .take()
             .is_some_and(|(pending, started)| {
-                pending == key && now.duration_since(started) < std::time::Duration::from_secs(3)
+                pending == key && now.duration_since(started) < std::time::Duration::from_secs(8)
             })
         {
             return true;
@@ -2015,7 +2015,7 @@ mod tests {
         assert!(!state.confirm_shell_dissolve("host-b:shell:same-id", now));
         assert!(state.confirm_shell_dissolve("host-b:shell:same-id", now));
         assert!(!state.confirm_shell_dissolve("host-b:shell:same-id", now));
-        let expired = now + std::time::Duration::from_secs(3);
+        let expired = now + std::time::Duration::from_secs(8);
         assert!(!state.confirm_shell_dissolve("host-b:shell:same-id", expired));
         assert!(state.confirm_shell_dissolve("host-b:shell:same-id", expired));
     }
@@ -2566,7 +2566,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn shell_dissolve_requires_one_confirmation_for_exact_session_within_three_seconds(
+    fn shell_dissolve_requires_one_confirmation_for_exact_session_within_eight_seconds(
         cx: &mut TestAppContext,
     ) {
         let (handle, view) = open_view(cx);
@@ -2599,10 +2599,13 @@ mod tests {
                 view.read(cx).selected_session.as_ref().unwrap().id,
                 "shell-1"
             );
+            assert!(window.find("shell-kill-confirmation").visible());
+            assert!(window.find("shell-kill").visible());
+            assert!(window.find("shell-kill-cancel").visible());
             assert!(rx.try_recv().is_err(), "first press must not archive");
             view.update(cx, |v, _| {
                 v.sidebar_state.pending_shell_dissolve.as_mut().unwrap().1 =
-                    std::time::Instant::now() - std::time::Duration::from_secs(4);
+                    std::time::Instant::now() - std::time::Duration::from_secs(9);
             });
             window.press("ctrl-shift-w", cx);
             window.render_frame(cx);
@@ -2624,6 +2627,23 @@ mod tests {
                 rx.try_recv().is_err(),
                 "confirmation must not transfer to next shell"
             );
+            assert!(window.find("shell-kill-confirmation").visible());
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("shell-kill-confirmation").is_none());
+            assert!(rx.try_recv().is_err());
+            window.press("ctrl-shift-w", cx);
+            window.render_frame(cx);
+            window.click("shell-kill-cancel", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("shell-kill-confirmation").is_none());
+            window.press("ctrl-shift-w", cx);
+            window.render_frame(cx);
+            window.click("shell-kill", cx);
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::ArchiveSession {
+                session_id, agent: AgentKind::Shell, kill_process: true, ..
+            }) if session_id == "shell-0"));
+            assert!(view.read(cx).selected_session.is_none());
         })
         .unwrap();
     }

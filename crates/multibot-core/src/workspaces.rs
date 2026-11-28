@@ -294,6 +294,8 @@ pub struct SessionGroup {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMeta {
+    #[serde(default)]
+    pub full_width: bool,
     #[serde(default = "default_true")]
     pub hibernate_wake_on_reply: bool,
     #[serde(default)]
@@ -340,6 +342,7 @@ pub struct SessionMeta {
 impl Default for SessionMeta {
     fn default() -> Self {
         Self {
+            full_width: false,
             hibernate_wake_on_reply: true,
             hibernate_reply_boundary: None,
             dissolved_at_ms: None,
@@ -4187,6 +4190,21 @@ mod tests {
             store.cycle_workspace_id(STARRED_WORKSPACE_ID, -1, 100),
             ALL_WORKSPACES_ID
         );
+    }
+
+    #[test]
+    fn full_width_is_session_scoped_and_defaults_false_for_older_stores() {
+        let dir = unique_temp_dir("full-width");
+        let path = dir.join("workspace_store.json");
+        let mut store = WorkspaceStore::new();
+        store.session_meta.entry("host:shell:btop".into()).or_default().full_width = true;
+        store.session_meta.entry("host:claude:normal".into()).or_default();
+        store.save_to(&path).unwrap();
+        let loaded = WorkspaceStore::load_from(&path).unwrap();
+        assert!(loaded.session_meta["host:shell:btop"].full_width);
+        assert!(!loaded.session_meta["host:claude:normal"].full_width);
+        assert!(!serde_json::from_str::<SessionMeta>("{}").unwrap().full_width);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

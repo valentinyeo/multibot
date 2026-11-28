@@ -7,6 +7,11 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 
+- Queue follow-up messages across Claude, Codex, Antigravity, Pi, and Cursor; edit, remove, or interrupt and send any queued message immediately.
+- Show a visible Kill/Cancel confirmation for live server shells, with eight seconds to confirm Ctrl+Shift+W and Escape to cancel.
+- Remember full-width mode per session across restarts, restoring the sidebar when opening a normal-width session.
+- Open Ctrl+K → Server shells to attach or permanently end live shells across all connected servers, including detached shells.
+
 - Paste clipboard text reliably into live server shells with Ctrl+V or Ctrl+Shift+V, including multiline text.
 - Scroll live server shells with the mouse wheel even when the app holds keyboard focus; preserve terminal PageUp and PageDown keys.
 - Start Multibot maximized on every launch, including update restarts.

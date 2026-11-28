@@ -374,13 +374,8 @@ impl MultibotView {
                     .child(div().text_sm().child("Input box"))
                     .child(div().id("composer-send-help").test_support().text_xs().text_color(theme::text_secondary()).child("Ctrl+Enter sends a message. Enter or Shift+Enter adds a new line."))
                     .child(div().text_sm().child("Queued messages"))
-                    .child(h_flex().gap_2()
-                        .child(Button::new("queue-messages").label("Queue").selected(self.settings.queue_while_working)
-                            .on_click(cx.listener(|this, _, _, cx| { this.settings.queue_while_working = true; this.save_general_preferences(cx); })))
-                        .child(Button::new("send-messages-immediately").label("Send immediately").selected(!self.settings.queue_while_working)
-                            .on_click(cx.listener(|this, _, _, cx| { this.settings.queue_while_working = false; this.save_general_preferences(cx); }))))
                     .child(div().text_xs().text_color(theme::text_secondary())
-                        .child("Queue waits until the agent finishes. Send immediately starts another turn. Offline messages always stay in the outbox until reconnecting.")));
+                        .child("Messages queue while the agent works. Use Send now beside a queued message to interrupt and send it immediately. Offline messages wait for reconnecting.")));
             }
             SettingsTab::Hosts => {
                 let mut hosts = v_flex().gap_3().p_4().rounded(RADIUS_BUBBLE)
