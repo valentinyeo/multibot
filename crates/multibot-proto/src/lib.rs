@@ -1,6 +1,37 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
+pub const MAX_BROWSER_RESULT_BYTES: usize = 512 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+pub enum BrowserCommand {
+    Navigate { url: String },
+    Tabs,
+    ActivateTab { target_id: String },
+    Eval { expression: String },
+    ReadText,
+    Click { selector: String },
+    Type { selector: String, text: String },
+    Screenshot,
+    RawCdp { method: String, params: serde_json::Value },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserTarget {
+    pub target_id: String,
+    pub url: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum BrowserResponse {
+    Tabs { tabs: Vec<BrowserTarget> },
+    Value { value: serde_json::Value },
+    Error { message: String },
+}
+
 
 /// Build version embedded at compile time via `MULTIBOT_BUILD_VERSION` (injected by CI for
 /// versioned GitHub Releases), falling back to `CARGO_PKG_VERSION` for local dev builds.
@@ -319,6 +350,9 @@ impl Default for ChatMessage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ClientRequest {
+    BrowserBind { session_id: String, binding_id: String },
+    BrowserUnbind { session_id: String, binding_id: String },
+    BrowserResult { request_id: u64, binding_id: String, response: BrowserResponse },
     Hello {
         client_version: String,
     },
@@ -431,6 +465,7 @@ pub enum ClientRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ServerEvent {
+    BrowserCommand { request_id: u64, session_id: String, binding_id: String, command: BrowserCommand },
     HelloAck {
         protocol_version: u32,
         daemon_version: String,
@@ -1088,5 +1123,34 @@ mod tests {
                 ..SlashCommandItem::default()
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod browser_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn browser_commands_and_responses_roundtrip() {
+        let commands = vec![
+            BrowserCommand::Navigate { url: "https://example.com".into() },
+            BrowserCommand::Tabs,
+            BrowserCommand::ActivateTab { target_id: "page-a".into() },
+            BrowserCommand::Eval { expression: "1 + 1".into() },
+            BrowserCommand::ReadText,
+            BrowserCommand::Click { selector: "#submit".into() },
+            BrowserCommand::Type { selector: "input".into(), text: "quotes \" and \n".into() },
+            BrowserCommand::Screenshot,
+            BrowserCommand::RawCdp { method: "Runtime.evaluate".into(), params: json!({"expression":"1"}) },
+        ];
+        for command in commands {
+            let event = ServerEvent::BrowserCommand { request_id: 42, session_id: "a".into(), binding_id: "instance".into(), command };
+            assert_eq!(decode_line::<ServerEvent>(&serde_json::to_string(&event).unwrap()).unwrap(), event);
+        }
+        for response in [BrowserResponse::Value { value: json!({"data":"png"}) }, BrowserResponse::Tabs { tabs: vec![BrowserTarget { target_id:"page-a".into(), url:"about:blank".into(), title:"A".into() }] }, BrowserResponse::Error { message:"Not bound".into() }] {
+            let request = ClientRequest::BrowserResult { request_id: 42, binding_id:"instance".into(), response };
+            assert_eq!(decode_line::<ClientRequest>(&serde_json::to_string(&request).unwrap()).unwrap(), request);
+        }
     }
 }

@@ -130,7 +130,6 @@ pub(crate) fn settings_visible_eq(a: &MultibotSettings, b: &MultibotSettings) ->
         sidebar_mode: a_sb,
         shell_fullscreen: a_full,
         chat_font_size_pt: a_font,
-        composer_ctrl_enter: a_send,
         queue_while_working: a_queue,
         ui_scale_pct: a_scale,
         dismissed_update_version: a_dis,
@@ -145,7 +144,6 @@ pub(crate) fn settings_visible_eq(a: &MultibotSettings, b: &MultibotSettings) ->
         sidebar_mode: b_sb,
         shell_fullscreen: b_full,
         chat_font_size_pt: b_font,
-        composer_ctrl_enter: b_send,
         queue_while_working: b_queue,
         ui_scale_pct: b_scale,
         dismissed_update_version: b_dis,
@@ -158,7 +156,6 @@ pub(crate) fn settings_visible_eq(a: &MultibotSettings, b: &MultibotSettings) ->
         && a_sel == b_sel
         && a_sb == b_sb
         && a_full == b_full
-        && a_send == b_send
         && a_queue == b_queue
         && a_font == b_font
         && a_scale == b_scale

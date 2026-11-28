@@ -519,7 +519,7 @@ impl MultibotView {
 
         let prompt_input = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Message this session")
+                .placeholder("Message this session · Ctrl+Enter to send")
                 .auto_grow(1, 10)
                 .soft_wrap(true)
         });
@@ -3292,6 +3292,10 @@ impl MultibotView {
                 self.sync_sessions_to_shared(cx);
             }
             UiBridgeEvent::Server(server_ev) => match server_ev {
+                ServerEvent::BrowserCommand { request_id, session_id, binding_id, command } => {
+                    self.handle_browser_command(self.current_host_label(), &session_id, &binding_id, request_id, command);
+                    return;
+                }
                 ServerEvent::Pong { .. } => {
                     return;
                 }
@@ -4125,7 +4129,12 @@ impl MultibotView {
         }
         let mut changed = false;
         match event {
+            ServerEvent::BrowserCommand { request_id, session_id, binding_id, command } => {
+                self.handle_browser_command(host_label, &session_id, &binding_id, request_id, command);
+                return;
+            }
             ServerEvent::HelloAck { .. } => {
+                self.rebind_browsers(host_label);
                 self.flush_outbox_for_host(host_label);
                 if matches_active_host && let Some(ref sel) = self.selected_session {
                     self.request_daemon_commands(sel.agent, sel.cwd.clone());
@@ -6521,6 +6530,55 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn composer_enter_inserts_newline_without_sending(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                let session = make_session("newline", AgentKind::Claude, "Newline", false);
+                v.daemon_tx = Some(tx);
+                v.sessions = vec![session.clone()];
+                v.select_session(session, cx);
+            });
+            window.render_frame(cx);
+            while rx.try_recv().is_ok() {}
+            window.input("first", cx);
+            window.press("enter", cx);
+            window.input("second", cx);
+            window.press("shift-enter", cx);
+            window.input("third", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).prompt_input.read(cx).value(), "first\nsecond\nthird");
+            assert!(view.read(cx).messages.is_empty());
+            assert!(rx.try_recv().is_err());
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn composer_ctrl_enter_sends_multiline_message(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                let session = make_session("multiline", AgentKind::Claude, "Multiline", false);
+                v.daemon_tx = Some(tx);
+                v.sessions = vec![session.clone()];
+                v.select_session(session, cx);
+            });
+            window.render_frame(cx);
+            while rx.try_recv().is_ok() {}
+            window.input("first", cx);
+            window.press("enter", cx);
+            window.input("second", cx);
+            window.press("ctrl-enter", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).prompt_input.read(cx).value(), "");
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "first\nsecond"));
+            assert!(rx.try_recv().is_err());
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
     fn daily_driver_composer_grows_upward_caps_scrolls_and_sends(cx: &mut TestAppContext) {
         let (handle, view) = open_test_view_with_entity(cx);
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -6544,7 +6602,7 @@ mod tests {
             while let Ok(request) = rx.try_recv() {
                 assert!(!matches!(request, ClientRequest::SendPrompt { .. }));
             }
-            window.press("enter", cx);
+            window.press("ctrl-enter", cx);
             window.render_frame(cx);
             assert_eq!(view.read(cx).prompt_input.read(cx).value(), "");
             let mut sent = false;
@@ -7195,7 +7253,7 @@ mod tests {
                 v.prompt_input.update(cx, |input, cx| { input.set_value("Continue saved chat", window, cx); input.focus(window, cx); });
             });
             window.render_frame(cx);
-            window.press("enter", cx);
+            window.press("ctrl-enter", cx);
             window.render_frame(cx);
             assert!(matches!(rx.try_recv(), Ok(ClientRequest::UnarchiveSession { ref session_id }) if session_id == "saved"));
             assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { ref session_id, ref text, .. }) if session_id == "saved" && text == "Continue saved chat"));
@@ -7752,11 +7810,9 @@ mod tests {
             window.render_frame(cx);
             window.press("ctrl-,", cx);
             window.render_frame(cx);
-            window.click("send-key-ctrl-enter", cx);
             window.render_frame(cx);
             window.click("send-messages-immediately", cx);
             window.render_frame(cx);
-            assert!(view.read(cx).settings.composer_ctrl_enter);
             assert!(!view.read(cx).settings.queue_while_working);
             for _ in 0..20 {
                 window.press("tab", cx);
@@ -8390,7 +8446,7 @@ mod tests {
                 view.read(cx).settings_tab,
                 crate::settings::SettingsTab::General
             );
-            assert!(window.try_find("send-key-enter").is_some());
+            assert!(window.try_find("composer-send-help").is_some());
             for (tab, control) in [
                 ("settings-tab-hosts", "connect-local"),
                 ("settings-tab-gpu", "gpu-mode-auto"),
@@ -10002,7 +10058,7 @@ mod tests {
                 });
             });
             window.render_frame(cx);
-            window.press("enter", cx);
+            window.press("ctrl-enter", cx);
             window.render_frame(cx);
             let mut sent = false;
             while let Ok(request) = rx.try_recv() {

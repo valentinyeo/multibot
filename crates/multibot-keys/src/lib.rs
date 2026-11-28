@@ -48,6 +48,22 @@ pub struct ShortcutSpec {
 /// Single source of truth for preserved Multibot keyboard shortcuts.
 /// Canonical contract: `docs/keyboard-shortcuts.md`.
 pub const SHORTCUTS: &[ShortcutSpec] = &[
+    ShortcutSpec {
+        id: "chat.send",
+        display: "Ctrl+Enter",
+        gpui_key: "ctrl-enter",
+        category: ShortcutCategory::Chat,
+        description: "Send message from the chat composer",
+        wired: true,
+    },
+    ShortcutSpec {
+        id: "chat.newline",
+        display: "Enter / Shift+Enter",
+        gpui_key: "enter",
+        category: ShortcutCategory::Chat,
+        description: "New line; select slash command or open focused message menu",
+        wired: true,
+    },
     // =========================================================================
     // Navigation & Palette (25 entries)
     // =========================================================================
@@ -1098,7 +1114,7 @@ mod tests {
             }
         }
 
-        assert_eq!(SHORTCUTS.len(), 101);
+        assert_eq!(SHORTCUTS.len(), 103);
     }
 
     #[test]
@@ -1464,7 +1480,9 @@ mod tests {
         let fullscreen = by_id("view.fullscreen").unwrap();
         assert_eq!(fullscreen.gpui_key, "ctrl-shift-f");
         assert!(fullscreen.wired);
-        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 72);
+        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 74);
+        assert_eq!(by_id("chat.send").unwrap().gpui_key, "ctrl-enter");
+        assert_eq!(by_id("chat.newline").unwrap().gpui_key, "enter");
         assert!(!by_id("browser.close_tab").unwrap().wired);
         assert!(!by_id("chat.steer").unwrap().wired);
         assert!(by_gpui_key("ctrl-shift-j").is_none());

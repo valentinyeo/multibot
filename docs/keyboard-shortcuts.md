@@ -323,7 +323,8 @@ The search bar stays hidden so the Inbox opens clean. Ctrl+F or / opens and focu
 | Ctrl+K "Chat View: More Menu" | Chat View: open the round three-dot menu next to the title as one grouped panel: Approve, Stop, Terminal, Rename, History, Done, Hibernate, Dissolve, the current Model, End session and Remove from list; Up/Down/Enter or the mouse choose, Esc or a click outside closes |
 | Inbox icon in the chat header | Click the envelope left of the three dots to open the Inbox, same as Alt+I; a blue dot shows while Inbox items wait |
 | Up / Down / Enter in Chat View | Up in an empty message box focuses the newest message; Up/Down move between messages including waiting ones, Enter opens the right-click options, Delete cancels a waiting message, Esc or typing returns to the box |
-| Enter / Ctrl+Enter in Chat View | Send your message; while dictating, stops the dictation and sends it with the spoken words; Shift+Enter adds a new line; Enter inserts an open command suggestion |
+| Ctrl+Enter in Chat View | Send your message; while dictating, stops dictation and sends it with the spoken words |
+| Enter / Shift+Enter in Chat View | New line; plain Enter selects an open slash command suggestion or opens the focused message menu |
 | / in Chat View | Suggest Claude or Codex commands and skills; Up/Down, Tab or Enter inserts, Esc closes |
 | /plan or /permissions in live chat, or Ctrl+K -&gt; Chat View: Plus Menu | Choose Plan, Ask, Accept edits, or Bypass for this chat; /plan selects Plan first |
 | Ctrl+K "Chat View: Plus Menu" | Chat View: open the plus menu left of the message box: Attach file, Model, Effort and, in a Claude chat, Permission level; Up/Down/Enter or the mouse choose, Esc or a click outside closes |

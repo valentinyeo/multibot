@@ -141,6 +141,31 @@ mod windows {
                 })
         }
 
+        pub(crate) fn handle_browser_command(&self, host: &str, session: &str, binding_id: &str, request_id: u64, command: multibot_proto::BrowserCommand) {
+            for tab in self.browser.tabs.values() {
+                let (Tab::Starting(_, browser) | Tab::Ready(_, browser)) = tab else { continue };
+                let Some((bound_host, bound_session, tx)) = &browser.bridge else { continue };
+                if bound_host != host || bound_session != session || browser.binding_id != binding_id { continue; }
+                let controller = browser.cdp.clone();
+                let tx = tx.clone();
+                let binding_id = binding_id.to_owned();
+                self.runtime.spawn(async move {
+                    let response = controller.execute(command).await;
+                    let _ = tx.send(multibot_proto::ClientRequest::BrowserResult { request_id, binding_id, response });
+                });
+                return;
+            }
+        }
+
+        pub(crate) fn rebind_browsers(&mut self, host: &str) {
+            let Some(tx) = self.tx_for_host(host).cloned() else { return };
+            for tab in self.browser.tabs.values_mut() {
+                let (Tab::Starting(_, browser) | Tab::Ready(_, browser)) = tab else { continue };
+                let Some((bound_host, session, _)) = &browser.bridge else { continue };
+                if bound_host == host { browser.bind(host.to_owned(), session.clone(), tx.clone()); }
+            }
+        }
+
         fn browser_session(&self) -> Option<String> {
             (self.main_surface == MainSurface::Chat
                 && self.active_modal == ActiveModal::None
@@ -356,13 +381,19 @@ mod windows {
                     .unwrap_or(DEFAULT_URL);
                 native::Browser::launch(parent, &key, url)
             })();
-            let (browser, process) = match result {
+            let (mut browser, process) = match result {
                 Ok(result) => result,
                 Err(err) => {
                     self.browser.tabs.insert(key, Tab::Failed(err.to_string()));
                     return;
                 }
             };
+            if let Some(session) = &self.selected_session {
+                let host = self.active_session_host().to_owned();
+                if let Some(tx) = self.tx_for_host(&host) {
+                    browser.bind(host, session.id.clone(), tx.clone());
+                }
+            }
             self.browser.generation += 1;
             let generation = self.browser.generation;
             self.browser
@@ -612,6 +643,9 @@ pub(crate) use windows::DesktopBrowserPane;
 
 #[cfg(not(windows))]
 impl MultibotView {
+    pub(crate) fn handle_browser_command(&self, _host: &str, _session: &str, _binding_id: &str, _request_id: u64, _command: multibot_proto::BrowserCommand) {}
+    pub(crate) fn rebind_browsers(&mut self, _host: &str) {}
+
     pub(crate) fn toggle_browser_pane(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.main_surface == crate::state::MainSurface::Chat
             && self.active_modal == crate::state::ActiveModal::None

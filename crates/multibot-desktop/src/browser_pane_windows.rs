@@ -35,6 +35,7 @@ impl Drop for Handle {
 pub(super) struct Process {
     handle: usize,
     pid: u32,
+    _profile_lock: std::fs::File,
 }
 
 impl Drop for Process {
@@ -48,6 +49,9 @@ pub(super) struct Browser {
     rect: Option<BrowserPaneRect>,
     parent: usize,
     _job: Handle,
+    pub(super) cdp: crate::browser_cdp::BrowserController,
+    pub(super) binding_id: String,
+    pub(super) bridge: Option<(String, String, UnboundedSender<multibot_proto::ClientRequest>)>,
 }
 
 fn wide(s: &OsStr) -> Vec<u16> {
@@ -121,6 +125,15 @@ impl Browser {
             .context("Install Microsoft Edge or Google Chrome to use the browser pane")?;
         let profile = session_profile(&isolated_root()?, session);
         real_directory(&profile)?;
+        // Chromium otherwise forwards a second launch into the first window's process.
+        let profile_lock = std::fs::OpenOptions::new().create(true).truncate(false)
+            .read(true).write(true).open(profile.join("multibot-pane.lock"))?;
+        profile_lock.try_lock().context("This session's browser is already open in another window or is still closing")?;
+        match std::fs::remove_file(profile.join("DevToolsActivePort")) {
+            Ok(()) => {},
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {},
+            Err(err) => return Err(err.into()),
+        }
         let mut command = command_line(&program, &launch_args(&profile, url));
         let program = wide(program.as_os_str());
 
@@ -165,6 +178,7 @@ impl Browser {
             let process = Process {
                 handle: info.hProcess as usize,
                 pid: info.dwProcessId,
+                _profile_lock: profile_lock,
             };
             if AssignProcessToJobObject(job.0, info.hProcess) == 0 {
                 let error = io::Error::last_os_error();
@@ -180,10 +194,20 @@ impl Browser {
                     rect: None,
                     parent,
                     _job: job,
+                    cdp: crate::browser_cdp::BrowserController::new(profile),
+                    binding_id: format!("{}-{parent}-{}", std::process::id(), info.dwProcessId),
+                    bridge: None,
                 },
                 process,
             ))
         }
+    }
+
+    pub(super) fn bind(&mut self, host: String, session_id: String, tx: UnboundedSender<multibot_proto::ClientRequest>) {
+        let _ = tx.send(multibot_proto::ClientRequest::BrowserBind {
+            session_id: session_id.clone(), binding_id: self.binding_id.clone(),
+        });
+        self.bridge = Some((host, session_id, tx));
     }
 
     pub(super) fn attach(&mut self, window: usize) -> Result<()> {
@@ -255,6 +279,11 @@ impl Browser {
 
 impl Drop for Browser {
     fn drop(&mut self) {
+        if let Some((_, session_id, tx)) = self.bridge.take() {
+            let _ = tx.send(multibot_proto::ClientRequest::BrowserUnbind {
+                session_id, binding_id: self.binding_id.clone(),
+            });
+        }
         self.place(None);
     }
 }

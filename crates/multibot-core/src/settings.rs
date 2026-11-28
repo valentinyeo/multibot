@@ -119,8 +119,6 @@ pub struct MultibotSettings {
     pub shell_fullscreen: bool,
     #[serde(default = "default_chat_font_size_pt")]
     pub chat_font_size_pt: u16,
-    #[serde(default)]
-    pub composer_ctrl_enter: bool,
     #[serde(default = "default_true")]
     pub queue_while_working: bool,
     #[serde(default = "default_ui_scale_pct")]
@@ -143,7 +141,6 @@ impl Default for MultibotSettings {
             sidebar_mode: SidebarMode::Open,
             shell_fullscreen: false,
             chat_font_size_pt: DEFAULT_CHAT_FONT_SIZE_PT,
-            composer_ctrl_enter: false,
             queue_while_working: true,
             ui_scale_pct: DEFAULT_UI_SCALE_PCT,
             dismissed_update_version: None,

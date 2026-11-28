@@ -1,3 +1,5 @@
+#[cfg(unix)]
+mod browser_bridge;
 mod commands;
 mod process;
 mod providers;
@@ -22,6 +24,13 @@ use tokio::sync::mpsc;
 use watcher::{DiskJob, WatchManager};
 
 fn main() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.first().is_some_and(|arg| arg == "browser") {
+            return browser_bridge::cli(&args[1..]);
+        }
+    }
     if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
         println!("multibotd {}", build_version());
         return Ok(());
@@ -72,6 +81,10 @@ async fn async_main(
     disk_tx: std::sync::mpsc::Sender<DiskJob>,
 ) -> Result<()> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    #[cfg(unix)]
+    let browser_bridge = browser_bridge::BrowserBridge::default();
+    #[cfg(unix)]
+    let _browser_socket = browser_bridge.listen(&home, out_tx.clone())?;
     let binary_hash = compute_binary_hash();
     let hostname = read_hostname();
 
@@ -120,6 +133,12 @@ async fn async_main(
         };
 
         match req {
+            request @ (ClientRequest::BrowserBind { .. } | ClientRequest::BrowserUnbind { .. } | ClientRequest::BrowserResult { .. }) => {
+                #[cfg(unix)]
+                browser_bridge.handle(request);
+                #[cfg(not(unix))]
+                let _ = request;
+            }
             ClientRequest::Hello { .. } => {
                 let _ = out_tx.send(ServerEvent::HelloAck {
                     protocol_version: PROTOCOL_VERSION,

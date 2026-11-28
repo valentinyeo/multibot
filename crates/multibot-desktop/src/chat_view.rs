@@ -5092,7 +5092,7 @@ impl MultibotView {
                     cx.stop_propagation();
                     return;
                 }
-                if action.secondary == this.settings.composer_ctrl_enter && !action.shift {
+                if action.secondary && !action.shift {
                     this.chat_state.slash_sync_pending = false;
                     this.send_current_prompt(window, cx);
                     cx.stop_propagation();
@@ -5572,7 +5572,7 @@ impl MultibotView {
                                     16.0,
                                 ))
                                 .accessibility_label(if is_working { "Stop" } else { "Send" })
-                                .tooltip(if is_working { "Stop response" } else { "Send message" })
+                                .tooltip(if is_working { "Stop response" } else { "Send message · Ctrl+Enter" })
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     if this.selected_session.as_ref().is_some_and(|s| s.working) {
                                         this.interrupt_active_session(cx);
@@ -8698,7 +8698,7 @@ mod tests {
                 window.render_frame(cx);
                 assert_eq!(view.read(cx).chat_state.focused_message_idx, None);
 
-                // 5. Plain Enter with slash picker closed sends prompt cleanly ONCE
+                // 5. Ctrl+Enter with slash picker closed sends prompt cleanly ONCE
                 view.update(cx, |v, cx| {
                     v.messages.clear();
                     v.prompt_input.update(cx, |input, cx| {
@@ -8708,7 +8708,7 @@ mod tests {
                     cx.notify();
                 });
                 window.render_frame(cx);
-                window.press("enter", cx);
+                window.press("ctrl-enter", cx);
                 window.render_frame(cx);
                 assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "");
                 assert_eq!(view.read(cx).messages.len(), 1);
@@ -8910,7 +8910,7 @@ mod tests {
             assert!(view.read(cx).slash_picker_state.is_open());
             assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "/pl");
 
-            for chord in ["shift-enter", "ctrl-enter", "alt-enter"] {
+            for chord in ["shift-enter", "alt-enter"] {
                 window.press(chord, cx);
                 window.render_frame(cx);
                 assert!(

@@ -921,8 +921,9 @@ async fn shell_sessions_spawn_open_refresh_and_disappear_without_transcripts() {
         loop {
             if let ServerEvent::Sessions { sessions } =
                 decode_line::<ServerEvent>(&output.next_line().await.unwrap().unwrap()).unwrap()
-                && sessions.iter().all(|s| s.agent != AgentKind::Shell)
+                && sessions.iter().any(|s| s.id == session.id && s.archived && s.archive_kill_process)
             {
+                assert!(sessions.iter().filter(|s| s.agent == AgentKind::Shell).all(|s| s.archived));
                 break;
             }
         }
@@ -1402,4 +1403,56 @@ done
             .success()
     );
     let _ = fs::remove_dir_all(home);
+}
+
+
+#[tokio::test]
+async fn browser_cli_roundtrip_through_connected_daemon() {
+    use multibot_proto::{BrowserCommand, BrowserResponse};
+    use serde_json::json;
+    let home = temp_home("browser");
+    let bin = env!("CARGO_BIN_EXE_multibotd");
+    let mut daemon = Command::new(bin).arg("--stdio").env("HOME", &home)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .kill_on_drop(true).spawn().unwrap();
+    let pid = daemon.id().unwrap();
+    let mut input = daemon.stdin.take().unwrap();
+    let mut output = BufReader::new(daemon.stdout.take().unwrap()).lines();
+    for request in [
+        ClientRequest::BrowserBind { session_id:"session-a".into(), binding_id:"window-a".into() },
+        ClientRequest::BrowserBind { session_id:"session-b".into(), binding_id:"window-b".into() },
+        ClientRequest::Ping { nonce:99 },
+    ] { input.write_all(encode_line(&request).unwrap().as_bytes()).await.unwrap(); }
+    let line = tokio::time::timeout(Duration::from_secs(5), output.next_line()).await.unwrap().unwrap().unwrap();
+    assert!(matches!(decode_line::<ServerEvent>(&line).unwrap(), ServerEvent::Pong { nonce:99, .. }));
+    for (args, expected, value) in [
+        (vec!["navigate", "https://example.com"], BrowserCommand::Navigate { url:"https://example.com".into() }, json!({"frameId":"a"})),
+        (vec!["eval", "1 + 1"], BrowserCommand::Eval { expression:"1 + 1".into() }, json!(2)),
+        (vec!["text"], BrowserCommand::ReadText, json!("Page A")),
+        (vec!["screenshot"], BrowserCommand::Screenshot, json!({"data":"iVBORw0KGgo="})),
+    ] {
+        let mut cli = Command::new(bin).args(["browser", "--session", "session-a"]).args(args)
+            .env("HOME", &home).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .kill_on_drop(true).spawn().unwrap();
+        let line = tokio::time::timeout(Duration::from_secs(5), output.next_line()).await.unwrap().unwrap().unwrap();
+        let ServerEvent::BrowserCommand { request_id, session_id, binding_id, command } = decode_line::<ServerEvent>(&line).unwrap() else { panic!("unexpected event") };
+        assert_eq!(session_id, "session-a");
+        assert_eq!(binding_id, "window-a");
+        assert_eq!(command, expected);
+        let response = BrowserResponse::Value { value };
+        let request = ClientRequest::BrowserResult { request_id, binding_id, response:response.clone() };
+        input.write_all(encode_line(&request).unwrap().as_bytes()).await.unwrap();
+        let stdout = cli.stdout.take().unwrap();
+        let mut lines = BufReader::new(stdout).lines();
+        let result = tokio::time::timeout(Duration::from_secs(5), lines.next_line()).await.unwrap().unwrap().unwrap();
+        assert_eq!(decode_line::<BrowserResponse>(&result).unwrap(), response);
+        assert!(tokio::time::timeout(Duration::from_secs(5), cli.wait()).await.unwrap().unwrap().success());
+    }
+    let rejected = Command::new(bin).args(["browser", "--session", "not-bound", "tabs"])
+        .env("HOME", &home).output().await.unwrap();
+    assert!(!rejected.status.success());
+    drop(input);
+    assert!(tokio::time::timeout(Duration::from_secs(5), daemon.wait()).await.unwrap().unwrap().success());
+    assert!(!home.join(format!(".multibot/browser-control/{pid}.sock")).exists());
+    fs::remove_dir_all(home).unwrap();
 }

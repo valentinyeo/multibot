@@ -136,6 +136,8 @@ pub fn launch_args(profile: &Path, url: &str) -> Vec<OsString> {
     profile_arg.push(profile);
     vec![
         profile_arg,
+        "--remote-debugging-address=127.0.0.1".into(),
+        "--remote-debugging-port=0".into(),
         format!("--app={url}").into(),
         "--disable-gpu".into(),
         "--disable-gpu-compositing".into(),
@@ -144,6 +146,21 @@ pub fn launch_args(profile: &Path, url: &str) -> Vec<OsString> {
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
     ]
+}
+
+/// Chromium writes the ephemeral loopback port and the browser WebSocket path.
+pub fn parse_devtools_active_port(contents: &str) -> Option<(u16, &str)> {
+    let mut lines = contents.lines();
+    let port = lines.next()?.parse::<u16>().ok().filter(|port| *port != 0)?;
+    let path = lines.next()?;
+    let id = path.strip_prefix("/devtools/browser/")?;
+    if id.is_empty() || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
+        return None;
+    }
+    if lines.any(|line| !line.is_empty()) {
+        return None;
+    }
+    Some((port, path))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +192,15 @@ impl BrowserPaneRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn devtools_active_port_parses_only_loopback_port_and_browser_path() {
+        assert_eq!(parse_devtools_active_port("9222\n/devtools/browser/abc-123\n"), Some((9222, "/devtools/browser/abc-123")));
+        assert_eq!(parse_devtools_active_port("9222\r\n/devtools/browser/abc-123\r\n"), Some((9222, "/devtools/browser/abc-123")));
+        for invalid in ["", "0\n/devtools/browser/id", "65536\n/devtools/browser/id", "localhost:9222\n/devtools/browser/id", "9222\nws://evil", "9222\n/devtools/browser/", "9222\n/devtools/browser/id?x=1", "9222\n/devtools/browser/id\nextra"] {
+            assert!(parse_devtools_active_port(invalid).is_none(), "{invalid:?}");
+        }
+    }
 
     #[test]
     fn each_chat_remembers_its_url_and_toggle() {

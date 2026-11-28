@@ -5,6 +5,7 @@
 
 mod account;
 mod app;
+mod browser_cdp;
 mod browser_pane;
 mod chat_info;
 mod chat_view;

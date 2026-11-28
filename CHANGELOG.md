@@ -12,6 +12,8 @@ This file is embedded in Multibot so Changelog works offline.
 - Start Multibot maximized on every launch, including update restarts.
 - Keep dissolved server shells dissolved after restarting the app or reconnecting.
 - Hide tool calls completely by default; use Ctrl+K → Chat: Show tool calls to reveal compact, expandable details.
+- Send chat messages with Ctrl+Enter; Enter and Shift+Enter add lines, while Enter still selects slash commands and opens a focused message’s menu.
+- Let VPS agents control their session’s docked Chrome or Edge pane through `multibotd browser`, without an extension, Native Messaging, or registry changes.
 
 - Keep new chats error-free before their transcript folders exist, while still reporting real read failures.
 - Stop archive and restore confirmations from lingering above unrelated live chats.
@@ -19,7 +21,7 @@ This file is embedded in Multibot so Changelog works offline.
 - Cycle Frequent sessions in sidebar order with Ctrl+Tab and Ctrl+Shift+Tab, without changing workspaces or reshuffling the list.
 - Show each sidebar session’s CLI abbreviation and working directory below its title, including pinned chats.
 - Type immediately after switching chats or live server shells, without clicking the input first.
-- Grow the chat composer upward as text wraps, up to ten lines, then scroll within it; Enter still sends and Shift+Enter adds a line.
+- Grow the chat composer upward as text wraps, up to ten lines, then scroll within it.
 - Keep live server shells beside the docked browser or Computer View, with working keyboard focus in both panes.
 - Search keyboard shortcuts by action, section, or key combination; F1 and Esc still close the modal.
 - Follow the latest messages when typing, pasting, dictating, or sending; keep the new-message button only while reading earlier messages.
