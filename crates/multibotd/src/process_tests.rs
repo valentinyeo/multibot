@@ -2281,6 +2281,9 @@ fn antigravity_args_forward_model_effort_permissions_and_conversation() {
 async fn persistent_agy_restarts_on_each_option_change_and_resumes_conversation() {
     let home = temp_home("agy-option-switch");
     let (bin, log) = fake_agy(&home);
+    let conversation = "12345678-abcd-4321-abcd-123456789abc";
+    let script = fs::read_to_string(&bin).unwrap().replace("fake-conv", conversation);
+    fs::write(&bin, script).unwrap();
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mgr = ProcessManager::new(home.clone(), tx);
     mgr.set_test_bin_override(Some(bin));
@@ -2336,7 +2339,7 @@ async fn persistent_agy_restarts_on_each_option_change_and_resumes_conversation(
         assert_eq!(spawns.len(), step + 1);
         let args = spawns.last().unwrap();
         if step > 0 {
-            assert!(args.contains("--conversation fake-conv"), "{args}");
+            assert!(args.contains(&format!("--conversation {conversation}")), "{args}");
         }
         if let Some(model) = resolve_antigravity_model(options.model.as_deref(), options.effort) {
             assert!(args.contains(&format!("--model {model}")), "{args}");
