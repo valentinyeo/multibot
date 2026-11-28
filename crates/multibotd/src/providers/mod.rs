@@ -163,6 +163,20 @@ pub struct SessionMetaEntry {
     pub updated_at_ms: i64,
 }
 
+pub(crate) fn session_metadata_priority(id: &str, meta: &SessionMetaEntry) -> u8 {
+    u8::from(
+        meta.native_session_id
+            .as_deref()
+            .is_some_and(|native| native != id),
+    ) * 4
+        + u8::from(
+            meta.title
+                .as_deref()
+                .is_some_and(|title| !title.trim().is_empty()),
+        ) * 2
+        + u8::from(meta.workspace.is_some())
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MetadataStore {
     #[serde(default)]
@@ -395,9 +409,8 @@ pub fn discover_all_sessions_with_ctx(
             if !ctx.include_archived && !shown {
                 continue;
             }
-            if seen_ids.insert((summary.agent, summary.id.clone())) {
-                all.push(summary);
-            }
+            seen_ids.insert((summary.agent, summary.id.clone()));
+            all.push(summary);
         }
     }
 
@@ -431,9 +444,8 @@ pub fn discover_all_sessions_with_ctx(
             if !ctx.include_archived && !shown {
                 continue;
             }
-            if seen_ids.insert((summary.agent, summary.id.clone())) {
-                all.push(summary);
-            }
+            seen_ids.insert((summary.agent, summary.id.clone()));
+            all.push(summary);
             continue;
         }
         let title = meta
@@ -471,9 +483,57 @@ pub fn discover_all_sessions_with_ctx(
         append_archived_sessions(ctx, &mut all);
     }
 
+    deduplicate_sessions(home, &mut all, ctx.metadata);
     all.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
     all.truncate(limit);
     all
+}
+
+fn deduplicate_sessions(home: &Path, sessions: &mut Vec<SessionSummary>, metadata: &MetadataStore) {
+    let mut unique: Vec<(PathBuf, SessionSummary)> = Vec::new();
+    for session in sessions.drain(..) {
+        let source = Path::new(&session.source_path);
+        let resolved = if session.agent == AgentKind::Antigravity
+            && source.starts_with(home.join(".multibot/history"))
+        {
+            antigravity::resolve_transcript(home, &session.id, source)
+        } else {
+            source.to_path_buf()
+        };
+        let canonical = fs::canonicalize(&resolved).unwrap_or(resolved);
+        let native = metadata
+            .get(&session.id)
+            .and_then(|m| m.native_session_id.as_deref());
+        let duplicate = unique.iter_mut().find(|(path, other)| {
+            let other_native = metadata
+                .get(&other.id)
+                .and_then(|m| m.native_session_id.as_deref());
+            session.agent == other.agent
+                && (*path == canonical
+                    || session.id == other.id
+                    || native == Some(other.id.as_str())
+                    || other_native == Some(session.id.as_str())
+                    || (native.is_some() && native == other_native))
+        });
+        if let Some((path, other)) = duplicate {
+            let working = other.working || session.working;
+            let updated_at_ms = other.updated_at_ms.max(session.updated_at_ms);
+            let priority = |s: &SessionSummary| {
+                metadata
+                    .get(&s.id)
+                    .map_or(0, |m| session_metadata_priority(&s.id, m))
+            };
+            if (priority(&session), &session.id) > (priority(other), &other.id) {
+                *other = session;
+                *path = canonical;
+            }
+            other.working = working;
+            other.updated_at_ms = updated_at_ms;
+        } else {
+            unique.push((canonical, session));
+        }
+    }
+    sessions.extend(unique.into_iter().map(|(_, session)| session));
 }
 
 fn append_archived_sessions(ctx: &DiscoveryContext<'_>, all: &mut Vec<SessionSummary>) {
@@ -700,14 +760,28 @@ pub fn summarize_session(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(stem);
 
+    let mut alias_active = ctx.active_session_ids.contains(&id);
+    let mut updated_at_ms = file_mtime_ms;
     let id = if provider.kind() == AgentKind::Antigravity {
+        let canonical_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         ctx.metadata
             .sessions
             .iter()
-            .find(|(_, m)| {
+            .filter(|(sid, m)| {
                 m.agent == Some(AgentKind::Antigravity)
-                    && m.native_session_id.as_deref() == Some(id.as_str())
+                    && (sid.as_str() == id
+                        || m.native_session_id.as_deref() == Some(id.as_str())
+                        || m.source_path.as_deref().is_some_and(|source| {
+                            let source = Path::new(source);
+                            fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf())
+                                == canonical_path
+                        }))
             })
+            .inspect(|(sid, m)| {
+                alias_active |= ctx.active_session_ids.contains(sid.as_str());
+                updated_at_ms = updated_at_ms.max(m.updated_at_ms);
+            })
+            .max_by_key(|(sid, m)| (session_metadata_priority(sid, m), *sid))
             .map(|(sid, _)| sid.clone())
             .unwrap_or(id)
     } else {
@@ -732,7 +806,7 @@ pub fn summarize_session(
 
     let now = now_ms();
     let working = compute_semantic_working(
-        ctx.active_session_ids.contains(&id),
+        alias_active || ctx.active_session_ids.contains(&id),
         tail.tail_activity,
         file_mtime_ms,
         now,
@@ -760,7 +834,7 @@ pub fn summarize_session(
         cwd_exists: cwd.as_deref().map(|p| Path::new(p).is_dir()),
         cwd,
         source_path: path.to_string_lossy().to_string(),
-        updated_at_ms: file_mtime_ms,
+        updated_at_ms,
         working,
         shell_attached: None,
         last_assistant_id,
@@ -903,7 +977,11 @@ fn read_tail_slice_for_summary(provider: &dyn AgentProvider, path: &Path) -> Par
         .unwrap_or(0);
     let tail_parsed = if complete_len > 0 {
         let parsed = provider.parse_slice(&tail_slice[..complete_len], aligned_start);
-        if !parsed.messages.is_empty() {
+        if parsed
+            .messages
+            .iter()
+            .any(|msg| !msg.id.starts_with("agy-native-") || !msg.text.trim().is_empty())
+        {
             return parsed;
         }
         parsed
@@ -2284,6 +2362,10 @@ pub fn read_history_delta(
 /// Helper to finalize `ParsedSlice` assistant preview metadata from `messages`.
 pub fn populate_last_assistant_fields(parsed: &mut ParsedSlice) {
     for msg in parsed.messages.iter().rev() {
+        // Native Antigravity activity is inspectable, but is not an assistant reply.
+        if msg.id.starts_with("agy-native-") && msg.text.trim().is_empty() {
+            continue;
+        }
         if msg.role == MessageRole::Assistant {
             parsed.last_assistant_id = Some(msg.id.clone());
             parsed.last_assistant_ms = msg.timestamp_ms;
@@ -3318,6 +3400,132 @@ mod tests {
         }
         let shells = tmux::parse_tmux_sessions_output("shell\t1\tbtop\t/repo/multibot\t0\tbtop");
         assert_eq!(shells[0].cwd.as_deref(), Some("/repo/multibot"));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn discovery_keeps_named_hosted_agy_session_over_raw_duplicates() {
+        for native_link in [true, false] {
+            let home = unique_temp_dir("agy-native-dedup");
+            let native = "de860fa4-0000-0000-0000-000000000000";
+            let hosted = "8ad9c3d6-0000-0000-0000-000000000000";
+            let path = home.join(format!(
+                ".gemini/antigravity-cli/brain/{native}/.system_generated/logs/transcript.jsonl"
+            ));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(
+                &path,
+                "{\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"content\":\"Finished\"}\n",
+            )
+            .unwrap();
+            let mut metadata = MetadataStore::default();
+            for id in [hosted, native] {
+                metadata.sessions.insert(
+                    id.into(),
+                    SessionMetaEntry {
+                        title: (id == hosted).then(|| "Postbox Rust 2".into()),
+                        agent: Some(AgentKind::Antigravity),
+                        source_path: Some(path.to_string_lossy().into()),
+                        native_session_id: native_link.then(|| native.into()),
+                        workspace: (id == hosted).then(|| "Postbox".into()),
+                        ..Default::default()
+                    },
+                );
+            }
+            let active = HashSet::from([native.to_string()]);
+            let none = HashSet::new();
+            let archive = ArchiveStore::default();
+            let live = LiveActivity::default();
+            let workspaces = ServerWorkspaceIndex::default();
+            let ctx = DiscoveryContext {
+                active_session_ids: &active,
+                connected_session_ids: &none,
+                metadata: &metadata,
+                archive: &archive,
+                live: &live,
+                include_archived: false,
+                server_workspaces: &workspaces,
+            };
+            let sessions = discover_all_sessions_with_ctx(&home, 10, &ctx);
+            assert_eq!(sessions.len(), 1, "{sessions:?}");
+            assert_eq!(sessions[0].id, hosted);
+            assert_eq!(sessions[0].title, "Postbox Rust 2");
+            assert!(sessions[0].working);
+            fs::remove_dir_all(home).unwrap();
+        }
+    }
+
+    #[test]
+    fn discovery_merges_native_aliases_without_losing_freshness_or_other_agents() {
+        let home = unique_temp_dir("agy-alias-dedup");
+        let mut metadata = MetadataStore::default();
+        for (id, agent, source, native, title, updated) in [
+            (
+                "hosted",
+                AgentKind::Antigravity,
+                "missing-hosted",
+                Some("native"),
+                Some("Postbox Rust 2"),
+                10,
+            ),
+            (
+                "native",
+                AgentKind::Antigravity,
+                "missing-native",
+                None,
+                None,
+                30,
+            ),
+            (
+                "other-agent",
+                AgentKind::Codex,
+                "missing-hosted",
+                None,
+                None,
+                20,
+            ),
+        ] {
+            metadata.sessions.insert(
+                id.into(),
+                SessionMetaEntry {
+                    title: title.map(String::from),
+                    agent: Some(agent),
+                    source_path: Some(home.join(source).to_string_lossy().into()),
+                    native_session_id: native.map(String::from),
+                    updated_at_ms: updated,
+                    ..Default::default()
+                },
+            );
+        }
+        let active = HashSet::from(["native".to_string()]);
+        let none = HashSet::new();
+        let archive = ArchiveStore::default();
+        let live = LiveActivity::default();
+        let workspaces = ServerWorkspaceIndex::default();
+        let ctx = DiscoveryContext {
+            active_session_ids: &active,
+            connected_session_ids: &none,
+            metadata: &metadata,
+            archive: &archive,
+            live: &live,
+            include_archived: false,
+            server_workspaces: &workspaces,
+        };
+        let sessions = discover_all_sessions_with_ctx(&home, 10, &ctx);
+        assert_eq!(sessions.len(), 2, "{sessions:?}");
+        let agy = sessions
+            .iter()
+            .find(|s| s.agent == AgentKind::Antigravity)
+            .unwrap();
+        assert_eq!(agy.id, "hosted");
+        assert_eq!(agy.title, "Postbox Rust 2");
+        assert_eq!(agy.updated_at_ms, 30);
+        assert!(agy.working);
+        assert!(
+            sessions
+                .iter()
+                .any(|s| s.id == "other-agent" && s.agent == AgentKind::Codex)
+        );
         fs::remove_dir_all(home).unwrap();
     }
 

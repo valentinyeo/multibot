@@ -6,6 +6,47 @@ use std::sync::atomic::AtomicU64;
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[test]
+fn resumed_agy_session_updates_the_existing_native_or_source_owner() {
+    for by_native_id in [true, false] {
+        let home = temp_home("agy-resume-owner");
+        let source = home.join("transcript.jsonl");
+        fs::write(&source, "").unwrap();
+        let mut meta = MetadataStore::default();
+        meta.sessions.insert(
+            "hosted".into(),
+            SessionMetaEntry {
+                title: Some("Postbox Rust 2".into()),
+                agent: Some(AgentKind::Antigravity),
+                source_path: Some(source.to_string_lossy().into()),
+                native_session_id: by_native_id.then(|| "native".into()),
+                workspace: Some("Postbox".into()),
+                ..Default::default()
+            },
+        );
+        meta.save(&home).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let manager = ProcessManager::new(home.clone(), tx);
+        let resumed_source = if by_native_id {
+            home.join("new-transcript.jsonl")
+        } else {
+            home.join("./transcript.jsonl")
+        };
+        manager.record_resumed_agy_session("native", Some("/repo"), &resumed_source);
+        manager.record_resumed_agy_session("native", Some("/other"), &resumed_source);
+        let meta = MetadataStore::load(&home);
+        assert_eq!(meta.sessions.len(), 1);
+        let entry = meta.get("hosted").unwrap();
+        assert_eq!(entry.title.as_deref(), Some("Postbox Rust 2"));
+        assert_eq!(entry.workspace.as_deref(), Some("Postbox"));
+        assert_eq!(entry.cwd.as_deref(), Some("/repo"));
+        assert_eq!(entry.source_path.as_deref(), resumed_source.to_str());
+        assert_eq!(entry.native_session_id.as_deref(), Some("native"));
+        assert!(entry.updated_at_ms > 0);
+        fs::remove_dir_all(home).unwrap();
+    }
+}
+
+#[test]
 fn shell_client_ids_and_ttys_reject_traversal_and_controls() {
     for id in [
         "",

@@ -69,6 +69,7 @@ pub fn list_commands(home: &Path, agent: AgentKind, cwd: Option<&Path>) -> Vec<S
             }
         }
         AgentKind::Codex => {
+            scan_codex_plugins(home, &mut map);
             scan_markdown_commands_dir(
                 &home.join(".codex/prompts"),
                 "/",
@@ -184,6 +185,126 @@ fn collect_ancestors(cwd: Option<&Path>, home: &Path) -> Vec<PathBuf> {
     // Since `insert_with_precedence` keeps the first entry at equal precedence (`>=`),
     // keeping `out` ordered nearest-first means the closest ancestor wins!
     out
+}
+
+fn scan_codex_plugins(home: &Path, map: &mut CommandMap) {
+    let Ok(file) = File::open(home.join(".codex/config.toml")) else {
+        return;
+    };
+    let mut config = String::new();
+    if file
+        .take(MAX_JSON_READ_BYTES)
+        .read_to_string(&mut config)
+        .is_err()
+    {
+        return;
+    }
+    let mut plugins = HashMap::new();
+    let mut section = None;
+    for line in config.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') {
+            section = line
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .and_then(|s| s.trim().strip_prefix("plugins."))
+                .map(|s| s.trim().trim_matches(['\"', '\'']))
+                .and_then(|s| s.split_once('@'))
+                .filter(|(plugin, market)| {
+                    [*plugin, *market].iter().all(|s| {
+                        !s.is_empty()
+                            && *s != "."
+                            && *s != ".."
+                            && s.chars()
+                                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                    })
+                })
+                .map(|(plugin, market)| (plugin.to_string(), market.to_string()));
+        } else if let Some((key, value)) = line.split_once('=')
+            && key.trim() == "enabled"
+            && let Some(section) = &section
+        {
+            plugins.insert(section.clone(), value.trim() == "true");
+        }
+    }
+    for ((plugin, marketplace), enabled) in plugins {
+        if !enabled {
+            continue;
+        }
+        let root = home
+            .join(".codex/plugins/cache")
+            .join(marketplace)
+            .join(&plugin);
+        let latest = subdirs(&root).into_iter().max_by(|a, b| {
+            compare_codex_plugin_versions(
+                a.file_name().and_then(|s| s.to_str()).unwrap_or(""),
+                b.file_name().and_then(|s| s.to_str()).unwrap_or(""),
+            )
+        });
+        if let Some(version) = latest {
+            // Codex invokes skills with `$`; its slash picker also includes these entries.
+            for prefix in [String::new(), format!("{plugin}:")] {
+                scan_skills_dir(
+                    &version.join("skills"),
+                    "$",
+                    &prefix,
+                    "plugin_skill",
+                    PREC_PLUGIN,
+                    map,
+                );
+            }
+        }
+    }
+}
+
+fn compare_codex_plugin_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    fn parts(version: &str) -> Option<(Vec<u64>, Option<&str>)> {
+        let version = version
+            .strip_prefix('v')
+            .unwrap_or(version)
+            .split('+')
+            .next()?;
+        let (core, prerelease) = version
+            .split_once('-')
+            .map_or((version, None), |(c, p)| (c, Some(p)));
+        let core = core
+            .split('.')
+            .map(str::parse::<u64>)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        Some((core, prerelease))
+    }
+    match (parts(a), parts(b)) {
+        (Some((a_core, a_pre)), Some((b_core, b_pre))) => a_core
+            .cmp(&b_core)
+            .then_with(|| match (a_pre, b_pre) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (Some(a), Some(b)) => {
+                    let mut a = a.split('.');
+                    let mut b = b.split('.');
+                    loop {
+                        let order = match (a.next(), b.next()) {
+                            (Some(a), Some(b)) => match (a.parse::<u64>(), b.parse::<u64>()) {
+                                (Ok(a), Ok(b)) => a.cmp(&b),
+                                (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                                (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                                _ => a.cmp(b),
+                            },
+                            (a, b) => return a.cmp(&b),
+                        };
+                        if !order.is_eq() {
+                            return order;
+                        }
+                    }
+                }
+            })
+            .then_with(|| a.cmp(b)),
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (None, None) => a.cmp(b),
+    }
 }
 
 /// Skills and commands shipped inside installed Antigravity plugins, for example
@@ -842,6 +963,143 @@ mod tests {
             std::env::temp_dir().join(format!("multibotd-cmds-{tag}-{}-{n}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn codex_plugins_use_latest_enabled_version_and_respect_skill_precedence() {
+        let home = temp_home("codex-plugins");
+        let repo = home.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        for (plugin, version, skills) in [
+            ("pstack", "0.9.9", vec!["obsolete"]),
+            ("pstack", "0.9.158", vec!["older"]),
+            ("pstack", "0.9.159", vec!["poteto-mode", "ship"]),
+            ("disabled", "1.0.0", vec!["disabled-skill"]),
+            ("single", "1.0.0", vec!["single-skill"]),
+            ("bare", "1.0.0", vec!["bare-skill"]),
+        ] {
+            for skill in skills {
+                let dir = home.join(format!(
+                    ".codex/plugins/cache/pstack-claude/{plugin}/{version}/skills/{skill}"
+                ));
+                fs::create_dir_all(&dir).unwrap();
+                fs::write(
+                    dir.join("SKILL.md"),
+                    format!("---\nname: {skill}\n---\nPlugin skill"),
+                )
+                .unwrap();
+            }
+        }
+        // A cache alone must not enable plugins.
+        assert!(
+            !list_commands(&home, AgentKind::Codex, None)
+                .iter()
+                .any(|c| c.source == "plugin_skill")
+        );
+        fs::write(home.join(".codex/config.toml"), "[model]\nname = 'test'\n").unwrap();
+        assert!(
+            !list_commands(&home, AgentKind::Codex, None)
+                .iter()
+                .any(|c| c.source == "plugin_skill")
+        );
+        fs::write(
+            home.join(".codex/config.toml"),
+            r#"
+[plugins."pstack@pstack-claude"] # enabled plugin
+ enabled = true # installed
+[plugins."disabled@pstack-claude"]
+enabled = false
+[plugins.'single@pstack-claude']
+enabled = true
+[plugins.bare@pstack-claude]
+enabled = true
+[unrelated]
+enabled = true
+"#,
+        )
+        .unwrap();
+        let commands = list_commands(&home, AgentKind::Codex, None);
+        for name in [
+            "poteto-mode",
+            "pstack:poteto-mode",
+            "ship",
+            "single-skill",
+            "bare-skill",
+        ] {
+            assert!(
+                commands
+                    .iter()
+                    .any(|c| c.name == name && c.trigger == "$" && c.source == "plugin_skill"),
+                "missing {name}"
+            );
+        }
+        for name in ["obsolete", "older", "disabled-skill"] {
+            assert!(
+                !commands.iter().any(|c| c.name.contains(name)),
+                "unexpected {name}"
+            );
+        }
+        let user = home.join(".agents/skills/poteto-mode");
+        fs::create_dir_all(&user).unwrap();
+        fs::write(user.join("SKILL.md"), "User override").unwrap();
+        assert_eq!(
+            list_commands(&home, AgentKind::Codex, Some(&repo))
+                .iter()
+                .find(|c| c.name == "poteto-mode")
+                .unwrap()
+                .source,
+            "user_skill"
+        );
+        let project = repo.join(".agents/skills/poteto-mode");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("SKILL.md"), "Project override").unwrap();
+        assert_eq!(
+            list_commands(&home, AgentKind::Codex, Some(&repo))
+                .iter()
+                .find(|c| c.name == "poteto-mode")
+                .unwrap()
+                .source,
+            "project_skill"
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn codex_plugin_versions_order_prereleases_and_fall_back_to_directory_names() {
+        for (versions, expected) in [
+            (vec!["1.0.0-rc.9", "1.0.0-rc.10"], "1.0.0-rc.10"),
+            (vec!["1.0.0-rc.10", "1.0.0"], "1.0.0"),
+            (vec!["build-a", "build-z"], "build-z"),
+        ] {
+            let home = temp_home("codex-versions");
+            fs::create_dir_all(home.join(".codex")).unwrap();
+            fs::write(
+                home.join(".codex/config.toml"),
+                "[plugins.\"test@market\"]\nenabled = true\n",
+            )
+            .unwrap();
+            for version in versions {
+                let skill = home.join(format!(
+                    ".codex/plugins/cache/market/test/{version}/skills/version"
+                ));
+                fs::create_dir_all(&skill).unwrap();
+                fs::write(
+                    skill.join("SKILL.md"),
+                    format!("---\ndescription: {version}\n---\n"),
+                )
+                .unwrap();
+            }
+            let commands = list_commands(&home, AgentKind::Codex, None);
+            assert_eq!(
+                commands
+                    .iter()
+                    .find(|c| c.name == "version")
+                    .unwrap()
+                    .description,
+                expected
+            );
+            fs::remove_dir_all(home).unwrap();
+        }
     }
 
     #[test]
