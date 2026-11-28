@@ -475,6 +475,8 @@ impl MultibotView {
                 last_dispatched_prompt: None,
             },
             history: TranscriptState {
+                pending_sent_messages: HashMap::new(),
+                next_local_message_id: 0,
                 messages: Vec::new(),
                 chat_cache: ChatCache::default(),
                 active_switch_token: None,

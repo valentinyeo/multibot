@@ -212,7 +212,7 @@ impl ProcessManager {
         guard
             .active
             .get(session_id)
-            .is_some_and(|p| p.stdin_tx.is_some())
+            .is_some_and(|p| !p.interrupted && p.stdin_tx.is_some())
     }
 
     fn next_seq(&self) -> u64 {
@@ -232,20 +232,30 @@ impl ProcessManager {
         }
         if agent != AgentKind::Antigravity || !self.session_accepts_live_stdin(session_id) {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state.active.get(session_id).is_some_and(|p| p.busy) {
+            if let Some(interrupted) = state
+                .active
+                .get(session_id)
+                .filter(|p| p.interrupted || p.busy)
+                .map(|p| p.interrupted)
+            {
                 let queue = state.queues.entry(session_id.to_string()).or_default();
                 if queue.len() >= MAX_QUEUED_PROMPTS_PER_SESSION {
                     return Err(anyhow!(
                         "session prompt queue full (max {MAX_QUEUED_PROMPTS_PER_SESSION})"
                     ));
                 }
-                queue.push_back(QueuedPrompt {
+                let prompt = QueuedPrompt {
                     message_id: format!("q-{}-{}", now_ms(), self.next_seq()),
                     agent,
                     cwd: cwd.map(String::from),
                     text: text.to_string(),
                     options,
-                });
+                };
+                if interrupted {
+                    queue.push_front(prompt);
+                } else {
+                    queue.push_back(prompt);
+                }
                 return Ok("queued behind active turn".into());
             }
         }
@@ -442,10 +452,10 @@ impl ProcessManager {
             let existing_tx = {
                 let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(proc) = guard.active.get_mut(session_id)
+                    && !proc.interrupted
                     && let Some(ref tx) = proc.stdin_tx
                 {
                     proc.busy = true;
-                    proc.interrupted = false;
                     Some((
                         tx.clone(),
                         proc.source_path.clone(),
@@ -843,6 +853,7 @@ impl ProcessManager {
                                         mgr_stdout.state.lock().unwrap_or_else(|e| e.into_inner());
                                     if let Some(p) = guard.active.get_mut(&sid_stdout)
                                         && p.pid == pid
+                                        && !p.interrupted
                                     {
                                         p.busy = false;
                                         true
@@ -926,7 +937,11 @@ impl ProcessManager {
         loop {
             let next = {
                 let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                if guard.active.get(session_id).is_some_and(|p| p.busy) {
+                if guard
+                    .active
+                    .get(session_id)
+                    .is_some_and(|p| p.busy || p.interrupted)
+                {
                     return;
                 }
                 let popped = guard.queues.get_mut(session_id).and_then(|q| q.pop_front());
@@ -1005,8 +1020,11 @@ impl ProcessManager {
             Ok(s) if s.success() => {
                 {
                     let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(p) = guard.active.get_mut(&session_id) {
+                    if let Some(p) = guard.active.get_mut(&session_id)
+                        && p.pid == pid
+                    {
                         p.interrupted = true;
+                        p.stdin_tx = None;
                     }
                 }
                 let _ = self.out_tx.send(ServerEvent::SessionInterrupted {

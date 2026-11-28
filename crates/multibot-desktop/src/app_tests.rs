@@ -58,6 +58,258 @@ fn make_session(id: &str, agent: AgentKind, title: &str, working: bool) -> Sessi
 }
 
 #[gpui_kit::test]
+fn dispatched_messages_survive_history_until_each_echo(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_view_with_entity(cx);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let session = make_session("optimistic", AgentKind::Claude, "Immediate", false);
+            v.connection.daemon_tx = Some(tx);
+            v.connection.sessions = vec![session.clone()];
+            v.select_session(session.clone(), cx);
+            while rx.try_recv().is_ok() {}
+            v.inputs
+                .prompt_input
+                .update(cx, |input, cx| input.set_value("ping", window, cx));
+            v.send_current_prompt(window, cx);
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(ClientRequest::SendPrompt { .. })
+            ));
+            assert_eq!(v.history.messages.len(), 1);
+            let first_id = v.history.messages[0].id.clone();
+            v.apply_history_append_event(ServerEvent::HistoryAppend {
+                session_id: session.id.clone(),
+                messages: vec![],
+                latest_offset: None,
+                working: Some(true),
+                todos: vec![],
+                probe_sha256: None,
+            });
+            assert_eq!(
+                v.history.messages.len(),
+                1,
+                "working event erased sent bubble"
+            );
+            let snapshot = |messages| ServerEvent::History {
+                session_id: session.id.clone(),
+                messages,
+                oldest_offset: Some(0),
+                latest_offset: Some(100),
+                has_more: false,
+                file_size: Some(100),
+                file_mtime_ms: None,
+                probe_sha256: None,
+                todos: vec![],
+            };
+            v.apply_history_event(snapshot(vec![]), false);
+            assert_eq!(
+                v.history.messages.len(),
+                1,
+                "stale snapshot erased sent bubble"
+            );
+            let other = make_session("other", AgentKind::Claude, "Other", false);
+            v.select_session(other, cx);
+            assert!(v.history.messages.is_empty());
+            v.select_session(session.clone(), cx);
+            assert_eq!(v.history.messages.len(), 1, "switch erased pending message");
+            // A second identical dispatch must not consume the first prompt's echo.
+            v.selection.selected_session.as_mut().unwrap().working = false;
+            v.outbox
+                .shared_chat_outbox
+                .lock()
+                .unwrap()
+                .outbox
+                .dispatching
+                .clear();
+            while rx.try_recv().is_ok() {}
+            v.inputs
+                .prompt_input
+                .update(cx, |input, cx| input.set_value("ping", window, cx));
+            v.send_current_prompt(window, cx);
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(ClientRequest::SendPrompt { .. })
+            ));
+            assert_eq!(v.history.messages.len(), 2);
+            assert_ne!(v.history.messages[1].id, first_id);
+            let echo = |id: &str| ChatMessage {
+                id: id.into(),
+                role: MessageRole::User,
+                text: " ping ".into(),
+                ..Default::default()
+            };
+            for _ in 0..2 {
+                v.apply_history_event(snapshot(vec![echo("server-1")]), false);
+                assert_eq!(v.history.messages.len(), 2);
+                assert!(v.history.messages[1].id.starts_with("local-msg-"));
+            }
+            v.apply_history_event(snapshot(vec![echo("server-1"), echo("server-2")]), false);
+            assert_eq!(v.history.messages.len(), 2);
+            assert!(
+                v.history
+                    .messages
+                    .iter()
+                    .all(|m| m.id.starts_with("server-"))
+            );
+        });
+        window.render_frame(cx);
+        assert!(window.find("msg-bubble-1").visible());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn force_sent_message_survives_quiet_interrupt_and_history(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_view_with_entity(cx);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let session = make_session("force-echo", AgentKind::Claude, "Force", false);
+            v.connection.daemon_tx = Some(tx);
+            v.connection.sessions = vec![session.clone()];
+            v.select_session(session.clone(), cx);
+            while rx.try_recv().is_ok() {}
+            v.inputs.prompt_input.update(cx, |input, cx| input.set_value("original turn", window, cx));
+            v.send_current_prompt(window, cx);
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { .. })));
+            v.inputs.prompt_input.update(cx, |input, cx| input.set_value("urgent", window, cx));
+            v.send_current_prompt(window, cx);
+            assert_eq!(v.history.messages.len(), 1, "queued prompt belongs only in tray");
+            let id = v.outbox.chat_outbox.entries[0].id.clone();
+            v.notice = Some("old notice".into());
+            v.force_send_queued_entry(&id, cx);
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::InterruptSession { .. })));
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "urgent"));
+            assert_eq!(v.history.messages.len(), 2);
+            assert_eq!(v.history.messages[1].text, "urgent");
+            assert!(v.notice.is_none());
+            for (ok, detail) in [(true, "sent SIGINT to pid 12345"),
+                (false, "no active hosted process for session"), (false, "process already exited")] {
+                v.handle_bridge_event(UiBridgeEvent::Server(ServerEvent::SessionInterrupted {
+                    session_id: session.id.clone(), ok, detail: detail.into(),
+                }), cx);
+                assert!(v.notice.is_none());
+            }
+            v.apply_history_append_event(ServerEvent::HistoryAppend {
+                session_id: session.id.clone(), messages: vec![], latest_offset: None,
+                working: Some(true), todos: vec![], probe_sha256: None,
+            });
+            assert_eq!(v.history.messages.len(), 2);
+            v.apply_history_append_event(ServerEvent::HistoryAppend {
+                session_id: session.id, messages: vec![ChatMessage {
+                    id: "urgent-server".into(), role: MessageRole::User,
+                    text: "urgent".into(), ..Default::default()
+                }], latest_offset: None, working: Some(true), todos: vec![], probe_sha256: None,
+            });
+            assert_eq!(v.history.messages.len(), 2);
+            assert_eq!(v.history.messages.iter().filter(|m| m.text == "urgent").count(), 1);
+        });
+        window.render_frame(cx);
+        assert!(window.find("msg-bubble-1").visible());
+    }).unwrap();
+}
+
+#[gpui_kit::test]
+fn failed_send_retry_preserves_one_bubble_until_echo(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_view_with_entity(cx);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let session = make_session("retry-echo", AgentKind::Claude, "Retry", false);
+            v.connection.daemon_tx = Some(tx);
+            v.select_session(session.clone(), cx);
+            v.inputs
+                .prompt_input
+                .update(cx, |input, cx| input.set_value("retry me", window, cx));
+            v.send_current_prompt(window, cx);
+            let id = v.history.messages[0].id.clone();
+            v.record_send_failure(id.clone(), "retry me".into(), "offline".into(), cx);
+            let snapshot = |messages| ServerEvent::History {
+                session_id: session.id.clone(),
+                messages,
+                oldest_offset: None,
+                latest_offset: None,
+                has_more: false,
+                file_size: None,
+                file_mtime_ms: None,
+                probe_sha256: None,
+                todos: vec![],
+            };
+            v.apply_history_event(snapshot(vec![]), false);
+            assert_eq!(v.history.messages.len(), 1);
+            assert!(v.retry_failed_send(&id, cx));
+            v.apply_history_event(snapshot(vec![]), false);
+            assert_eq!(v.history.messages.len(), 1);
+            assert!(v.chat_state.failed_sends.is_empty());
+            v.apply_history_event(
+                snapshot(vec![ChatMessage {
+                    id: "retry-server".into(),
+                    role: MessageRole::User,
+                    text: "retry me".into(),
+                    ..Default::default()
+                }]),
+                false,
+            );
+            assert_eq!(v.history.messages.len(), 1);
+            assert_eq!(v.history.messages[0].id, "retry-server");
+        });
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn host_interrupt_notices_only_report_real_failures(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_view_with_entity(cx);
+    let (_rx, _shutdown) = cx.update(|cx| install_test_host(cx, "interrupt-host"));
+    cx.update_window(handle, |_, _, cx| {
+        let runtime = view.read(cx).runtime.clone();
+        let session = make_session("interrupt", AgentKind::Claude, "Interrupt", true);
+        cx.global_mut::<SharedAppStore>()
+            .host_connections
+            .get_mut("interrupt-host")
+            .unwrap()
+            .sessions = vec![session];
+        for (ok, detail) in [
+            (true, "sent SIGINT to pid 12345"),
+            (false, "no active hosted process for session"),
+            (false, "process already exited"),
+        ] {
+            assert!(MultibotView::apply_host_bridge_event_to_app(
+                "interrupt-host",
+                1,
+                UiBridgeEvent::Server(ServerEvent::SessionInterrupted {
+                    session_id: "interrupt".into(),
+                    ok,
+                    detail: detail.into(),
+                }),
+                &runtime,
+                cx
+            ));
+            let store = cx.global::<SharedAppStore>();
+            assert!(store.daemon_notice.is_none());
+            assert!(!store.host_connections["interrupt-host"].sessions[0].working);
+        }
+        MultibotView::apply_host_bridge_event_to_app(
+            "interrupt-host",
+            1,
+            UiBridgeEvent::Server(ServerEvent::SessionInterrupted {
+                session_id: "interrupt".into(),
+                ok: false,
+                detail: "permission denied".into(),
+            }),
+            &runtime,
+            cx,
+        );
+        assert_eq!(
+            cx.global::<SharedAppStore>().daemon_notice.as_deref(),
+            Some("permission denied")
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn busy_composer_queues_fifo_once_for_every_chat_client(cx: &mut TestAppContext) {
     let (handle, view) = open_test_view_with_entity(cx);
     for agent in [
@@ -91,6 +343,7 @@ fn busy_composer_queues_fifo_once_for_every_chat_client(cx: &mut TestAppContext)
                 assert!(tray.bottom() <= window.find("prompt-input").bounds().top());
             }
             assert!(rx.try_recv().is_err());
+            assert!(view.read(cx).history.messages.is_empty());
             session.working = false;
             for _ in 0..3 {
                 view.update(cx, |v, cx| v.handle_bridge_event(UiBridgeEvent::Server(
@@ -98,6 +351,8 @@ fn busy_composer_queues_fifo_once_for_every_chat_client(cx: &mut TestAppContext)
             }
             assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, agent: actual, .. })
                 if text == "first follow-up" && actual == agent));
+            assert_eq!(view.read(cx).history.messages.len(), 1);
+            assert_eq!(view.read(cx).history.messages[0].text, "first follow-up");
             assert!(rx.try_recv().is_err(), "duplicate idle events must not drain the queue");
             view.update(cx, |v, cx| {
                 v.handle_bridge_event(UiBridgeEvent::Server(ServerEvent::HistoryAppend {
@@ -113,6 +368,8 @@ fn busy_composer_queues_fifo_once_for_every_chat_client(cx: &mut TestAppContext)
             });
             assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "second follow-up"));
             assert!(rx.try_recv().is_err());
+            assert_eq!(view.read(cx).history.messages.len(), 2);
+            assert_eq!(view.read(cx).history.messages[1].text, "second follow-up");
             window.render_frame(cx);
             assert!(window.try_find("queued-messages-bar").is_none());
         }).unwrap();

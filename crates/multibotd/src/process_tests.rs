@@ -1086,6 +1086,94 @@ async fn interrupt_unowned_returns_false_and_real_child_receives_sigint() {
     let _ = fs::remove_dir_all(&home);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupted_process_closes_stdin_and_force_prompt_resumes_first() {
+    for agent in [AgentKind::Antigravity, AgentKind::Claude] {
+        let home = temp_home("force-after-interrupt");
+        let (bin, log) = fake_agy(&home);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mgr = ProcessManager::new(home.clone(), tx);
+        mgr.set_test_bin_override(Some(bin));
+        // Keep reaping under test control, so SendPrompt always races the old child.
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id().unwrap();
+        let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel();
+        mgr.state.lock().unwrap().active.insert(
+            "force-resume".into(),
+            ActiveProcess {
+                pid,
+                cwd: Some(home.to_string_lossy().into()),
+                source_path: hosted_history_path(&home, "force-resume"),
+                stdin_tx: Some(stdin_tx),
+                busy: true,
+                interrupted: false,
+            },
+        );
+        assert!(mgr.session_accepts_live_stdin("force-resume"));
+        mgr.state
+            .lock()
+            .unwrap()
+            .queues
+            .entry("force-resume".into())
+            .or_default()
+            .push_back(QueuedPrompt {
+                message_id: "older".into(),
+                agent,
+                cwd: None,
+                text: "older queued prompt".into(),
+                options: None,
+            });
+        mgr.interrupt_session("force-resume".into(), agent).await;
+        assert!(!mgr.session_accepts_live_stdin("force-resume"));
+        assert_eq!(stdin_rx.recv().await, None, "interrupted stdin must close");
+        assert_eq!(
+            mgr.send_prompt(
+                "force-resume",
+                agent,
+                home.to_str(),
+                "force this first",
+                None
+            )
+            .await
+            .unwrap(),
+            "queued behind active turn"
+        );
+        {
+            let mut state = mgr.state.lock().unwrap();
+            assert_eq!(state.queues["force-resume"][0].text, "force this first");
+            assert_eq!(state.queues["force-resume"][1].text, "older queued prompt");
+            assert!(state.active["force-resume"].interrupted);
+            // Even a late turn-end must not permit queue draining before exit.
+            state.active.get_mut("force-resume").unwrap().busy = false;
+        }
+        mgr.drain_next_queued("force-resume");
+        assert_eq!(mgr.state.lock().unwrap().queues["force-resume"].len(), 2);
+        tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        mgr.on_process_exit("force-resume", pid);
+        let needle = if agent == AgentKind::Antigravity {
+            "STDIN "
+        } else {
+            "ARGV "
+        };
+        assert!(
+            wait_for_log_line(&log, needle)
+                .await
+                .contains("force this first")
+        );
+        if let Some(active) = mgr.state.lock().unwrap().active.get("force-resume") {
+            assert_ne!(active.pid, pid);
+            assert!(!active.interrupted);
+        }
+        mgr.archive_session("force-resume".into(), agent, "".into(), true)
+            .await;
+        fs::remove_dir_all(home).unwrap();
+    }
+}
+
 #[test]
 fn agy_stream_writer_persists_and_parses_back_rich_messages() {
     let home = temp_home("agy-writer");

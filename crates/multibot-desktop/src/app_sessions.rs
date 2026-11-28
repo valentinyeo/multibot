@@ -55,7 +55,6 @@ impl MultibotView {
             self.history.pending_older_page_before.clear();
             self.chat_state.session_todos.clear();
         }
-        self.selection.selected_session_host = Some(host.clone());
         self.chat_state.scroll.open_visit(UnreadVisit::Read);
         self.chat_state.scroll_handle = gpui_kit::ScrollHandle::default();
         self.chat_state.prepend_scroll_anchor = None;
@@ -88,14 +87,20 @@ impl MultibotView {
         let known_probe = cached.as_ref().and_then(|s| s.probe_sha256.clone());
 
         if let Some(snapshot) = cached {
-            self.history.messages = snapshot.messages;
+            self.history.messages = self.preserve_local_messages(
+                &canonical_session_key(&host, session.agent, &session.id),
+                snapshot.messages,
+            );
             if !snapshot.todos.is_empty() {
                 self.chat_state
                     .session_todos
                     .insert(session.id.clone(), snapshot.todos);
             }
         } else {
-            self.history.messages.clear();
+            self.history.messages = self.preserve_local_messages(
+                &canonical_session_key(&host, session.agent, &session.id),
+                Vec::new(),
+            );
         }
         self.chat_state
             .reconcile_local_reactions(&self.history.messages);
@@ -104,6 +109,7 @@ impl MultibotView {
         self.history
             .pending_switch_tokens
             .insert(session.id.clone(), token);
+        self.selection.selected_session_host = Some(host.clone());
         self.selection.selected_session = Some(session.clone());
         let full_width = self
             .sidebar_state

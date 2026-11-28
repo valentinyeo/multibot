@@ -28,7 +28,14 @@ pub(crate) struct SessionSelectionState {
     pub(crate) last_dispatched_prompt: Option<(String, String)>,
 }
 
+pub(crate) struct PendingSentMessage {
+    pub(crate) message: ChatMessage,
+    pub(crate) baseline_server_user_count: usize,
+}
+
 pub(crate) struct TranscriptState {
+    pub(crate) pending_sent_messages: HashMap<String, Vec<PendingSentMessage>>,
+    pub(crate) next_local_message_id: u64,
     pub(crate) messages: Vec<ChatMessage>,
     pub(crate) chat_cache: ChatCache,
     pub(crate) active_switch_token: Option<SwitchToken>,

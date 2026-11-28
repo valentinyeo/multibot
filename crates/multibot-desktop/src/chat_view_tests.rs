@@ -685,8 +685,10 @@ fn sending_prompt_adds_target_session_to_frequent(cx: &mut TestAppContext) {
 fn chat_scroll_late_history_follow_send_and_jump(cx: &mut TestAppContext) {
     use multibot_proto::ServerEvent;
     let (handle, view) = open_test_chat_window(cx);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
+            v.connection.daemon_tx = Some(tx);
             v.selection.selected_session = Some(SessionSummary {
                 id: "scroll".into(),
                 ..Default::default()

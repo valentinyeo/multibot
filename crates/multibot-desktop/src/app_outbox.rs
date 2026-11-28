@@ -52,7 +52,8 @@ impl MultibotView {
             .filter(|options| !options.is_default())
             .cloned();
         let outbox_key = ChatOutbox::session_key(host, session.agent, &session.id);
-        if let Ok(mut shared) = self.outbox.shared_chat_outbox.lock() {
+        let shared_outbox = self.outbox.shared_chat_outbox.clone();
+        if let Ok(mut shared) = shared_outbox.lock() {
             let busy = session.working || shared.outbox.dispatching.contains_key(&outbox_key);
             if !busy
                 && shared.outbox.count_for_session(&outbox_key) == 0
@@ -68,17 +69,8 @@ impl MultibotView {
                     .is_ok()
             {
                 shared.outbox.mark_dispatched(&outbox_key, msg_id.clone());
-                if host == self.active_session_host()
-                    && self
-                        .selection
-                        .selected_session
-                        .as_ref()
-                        .is_some_and(|selected| {
-                            selected.id == session.id && selected.agent == session.agent
-                        })
-                {
-                    self.selection.last_dispatched_prompt = Some((msg_id, text));
-                }
+                drop(shared);
+                self.record_pending_sent_message(host, session, msg_id, text);
                 return;
             }
         }
@@ -115,6 +107,19 @@ impl MultibotView {
                 self.flush_outbox_for_host(host);
             }
             Err(err) => {
+                if self
+                    .selection
+                    .selected_session
+                    .as_ref()
+                    .is_some_and(|selected| self.session_key_for(selected) == key)
+                {
+                    self.history.messages.push(ChatMessage {
+                        id: msg_id.clone(),
+                        role: MessageRole::User,
+                        text: text.clone(),
+                        ..Default::default()
+                    });
+                }
                 self.chat_state.failed_sends.insert(
                     msg_id.clone(),
                     FailedSend {
@@ -163,6 +168,7 @@ impl MultibotView {
             .iter()
             .map(|entry| entry.session_key.clone())
             .collect();
+        let mut dispatched = Vec::new();
         let mut flushed = 0;
         for outbox_key in keys {
             let Some((entry_host, agent, sid)) = parse_outbox_session_key(&outbox_key) else {
@@ -225,6 +231,7 @@ impl MultibotView {
                 shared.outbox.entries.insert(0, entry);
                 break;
             }
+            dispatched.push((session.clone(), entry.text));
             flushed += 1;
         }
         if flushed > 0 && (shared.persist_to_disk || self.outbox.persist_outbox_to_disk) {
@@ -234,6 +241,11 @@ impl MultibotView {
             .outbox_msg_map
             .retain(|_, id| shared.outbox.entries.iter().any(|e| &e.id == id));
         self.outbox.chat_outbox = shared.outbox.clone();
+        drop(shared);
+        for (session, text) in dispatched {
+            let id = self.next_local_message_id();
+            self.record_pending_sent_message(host, &session, id, text);
+        }
         flushed
     }
 
@@ -372,14 +384,16 @@ impl MultibotView {
                 .send(ClientRequest::SendPrompt {
                     session_id: sid.into(),
                     agent,
-                    cwd: session.cwd,
+                    cwd: session.cwd.clone(),
                     text: entry.text.clone(),
                     options: entry.options.clone(),
                 })
                 .is_ok();
-        if !sent {
+        if sent {
+            self.notice = None;
+        } else {
             shared.outbox.dispatching.remove(&entry.session_key);
-            shared.outbox.entries.insert(0, entry);
+            shared.outbox.entries.insert(0, entry.clone());
             self.notice = Some("Could not force send. Message remains queued.".into());
         }
         if shared.persist_to_disk || self.outbox.persist_outbox_to_disk {
@@ -388,6 +402,14 @@ impl MultibotView {
             }
         }
         self.outbox.chat_outbox = shared.outbox.clone();
+        drop(shared);
+        if sent {
+            self.outbox
+                .outbox_msg_map
+                .retain(|_, entry_id| entry_id != id);
+            let msg_id = self.next_local_message_id();
+            self.record_pending_sent_message(host, &session, msg_id, entry.text);
+        }
         cx.notify();
     }
 }

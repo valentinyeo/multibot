@@ -365,16 +365,19 @@ impl MultibotView {
                                 }
                             }
                         }
-                        store.daemon_notice = Some(if detail.is_empty() {
-                            if *ok {
-                                "Interrupted session.".to_string()
-                            } else {
+                        if !*ok
+                            && !matches!(
+                                detail.as_str(),
+                                "no active hosted process for session" | "process already exited"
+                            )
+                        {
+                            store.daemon_notice = Some(if detail.is_empty() {
                                 format!("Could not interrupt {session_id}.")
-                            }
-                        } else {
-                            detail.clone()
-                        });
-                        store.daemon_notice_seq = store.daemon_notice_seq.wrapping_add(1);
+                            } else {
+                                detail.clone()
+                            });
+                            store.daemon_notice_seq = store.daemon_notice_seq.wrapping_add(1);
+                        }
                         store.bump_revision();
                     }
                     ServerEvent::HistoryAppend {

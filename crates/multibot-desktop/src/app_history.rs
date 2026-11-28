@@ -74,19 +74,116 @@ impl MultibotView {
         matched
     }
 
-    pub(super) fn preserve_failed_local_messages(
-        &self,
+    pub(crate) fn next_local_message_id(&mut self) -> String {
+        self.history.next_local_message_id += 1;
+        format!("local-msg-{}", self.history.next_local_message_id)
+    }
+
+    pub(crate) fn record_pending_sent_message(
+        &mut self,
+        host: &str,
+        session: &SessionSummary,
+        id: String,
+        text: String,
+    ) {
+        let key = canonical_session_key(host, session.agent, &session.id);
+        let selected = self.selection.selected_session.as_ref().is_some_and(|s| {
+            self.active_session_host() == host && s.id == session.id && s.agent == session.agent
+        });
+        let server_msgs = self
+            .history
+            .chat_cache
+            .get(&CacheKey::new(host, session.agent, &session.id))
+            .map(|cached| cached.messages.clone())
+            .unwrap_or_else(|| {
+                if selected {
+                    self.history
+                        .messages
+                        .iter()
+                        .filter(|m| {
+                            !self.chat_state.failed_sends.contains_key(&m.id)
+                                && !self.history.pending_sent_messages.get(&key).is_some_and(
+                                    |pending| pending.iter().any(|p| p.message.id == m.id),
+                                )
+                        })
+                        .cloned()
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            });
+        let server_user_count = server_msgs
+            .iter()
+            .filter(|m| m.role == MessageRole::User)
+            .count();
+        let pending = self
+            .history
+            .pending_sent_messages
+            .entry(key.clone())
+            .or_default();
+        pending.push(PendingSentMessage {
+            message: ChatMessage {
+                id: id.clone(),
+                role: MessageRole::User,
+                text: text.clone(),
+                ..Default::default()
+            },
+            baseline_server_user_count: server_user_count,
+        });
+        if selected {
+            self.selection.last_dispatched_prompt = Some((id, text));
+            self.history.messages = self.preserve_local_messages(&key, server_msgs);
+            self.selection.selected_session.as_mut().unwrap().working = true;
+            self.chat_state.scroll.sent_message();
+            self.chat_state.prepend_scroll_anchor = None;
+            self.chat_state.scroll_handle.scroll_to_bottom();
+            self.chat_state.advance_busy_tick();
+        }
+    }
+
+    pub(super) fn preserve_local_messages(
+        &mut self,
+        session_key: &str,
         server_msgs: Vec<ChatMessage>,
     ) -> Vec<ChatMessage> {
-        if self.chat_state.failed_sends.is_empty() {
-            return server_msgs;
-        }
         let mut out = server_msgs;
-        let existing_ids: HashSet<String> = out.iter().map(|m| m.id.clone()).collect();
-        for msg in &self.history.messages {
-            if self.chat_state.failed_sends.contains_key(&msg.id) && !existing_ids.contains(&msg.id)
-            {
-                out.push(msg.clone());
+        if let Some(pending) = self.history.pending_sent_messages.get_mut(session_key) {
+            let users: Vec<_> = out.iter().filter(|m| m.role == MessageRole::User).collect();
+            let mut next_user = 0;
+            pending.retain_mut(|sent| {
+                // An echo consumed by an earlier send must stay consumed on later refreshes.
+                sent.baseline_server_user_count = next_user.max(sent.baseline_server_user_count);
+                let start = sent.baseline_server_user_count;
+                if let Some(index) = users
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .find_map(|(i, m)| (m.text.trim() == sent.message.text.trim()).then_some(i))
+                {
+                    next_user = index + 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            out.extend(pending.iter().map(|p| p.message.clone()));
+            if pending.is_empty() {
+                self.history.pending_sent_messages.remove(session_key);
+            }
+        }
+        if self
+            .selection
+            .selected_session
+            .as_ref()
+            .is_some_and(|session| self.session_key_for(session) == session_key)
+        {
+            let existing_ids: HashSet<_> = out.iter().map(|m| m.id.clone()).collect();
+            for msg in &self.history.messages {
+                if self.chat_state.failed_sends.contains_key(&msg.id)
+                    && !existing_ids.contains(&msg.id)
+                {
+                    out.push(msg.clone());
+                }
             }
         }
         out
@@ -198,6 +295,16 @@ impl MultibotView {
             cached.has_more = has_more;
             // Preserve `consumed_offset`, `file_size`, and `probe_sha256` (EOF probe).
             // `ChatCache::put` updates Tier-1 memory LRU ONLY (never overwrites Tier-2 disk).
+            let session_key = canonical_session_key(&key.host, key.agent, &key.session_id);
+            let older_users = messages
+                .iter()
+                .filter(|m| m.role == MessageRole::User && !existing_ids.contains(&m.id))
+                .count();
+            if let Some(pending) = self.history.pending_sent_messages.get_mut(&session_key) {
+                for sent in pending {
+                    sent.baseline_server_user_count += older_users;
+                }
+            }
             self.history.chat_cache.put(key, cached.clone());
 
             if self
@@ -214,7 +321,7 @@ impl MultibotView {
                     }
                     self.chat_state.scroll.prepended(added_count);
                 }
-                self.history.messages = self.preserve_failed_local_messages(cached.messages);
+                self.history.messages = self.preserve_local_messages(&session_key, cached.messages);
                 self.chat_state
                     .reconcile_local_reactions(&self.history.messages);
                 if self.chat_state.find_open {
@@ -268,8 +375,14 @@ impl MultibotView {
             {
                 Some(ReconcileOutcome::AppliedToActive) => {
                     if let Some(cached) = self.history.chat_cache.get(&token.key) {
-                        self.history.messages =
-                            self.preserve_failed_local_messages(cached.messages.clone());
+                        self.history.messages = self.preserve_local_messages(
+                            &canonical_session_key(
+                                &token.key.host,
+                                token.key.agent,
+                                &token.key.session_id,
+                            ),
+                            cached.messages.clone(),
+                        );
                     }
                     self.chat_state
                         .scroll
@@ -304,7 +417,8 @@ impl MultibotView {
             .as_ref()
             .is_some_and(|s| s.id == *session_id)
         {
-            self.history.messages = self.preserve_failed_local_messages(messages.clone());
+            let key = self.session_key_for(self.selection.selected_session.as_ref().unwrap());
+            self.history.messages = self.preserve_local_messages(&key, messages.clone());
             self.chat_state
                 .scroll
                 .history_loaded(&self.history.messages, false);
@@ -402,8 +516,14 @@ impl MultibotView {
                 Some(ReconcileOutcome::AppliedToActive)
             ) {
                 if let Some(cached) = self.history.chat_cache.get(&token.key) {
-                    self.history.messages =
-                        self.preserve_failed_local_messages(cached.messages.clone());
+                    self.history.messages = self.preserve_local_messages(
+                        &canonical_session_key(
+                            &token.key.host,
+                            token.key.agent,
+                            &token.key.session_id,
+                        ),
+                        cached.messages.clone(),
+                    );
                 }
                 self.chat_state
                     .reconcile_local_reactions(&self.history.messages);
@@ -428,14 +548,33 @@ impl MultibotView {
             .as_ref()
             .is_some_and(|s| s.id == *session_id)
         {
-            let existing_ids: HashSet<String> =
-                self.history.messages.iter().map(|m| m.id.clone()).collect();
+            let key = self.session_key_for(self.selection.selected_session.as_ref().unwrap());
+            let pending_ids: HashSet<_> = self
+                .history
+                .pending_sent_messages
+                .get(&key)
+                .into_iter()
+                .flatten()
+                .map(|p| p.message.id.clone())
+                .collect();
+            let mut server_msgs: Vec<_> = self
+                .history
+                .messages
+                .iter()
+                .filter(|m| {
+                    !pending_ids.contains(&m.id)
+                        && !self.chat_state.failed_sends.contains_key(&m.id)
+                })
+                .cloned()
+                .collect();
             for msg in messages {
-                if !existing_ids.contains(&msg.id) {
-                    self.history.messages.push(msg.clone());
-                    visible_changed = true;
+                if !server_msgs.iter().any(|m| m.id == msg.id) {
+                    server_msgs.push(msg.clone());
                 }
             }
+            let reconciled = self.preserve_local_messages(&key, server_msgs);
+            visible_changed = reconciled != self.history.messages;
+            self.history.messages = reconciled;
             self.chat_state
                 .reconcile_local_reactions(&self.history.messages);
             if !todos.is_empty() {

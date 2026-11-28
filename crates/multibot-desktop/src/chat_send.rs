@@ -9,6 +9,10 @@ impl MultibotView {
         reason: String,
         cx: &mut Context<Self>,
     ) {
+        self.history.pending_sent_messages.retain(|_, pending| {
+            pending.retain(|sent| sent.message.id != msg_id);
+            !pending.is_empty()
+        });
         self.chat_state.failed_sends.insert(
             msg_id.clone(),
             FailedSend {
@@ -44,14 +48,17 @@ impl MultibotView {
         let sent = tx
             .send(ClientRequest::SendPrompt {
                 options: self.composer_options_for(&session),
-                session_id: session.id,
+                session_id: session.id.clone(),
                 agent: session.agent,
-                cwd: session.cwd,
-                text: failed.text,
+                cwd: session.cwd.clone(),
+                text: failed.text.clone(),
             })
             .is_ok();
         if sent {
             self.chat_state.failed_sends.remove(msg_id);
+            self.history.messages.retain(|m| m.id != msg_id);
+            let host = self.active_session_host().to_string();
+            self.record_pending_sent_message(&host, &session, msg_id.into(), failed.text);
             self.sidebar_state
                 .workspace_store
                 .record_session_input(&key, now_unix_ms());
@@ -96,25 +103,7 @@ impl MultibotView {
         {
             return;
         }
-        let is_selected = self.active_session_host() == host
-            && self
-                .selection
-                .selected_session
-                .as_ref()
-                .is_some_and(|s| s.id == session.id && s.agent == session.agent);
-        let msg_id = format!("local-msg-{}", self.history.messages.len());
-        if is_selected {
-            self.follow_chat_from_composer(cx);
-            self.history.messages.push(ChatMessage {
-                id: msg_id.clone(),
-                role: MessageRole::User,
-                text: text.clone(),
-                timestamp_ms: None,
-                quoted_message_id,
-                ..Default::default()
-            });
-            self.chat_state.advance_busy_tick();
-        }
+        let msg_id = self.next_local_message_id();
         self.sidebar_state
             .workspace_store
             .record_session_input(&key, now_unix_ms());
@@ -145,7 +134,18 @@ impl MultibotView {
                 });
             }
         }
-        self.send_or_queue_prompt_on_host(host, &session, msg_id, text);
+        self.send_or_queue_prompt_on_host(host, &session, msg_id.clone(), text);
+        if let Some(sent) = self
+            .history
+            .pending_sent_messages
+            .get_mut(&key)
+            .and_then(|pending| pending.iter_mut().find(|p| p.message.id == msg_id))
+        {
+            sent.message.quoted_message_id = quoted_message_id.clone();
+        }
+        if let Some(message) = self.history.messages.iter_mut().find(|m| m.id == msg_id) {
+            message.quoted_message_id = quoted_message_id;
+        }
         cx.notify();
     }
 

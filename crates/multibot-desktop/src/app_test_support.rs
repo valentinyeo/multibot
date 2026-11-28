@@ -347,15 +347,18 @@ impl MultibotView {
                         }
                         self.sync_sessions_to_shared(cx);
                     }
-                    self.notice = Some(if detail.is_empty() {
-                        if ok {
-                            "Interrupted session.".to_string()
-                        } else {
+                    if !ok
+                        && !matches!(
+                            detail.as_str(),
+                            "no active hosted process for session" | "process already exited"
+                        )
+                    {
+                        self.notice = Some(if detail.is_empty() {
                             format!("Could not interrupt {session_id}.")
-                        }
-                    } else {
-                        detail
-                    });
+                        } else {
+                            detail
+                        });
+                    }
                 }
                 ev @ ServerEvent::History { .. } => {
                     self.apply_history_event(ev, is_older_page_hint);
