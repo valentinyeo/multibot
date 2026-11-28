@@ -31,7 +31,7 @@ fn context_label(used: Option<u64>, limit: Option<u64>) -> String {
 
 impl MultibotView {
     pub(crate) fn toggle_chat_info(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_session.is_none() {
+        if self.selection.selected_session.is_none() {
             return;
         }
         self.active_modal = if self.active_modal == ActiveModal::ChatInfo {
@@ -45,7 +45,7 @@ impl MultibotView {
     }
 
     pub(crate) fn render_chat_info(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let session = self.selected_session.as_ref();
+        let session = self.selection.selected_session.as_ref();
         let options = session
             .and_then(|s| self.composer_options_for(s))
             .unwrap_or_default();
@@ -69,9 +69,10 @@ impl MultibotView {
             None => "Not reported",
         };
         let host = self
+            .selection
             .selected_session_host
             .as_deref()
-            .or(self.connected_host.as_deref())
+            .or(self.connection.connected_host.as_deref())
             .unwrap_or("Local");
         let title = session
             .map(|s| {

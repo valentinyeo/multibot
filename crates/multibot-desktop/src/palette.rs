@@ -78,7 +78,7 @@ impl MultibotView {
         self.palette_state.selected_index = 0;
         self.palette_state.scroll_handle.scroll_to_item(0);
         self.ensure_palette_input_subscription(window, cx);
-        self.palette_input.update(cx, |state, cx| {
+        self.inputs.palette_input.update(cx, |state, cx| {
             state.set_value("", window, cx);
             state.focus(window, cx);
         });
@@ -138,7 +138,7 @@ impl MultibotView {
         self.palette_state.selected_index = 0;
         self.palette_state.scroll_handle.scroll_to_item(0);
         self.ensure_palette_input_subscription(window, cx);
-        self.palette_input.update(cx, |state, cx| {
+        self.inputs.palette_input.update(cx, |state, cx| {
             state.set_value("", window, cx);
             state.focus(window, cx);
         });
@@ -183,7 +183,7 @@ impl MultibotView {
             return;
         }
         let sub = cx.subscribe_in(
-            &self.palette_input,
+            &self.inputs.palette_input,
             window,
             |this, _input, event, window, cx| {
                 if this.active_modal != ActiveModal::Palette {
@@ -335,6 +335,7 @@ impl MultibotView {
         let inputs = self.session_inputs();
         let commands = self.build_palette_command_catalog(now_ms);
         let current_key = self
+            .selection
             .selected_session
             .as_ref()
             .map(|s| self.session_key_for(s));
@@ -370,7 +371,7 @@ impl MultibotView {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        let query = self.palette_input.read(cx).value().to_string();
+        let query = self.inputs.palette_input.read(cx).value().to_string();
         let now = now_unix_ms();
         let rows = self.build_palette_rows(&query, now);
         let selectable: Vec<PaletteRow> = rows
@@ -386,7 +387,7 @@ impl MultibotView {
     }
 
     fn palette_move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let query = self.palette_input.read(cx).value().to_string();
+        let query = self.inputs.palette_input.read(cx).value().to_string();
         let now = now_unix_ms();
         let rows = self.build_palette_rows(&query, now);
         let selectable_count = rows
@@ -414,7 +415,7 @@ impl MultibotView {
     }
 
     fn palette_try_exit_submenu(&mut self, cx: &mut Context<Self>) -> bool {
-        let query = self.palette_input.read(cx).value().to_string();
+        let query = self.inputs.palette_input.read(cx).value().to_string();
         if query.is_empty()
             && (self.palette_state.provider_picker
                 || self.palette_state.mode != PaletteMode::Global)
@@ -503,7 +504,7 @@ impl MultibotView {
     }
 
     pub(crate) fn render_palette_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let query = self.palette_input.read(cx).value().to_string();
+        let query = self.inputs.palette_input.read(cx).value().to_string();
         let now = now_unix_ms();
         let rows = self.build_palette_rows(&query, now);
         let selectable_total = rows
@@ -655,7 +656,7 @@ impl MultibotView {
                                                             this.palette_state.shell_kill_target =
                                                                 Some(shell_key.clone());
                                                             this.palette_state.selected_index = 0;
-                                                            this.palette_input.update(
+                                                            this.inputs.palette_input.update(
                                                                 cx,
                                                                 |input, cx| {
                                                                     input.set_value("", window, cx);
@@ -1027,7 +1028,7 @@ impl MultibotView {
                             .border_b_1()
                             .border_color(theme::border_subtle())
                             .child(
-                                Input::new(&self.palette_input)
+                                Input::new(&self.inputs.palette_input)
                                     .id("palette-search")
                                     .appearance(false),
                             ),

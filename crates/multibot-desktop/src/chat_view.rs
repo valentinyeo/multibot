@@ -118,7 +118,8 @@ fn code_bg() -> Hsla {
 
 impl MultibotView {
     fn active_chat_tab_key(&self) -> String {
-        self.selected_session
+        self.selection
+            .selected_session
             .as_ref()
             .map(|s| s.id.clone())
             .unwrap_or_else(|| "__default__".to_string())
@@ -166,7 +167,8 @@ impl MultibotView {
     }
 
     fn tool_chat_key(&self) -> String {
-        self.selected_session
+        self.selection
+            .selected_session
             .as_ref()
             .map(|session| self.session_key_for(session))
             .unwrap_or_else(|| "__default__".into())
@@ -210,13 +212,13 @@ impl MultibotView {
         self.chat_state.message_action_menu_open = false;
         let query = self.chat_state.find_query.clone();
         self.chat_state
-            .update_find_query(query, &self.messages, show);
+            .update_find_query(query, &self.history.messages, show);
         cx.notify();
         show
     }
 
     pub(crate) fn copy_latest_code_block(&mut self, cx: &mut Context<Self>) -> bool {
-        if let Some(code) = extract_latest_code_block(&self.messages) {
+        if let Some(code) = extract_latest_code_block(&self.history.messages) {
             cx.write_to_clipboard(ClipboardItem::new_string(code));
             self.notice = Some("Copied latest code block.".into());
             cx.notify();
@@ -229,19 +231,23 @@ impl MultibotView {
     }
 
     pub(crate) fn render_chat_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let header_title = match &self.selected_session {
+        let header_title = match &self.selection.selected_session {
             Some(s) => format!("{}  {}", s.agent.glyph(), s.title),
             None => "Multibot · Ready".to_string(),
         };
-        let is_working = self.selected_session.as_ref().is_some_and(|s| s.working);
+        let is_working = self
+            .selection
+            .selected_session
+            .as_ref()
+            .is_some_and(|s| s.working);
         let busy_phase = self.chat_state.busy_tick_phase % 3;
         let visible_messages = project_visible_messages_with_overrides(
-            &self.messages,
+            &self.history.messages,
             &self.chat_state.local_reactions,
             &self.chat_state.local_reaction_removals,
             self.show_tool_calls(),
         );
-        let trailing_prose_options = detect_trailing_prose_options(&self.messages);
+        let trailing_prose_options = detect_trailing_prose_options(&self.history.messages);
         let active_find_idx = self.chat_state.active_find_message_index();
 
         let unread_visible_idx = self
@@ -378,7 +384,7 @@ impl MultibotView {
                                 cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
                                     if let Some(vis_target) = find_visible_quote_target(
-                                        &this.messages,
+                                        &this.history.messages,
                                         &this.chat_state.local_reactions,
                                         &this.chat_state.local_reaction_removals,
                                         quoted_id_target.as_deref(),
@@ -896,7 +902,7 @@ impl MultibotView {
                         el.child(menu)
                     })
                     .when(
-                        !self.messages.is_empty()
+                        !self.history.messages.is_empty()
                             && (self.chat_state.scroll.scrolled_up
                                 || self.chat_state.scroll.new_messages_while_scrolled_up > 0),
                         |el| {

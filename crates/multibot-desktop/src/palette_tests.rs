@@ -32,21 +32,21 @@ fn dissolve_workspace_confirms_stops_agents_keeps_split_and_restores_on_reactiva
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     cx.update_window(handle, |_, window, cx| {
         let workspace_id = view.update(cx, |v, _| {
-            v.daemon_tx = Some(tx);
+            v.connection.daemon_tx = Some(tx);
             let workspace = v.sidebar_state.workspace_store.create_workspace("Project", None).unwrap();
             v.sidebar_state.active_workspace_id = workspace.id.clone();
-            v.sessions = (0..5).map(|i| SessionSummary {
+            v.connection.sessions = (0..5).map(|i| SessionSummary {
                 id: format!("workspace-{i}"), title: format!("Chat {i}"),
                 agent: AgentKind::Claude,
                 archived: i == 3, archive_kill_process: i == 3,
                 ..Default::default()
             }).collect();
-            for session in &v.sessions[..4] {
+            for session in &v.connection.sessions[..4] {
                 let key = v.session_key_for(session);
                 v.sidebar_state.workspace_store.assign_session_workspace(&key, &workspace.id);
             }
-            let done = v.sessions[1].clone();
-            let hibernated = v.sessions[2].clone();
+            let done = v.connection.sessions[1].clone();
+            let hibernated = v.connection.sessions[2].clone();
             let key = v.session_key_for(&done);
             v.sidebar_state.workspace_store.archive_to_waiting_session(&key, now_unix_ms(), &done);
             let key = v.session_key_for(&hibernated);
@@ -81,8 +81,8 @@ fn dissolve_workspace_confirms_stops_agents_keeps_split_and_restores_on_reactiva
         assert_eq!(stopped, ["workspace-0", "workspace-1", "workspace-2"]);
         view.read_with(cx, |v, _| {
             assert!(!v.sidebar_state.workspace_store.visible_workspaces(now_unix_ms()).iter().any(|w| w.id == workspace_id));
-            assert!(v.sessions[..4].iter().all(|s| s.archived && s.archive_kill_process));
-            assert!(!v.sessions[4].archived);
+            assert!(v.connection.sessions[..4].iter().all(|s| s.archived && s.archive_kill_process));
+            assert!(!v.connection.sessions[4].archived);
         });
         window.press("alt-i", cx);
         window.render_frame(cx);
@@ -98,11 +98,11 @@ fn dissolve_workspace_confirms_stops_agents_keeps_split_and_restores_on_reactiva
             assert_eq!(v.compute_inbox_rows(now_unix_ms()).len(), 4);
         });
         view.update(cx, |v, cx| {
-            let key = v.session_key_for(&v.sessions[0]);
+            let key = v.session_key_for(&v.connection.sessions[0]);
             assert!(v.reactivate_session_key(&key, cx));
             assert!(v.sidebar_state.workspace_store.visible_workspaces(now_unix_ms()).iter().any(|w| w.id == workspace_id));
             assert_eq!(v.sidebar_state.workspace_store.effective_workspace_id(&key), workspace_id);
-            assert_eq!(v.sidebar_state.workspace_store.session_lifecycle(&key, &v.sessions[0], now_unix_ms()), SessionLifecycle::Active);
+            assert_eq!(v.sidebar_state.workspace_store.session_lifecycle(&key, &v.connection.sessions[0], now_unix_ms()), SessionLifecycle::Active);
         });
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::UnarchiveSession { session_id }) if session_id == "workspace-0"));
     }).unwrap();
@@ -116,22 +116,22 @@ fn workspace_dissolve_requires_all_hosts_and_routes_stops_to_each_host(cx: &mut 
     cx.update_window(handle, |_, window, cx| {
         let workspace_id = view.update(cx, |v, _| {
             let workspace = v.sidebar_state.workspace_store.create_workspace("Two servers", None).unwrap();
-            v.host_sessions = ["a", "b"].into_iter().map(|host| (host.into(), SessionSummary {
+            v.connection.host_sessions = ["a", "b"].into_iter().map(|host| (host.into(), SessionSummary {
                 id: "same-id".into(), agent: AgentKind::Claude, ..Default::default()
             })).collect();
-            v.sessions = v.host_sessions.iter().map(|(_, s)| s.clone()).collect();
+            v.connection.sessions = v.connection.host_sessions.iter().map(|(_, s)| s.clone()).collect();
             let keys: Vec<_> = v.session_inputs().into_iter().map(|input| input.key).collect();
             for key in keys {
                 v.sidebar_state.workspace_store.assign_session_workspace(&key, &workspace.id);
             }
-            v.host_txs.insert("a".into(), tx_a);
+            v.connection.host_txs.insert("a".into(), tx_a);
             workspace.id
         });
         view.update(cx, |v, cx| v.dissolve_workspace(&workspace_id, cx));
         assert!(rx_a.try_recv().is_err(), "no partial stop when a server is disconnected");
         assert!(!view.read(cx).sidebar_state.workspace_store.workspace_by_id(&workspace_id).unwrap().archived);
         view.update(cx, |v, cx| {
-            v.host_txs.insert("b".into(), tx_b);
+            v.connection.host_txs.insert("b".into(), tx_b);
             v.dissolve_workspace(&workspace_id, cx);
         });
         for rx in [&mut rx_a, &mut rx_b] {
@@ -149,7 +149,7 @@ fn workspace_delete_is_safe_and_empty_dissolve_needs_no_confirmation(cx: &mut Te
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, _| {
-            v.daemon_tx = Some(tx);
+            v.connection.daemon_tx = Some(tx);
             let other = v
                 .sidebar_state
                 .workspace_store
@@ -175,7 +175,7 @@ fn workspace_delete_is_safe_and_empty_dissolve_needs_no_confirmation(cx: &mut Te
             v.sidebar_state
                 .workspace_store
                 .assign_session_workspace(&key, &workspace.id);
-            v.sessions = vec![session];
+            v.connection.sessions = vec![session];
         });
         window.render_frame(cx);
         window.press("ctrl-k", cx);
@@ -184,8 +184,8 @@ fn workspace_delete_is_safe_and_empty_dissolve_needs_no_confirmation(cx: &mut Te
         window.render_frame(cx);
         assert!(rx.try_recv().is_err(), "delete must not stop any agent");
         view.read_with(cx, |v, _| {
-            assert!(!v.sessions[0].archived);
-            let key = v.session_key_for(&v.sessions[0]);
+            assert!(!v.connection.sessions[0].archived);
+            let key = v.session_key_for(&v.connection.sessions[0]);
             let store = &v.sidebar_state.workspace_store;
             assert_eq!(
                 store
@@ -233,8 +233,8 @@ fn hibernate_displays_alt_h_and_accepts_ctrl_h_fallback(cx: &mut TestAppContext)
                 agent: AgentKind::Claude,
                 ..Default::default()
             };
-            v.sessions = vec![session.clone()];
-            v.selected_session = Some(session);
+            v.connection.sessions = vec![session.clone()];
+            v.selection.selected_session = Some(session);
             assert_eq!(
                 v.build_palette_command_catalog(now_unix_ms())
                     .iter()
@@ -273,21 +273,22 @@ fn new_shell_session_from_palette_spawns_and_opens_live_shell(cx: &mut TestAppCo
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, _| {
-            v.daemon_tx = Some(tx);
+            v.connection.daemon_tx = Some(tx);
             let existing = SessionSummary {
                 id: "existing-chat".into(),
                 agent: AgentKind::Claude,
                 cwd: Some("/repo".into()),
                 ..Default::default()
             };
-            v.sessions = vec![existing.clone()];
-            v.selected_session = Some(existing);
+            v.connection.sessions = vec![existing.clone()];
+            v.selection.selected_session = Some(existing);
         });
         for query in ["new shell", "spawn shell", "tmux", "terminal"] {
             window.render_frame(cx);
             window.press("ctrl-k", cx);
             view.update(cx, |v, cx| {
-                v.palette_input
+                v.inputs
+                    .palette_input
                     .update(cx, |input, cx| input.set_value(query, window, cx));
                 assert!(
                     v.build_palette_rows(query, now_unix_ms())
@@ -325,8 +326,11 @@ fn new_shell_session_from_palette_spawns_and_opens_live_shell(cx: &mut TestAppCo
                 },
                 cx,
             );
-            assert_eq!(v.selected_session.as_ref().unwrap().id, shell.id);
-            assert_eq!(v.selected_session.as_ref().unwrap().agent, AgentKind::Shell);
+            assert_eq!(v.selection.selected_session.as_ref().unwrap().id, shell.id);
+            assert_eq!(
+                v.selection.selected_session.as_ref().unwrap().agent,
+                AgentKind::Shell
+            );
         });
         window.render_frame(cx);
         assert!(window.find("server-shell-panel").visible());
@@ -340,8 +344,8 @@ fn new_agent_sessions_pick_directory_before_spawning(cx: &mut TestAppContext) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, _| {
-            v.daemon_tx = Some(tx);
-            v.sessions = ["/repo/a", "/repo/b", "/repo/a"]
+            v.connection.daemon_tx = Some(tx);
+            v.connection.sessions = ["/repo/a", "/repo/b", "/repo/a"]
                 .into_iter()
                 .enumerate()
                 .map(|(i, cwd)| SessionSummary {
@@ -350,7 +354,7 @@ fn new_agent_sessions_pick_directory_before_spawning(cx: &mut TestAppContext) {
                     ..Default::default()
                 })
                 .collect();
-            v.selected_session = Some(v.sessions[0].clone());
+            v.selection.selected_session = Some(v.connection.sessions[0].clone());
         });
         for (slug, agent) in [
             ("claude", AgentKind::Claude),
@@ -362,7 +366,7 @@ fn new_agent_sessions_pick_directory_before_spawning(cx: &mut TestAppContext) {
             window.render_frame(cx);
             window.press("ctrl-k", cx);
             view.update(cx, |v, cx| {
-                v.palette_input.update(cx, |input, cx| {
+                v.inputs.palette_input.update(cx, |input, cx| {
                     input.set_value(format!("new {slug}"), window, cx)
                 });
             });
@@ -378,7 +382,8 @@ fn new_agent_sessions_pick_directory_before_spawning(cx: &mut TestAppContext) {
             assert!(window.find("pal-spawn-directory-1").visible());
             assert!(window.try_find("pal-spawn-directory-2").is_none());
             view.update(cx, |v, cx| {
-                v.palette_input
+                v.inputs
+                    .palette_input
                     .update(cx, |input, cx| input.set_value("/repo/b", window, cx));
             });
             window.render_frame(cx);
@@ -400,11 +405,11 @@ fn new_agent_sessions_launch_directly_with_zero_or_one_directory(cx: &mut TestAp
     let (handle, view) = open_view(cx);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     cx.update_window(handle, |_, window, cx| {
-        view.update(cx, |v, _| v.daemon_tx = Some(tx));
+        view.update(cx, |v, _| v.connection.daemon_tx = Some(tx));
         for directories in [vec![], vec!["/repo/only"], vec!["/repo/only", "/repo/only"]] {
             view.update(cx, |v, _| {
-                v.selected_session = None;
-                v.sessions = directories.iter().enumerate().map(|(i, cwd)| SessionSummary {
+                v.selection.selected_session = None;
+                v.connection.sessions = directories.iter().enumerate().map(|(i, cwd)| SessionSummary {
                     id: format!("s{i}"),
                     cwd: Some((*cwd).into()),
                     ..Default::default()
@@ -420,7 +425,7 @@ fn new_agent_sessions_launch_directly_with_zero_or_one_directory(cx: &mut TestAp
                 window.render_frame(cx);
                 window.press("ctrl-k", cx);
                 view.update(cx, |v, cx| {
-                    v.palette_input.update(cx, |input, cx| input.set_value(format!("new {slug}"), window, cx));
+                    v.inputs.palette_input.update(cx, |input, cx| input.set_value(format!("new {slug}"), window, cx));
                 });
                 window.render_frame(cx);
                 window.click(format!("pal-cmd-spawn-{slug}"), cx);
@@ -441,18 +446,18 @@ fn directory_picker_cancels_without_spawning_and_ctrl_t_stays_direct(cx: &mut Te
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, _| {
-            v.daemon_tx = Some(tx);
-            v.sessions = ["/repo/a", "/repo/b"].into_iter().enumerate().map(|(i, cwd)| SessionSummary {
+            v.connection.daemon_tx = Some(tx);
+            v.connection.sessions = ["/repo/a", "/repo/b"].into_iter().enumerate().map(|(i, cwd)| SessionSummary {
                 id: format!("s{i}"),
                 cwd: Some(cwd.into()),
                 ..Default::default()
             }).collect();
-            v.selected_session = Some(v.sessions[0].clone());
+            v.selection.selected_session = Some(v.connection.sessions[0].clone());
         });
         window.render_frame(cx);
         window.press("ctrl-k", cx);
         view.update(cx, |v, cx| {
-            v.palette_input.update(cx, |input, cx| input.set_value("new codex", window, cx));
+            v.inputs.palette_input.update(cx, |input, cx| input.set_value("new codex", window, cx));
         });
         window.render_frame(cx);
         window.press("enter", cx);
@@ -549,6 +554,7 @@ fn workspace_shortcut_opens_only_workspaces_and_switches_with_enter(cx: &mut Tes
         assert!(
             !view
                 .read(cx)
+                .inputs
                 .palette_input
                 .focus_handle(cx)
                 .is_focused(window)
@@ -562,7 +568,7 @@ fn workspace_main_palette_entry_and_search_prioritize_same_named_session(cx: &mu
     let (handle, view) = open_view(cx);
     cx.update_window(handle, |_, window, cx| {
         let workspace_id = view.update(cx, |v, cx| {
-            v.sessions = vec![SessionSummary {
+            v.connection.sessions = vec![SessionSummary {
                 id: "same-name".into(), title: "Shared name".into(),
                 agent: AgentKind::Claude, ..Default::default()
             }];
@@ -586,7 +592,7 @@ fn workspace_main_palette_entry_and_search_prioritize_same_named_session(cx: &mu
         window.render_frame(cx);
         assert!(view.read(cx).build_palette_rows("", now_unix_ms()).iter()
             .all(|r| matches!(r, PaletteRow::Workspace { .. })));
-        assert_eq!(view.read(cx).palette_input.read(cx).value().as_ref(), "");
+        assert_eq!(view.read(cx).inputs.palette_input.read(cx).value().as_ref(), "");
         window.input("Shared name", cx);
         window.render_frame(cx);
         window.click("pal-ws-0", cx);
@@ -619,7 +625,7 @@ fn palette_empty_query_keeps_pal_cmd_inbox_visible_and_supports_tab_context(
 
         // Seed sessions and verify recent-session hop-back + tab-context banner
         view.update(cx, |v, cx| {
-            v.sessions = vec![
+            v.connection.sessions = vec![
                 SessionSummary {
                     id: "s1".into(),
                     agent: AgentKind::Claude,
@@ -637,9 +643,9 @@ fn palette_empty_query_keeps_pal_cmd_inbox_visible_and_supports_tab_context(
                     ..Default::default()
                 },
             ];
-            let k1 = v.session_key_for(&v.sessions[0]);
-            let k2 = v.session_key_for(&v.sessions[1]);
-            v.selected_session = Some(v.sessions[0].clone());
+            let k1 = v.session_key_for(&v.connection.sessions[0]);
+            let k2 = v.session_key_for(&v.connection.sessions[1]);
+            v.selection.selected_session = Some(v.connection.sessions[0].clone());
             v.sidebar_state.previous_session_key = Some(k2.clone());
             v.sidebar_state
                 .workspace_store
@@ -667,7 +673,7 @@ fn palette_empty_query_keeps_pal_cmd_inbox_visible_and_supports_tab_context(
         window.render_frame(cx);
 
         let (modal, is_fav) = view.read_with(cx, |v, _| {
-            let k2 = v.session_key_for(&v.sessions[1]);
+            let k2 = v.session_key_for(&v.connection.sessions[1]);
             (
                 v.active_modal,
                 v.sidebar_state.workspace_store.is_favorite(&k2),
@@ -740,12 +746,12 @@ fn palette_populated_scrolls_pal_cmd_inbox_into_view_and_supports_global_exclude
                     ..Default::default()
                 };
                 let key = v.session_key_for(&s);
-                v.sessions.push(s);
+                v.connection.sessions.push(s);
                 v.sidebar_state
                     .workspace_store
                     .record_session_view(&key, now - (i as i64) * 50);
             }
-            v.selected_session = Some(v.sessions[0].clone());
+            v.selection.selected_session = Some(v.connection.sessions[0].clone());
 
             let most_used_ids = [
                 "pal-cmd-rename",
@@ -774,7 +780,7 @@ fn palette_populated_scrolls_pal_cmd_inbox_into_view_and_supports_global_exclude
             )));
 
             // Verify pal-cmd-group-toggle collapses group (no-op when ungrouped)
-            let k0 = v.session_key_for(&v.sessions[0]);
+            let k0 = v.session_key_for(&v.connection.sessions[0]);
             let gid = v
                 .sidebar_state
                 .workspace_store
@@ -853,11 +859,11 @@ fn palette_populated_scrolls_pal_cmd_inbox_into_view_and_supports_global_exclude
 
         // Verify CloseOverlay clears tab context and closes palette
         view.update(cx, |v, cx| {
-            let k0 = v.session_key_for(&v.sessions[0]);
+            let k0 = v.session_key_for(&v.connection.sessions[0]);
             v.open_palette_tab_context(k0, window, cx);
         });
         window.render_frame(cx);
-        let input_fh = view.read_with(cx, |v, cx| v.palette_input.read(cx).focus_handle(cx));
+        let input_fh = view.read_with(cx, |v, cx| v.inputs.palette_input.read(cx).focus_handle(cx));
         input_fh.dispatch_action(&CloseOverlay, window, cx);
         window.render_frame(cx);
         let (modal, tab_ctx) = view.read_with(cx, |v, _| {
@@ -895,9 +901,9 @@ fn palette_real_keypress_arrows_backspace_enter_focus_and_copy_id(cx: &mut TestA
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone(), s2.clone()];
-            v.selected_session = Some(s1.clone());
-            v.messages = vec![multibot_proto::ChatMessage {
+            v.connection.sessions = vec![s1.clone(), s2.clone()];
+            v.selection.selected_session = Some(s1.clone());
+            v.history.messages = vec![multibot_proto::ChatMessage {
                 id: "tbl-1".into(),
                 role: multibot_proto::MessageRole::Assistant,
                 text: "| Col A | Col B |\n| --- | --- |\n| r1a | r1b |\n| r2a | r2b |\n| r3a | r3b |\n| r4a | r4b |\n| r5a | r5b |\n| r6a | r6b |\n| r7a | r7b |\n| r8a | r8b |\n| r9a | r9b |\n| r10a | r10b |\n| r11a | r11b |\n| r12a | r12b |\n| r13a | r13b |\n| r14a | r14b |\n| r15a | r15b |\n| r16a | r16b |\n| r17a | r17b |\n| r18a | r18b |\n| r19a | r19b |\n| r20a | r20b |\n| r21a | r21b |\n| r22a | r22b |\n| r23a | r23b |\n| r24a | r24b |".into(),
@@ -933,7 +939,7 @@ fn palette_real_keypress_arrows_backspace_enter_focus_and_copy_id(cx: &mut TestA
         let k1 = view.read(cx).session_key_for(&s1);
         view.update(cx, |v, cx| {
             v.open_palette_tab_context(k1.clone(), window, cx);
-            v.palette_input.update(cx, |inp, cx| {
+            v.inputs.palette_input.update(cx, |inp, cx| {
                 inp.set_value("a", window, cx);
             });
         });
@@ -941,7 +947,7 @@ fn palette_real_keypress_arrows_backspace_enter_focus_and_copy_id(cx: &mut TestA
 
         window.press("backspace", cx);
         window.render_frame(cx);
-        assert_eq!(view.read(cx).palette_input.read(cx).value().as_ref(), "");
+        assert_eq!(view.read(cx).inputs.palette_input.read(cx).value().as_ref(), "");
         assert_eq!(
             view.read(cx).palette_state.mode.target_session_key(),
             Some(k1.as_str()),
@@ -958,7 +964,7 @@ fn palette_real_keypress_arrows_backspace_enter_focus_and_copy_id(cx: &mut TestA
 
         // 3. Copy Chat ID via real Enter writes session key to clipboard
         view.update(cx, |v, cx| {
-            v.palette_input.update(cx, |inp, cx| {
+            v.inputs.palette_input.update(cx, |inp, cx| {
                 inp.set_value("copy chat id", window, cx);
                 inp.focus(window, cx);
             });
@@ -978,7 +984,7 @@ fn palette_real_keypress_arrows_backspace_enter_focus_and_copy_id(cx: &mut TestA
         window.press("ctrl-k", cx);
         window.render_frame(cx);
         view.update(cx, |v, cx| {
-            v.palette_input.update(cx, |inp, cx| {
+            v.inputs.palette_input.update(cx, |inp, cx| {
                 inp.set_value("expand table", window, cx);
                 inp.focus(window, cx);
             });
@@ -1003,7 +1009,7 @@ fn palette_real_keypress_arrows_backspace_enter_focus_and_copy_id(cx: &mut TestA
         window.press("ctrl-k", cx);
         window.render_frame(cx);
         view.update(cx, |v, cx| {
-            v.palette_input.update(cx, |inp, cx| {
+            v.inputs.palette_input.update(cx, |inp, cx| {
                 inp.set_value("open cross-workspace inbox", window, cx);
                 inp.focus(window, cx);
             });

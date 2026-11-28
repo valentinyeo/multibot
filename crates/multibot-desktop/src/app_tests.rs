@@ -71,20 +71,20 @@ fn busy_composer_queues_fifo_once_for_every_chat_client(cx: &mut TestAppContext)
         cx.update_window(handle, |_, window, cx| {
             let mut session = make_session(agent.label(), agent, agent.label(), true);
             view.update(cx, |v, cx| {
-                v.daemon_tx = Some(tx);
-                v.sessions = vec![session.clone()];
+                v.connection.daemon_tx = Some(tx);
+                v.connection.sessions = vec![session.clone()];
                 v.select_session(session.clone(), cx);
             });
             while rx.try_recv().is_ok() {}
             for text in ["first follow-up", "second follow-up"] {
-                view.update(cx, |v, cx| v.prompt_input.update(cx, |input, cx| {
+                view.update(cx, |v, cx| v.inputs.prompt_input.update(cx, |input, cx| {
                     input.set_value(text, window, cx);
                     input.focus(window, cx);
                 }));
                 window.render_frame(cx);
                 window.press("ctrl-enter", cx);
                 window.render_frame(cx);
-                assert!(view.read(cx).prompt_input.read(cx).value().is_empty());
+                assert!(view.read(cx).inputs.prompt_input.read(cx).value().is_empty());
                 assert!(window.find("stop-agent").visible());
                 assert_eq!(window.find("send-prompt").label(), Some("Queue"));
                 let tray = window.find("queued-messages-bar").bounds();
@@ -126,8 +126,8 @@ fn queued_message_edit_remove_and_force_send_are_clickable(cx: &mut TestAppConte
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
             let session = make_session("queue-actions", AgentKind::Claude, "Queue actions", true);
-            v.sessions = vec![session.clone()];
-            v.daemon_tx = Some(tx);
+            v.connection.sessions = vec![session.clone()];
+            v.connection.daemon_tx = Some(tx);
             v.select_session(session.clone(), cx);
             v.send_or_queue_prompt(&session, "edit".into(), "edit this".into());
             v.send_or_queue_prompt(&session, "remove".into(), "remove this".into());
@@ -137,17 +137,17 @@ fn queued_message_edit_remove_and_force_send_are_clickable(cx: &mut TestAppConte
         while rx.try_recv().is_ok() {}
         window.render_frame(cx);
         window.click("queue-edit-0", cx);
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "edit this");
-        assert!(view.read(cx).prompt_input.read(cx).focus_handle(cx).is_focused(window));
+        assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value().as_ref(), "edit this");
+        assert!(view.read(cx).inputs.prompt_input.read(cx).focus_handle(cx).is_focused(window));
         window.render_frame(cx);
         window.click("queue-remove-0", cx);
         window.render_frame(cx);
-        let force_id = view.read(cx).chat_outbox.entries[0].id.clone();
+        let force_id = view.read(cx).outbox.chat_outbox.entries[0].id.clone();
         window.click("queue-send-0", cx);
         window.render_frame(cx);
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::InterruptSession { session_id, agent: AgentKind::Claude }) if session_id == "queue-actions"));
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "urgent steering"));
-        assert_eq!(view.read(cx).shared_chat_outbox.lock().unwrap().outbox.entries.len(), 1);
+        assert_eq!(view.read(cx).outbox.shared_chat_outbox.lock().unwrap().outbox.entries.len(), 1);
         view.update(cx, |v, cx| {
             v.force_send_queued_entry(&force_id, cx);
             assert_eq!(v.flush_outbox_for_current_host(), 0);
@@ -155,7 +155,7 @@ fn queued_message_edit_remove_and_force_send_are_clickable(cx: &mut TestAppConte
         assert!(rx.try_recv().is_err());
         view.update(cx, |v, cx| {
             for working in [false, false, true, false, false] {
-                let mut session = v.selected_session.clone().unwrap();
+                let mut session = v.selection.selected_session.clone().unwrap();
                 session.working = working;
                 v.handle_bridge_event(UiBridgeEvent::Server(ServerEvent::SessionUpdated { session }), cx);
             }
@@ -165,14 +165,14 @@ fn queued_message_edit_remove_and_force_send_are_clickable(cx: &mut TestAppConte
         window.render_frame(cx);
         assert!(window.try_find("queued-messages-bar").is_none());
         view.update(cx, |v, _| {
-            let mut session = v.selected_session.clone().unwrap();
+            let mut session = v.selection.selected_session.clone().unwrap();
             session.working = true;
             v.send_or_queue_prompt(&session, "edit-with-draft".into(), "queued edit".into());
         });
         window.render_frame(cx);
         window.click("queue-edit-0", cx);
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "queued edit");
-        assert_eq!(view.read(cx).chat_outbox.entries[0].text, "edit this");
+        assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value().as_ref(), "queued edit");
+        assert_eq!(view.read(cx).outbox.chat_outbox.entries[0].text, "edit this");
     }).unwrap();
 }
 
@@ -188,7 +188,7 @@ fn full_width_roundtrip_restores_btop_in_a_fresh_view(cx: &mut TestAppContext) {
     ));
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![btop.clone(), normal.clone()];
+            v.connection.sessions = vec![btop.clone(), normal.clone()];
             v.set_sidebar_mode_synced(SidebarMode::Collapsed, cx);
             v.select_session(btop.clone(), cx);
         });
@@ -268,8 +268,8 @@ fn server_shell_manager_recovers_and_ends_on_the_owning_host(cx: &mut TestAppCon
         window.input("Btop B", cx);
         window.render_frame(cx);
         window.press("enter", cx);
-        assert_eq!(view.read(cx).selected_session_host.as_deref(), Some("host-b"));
-        assert!(!view.read(cx).selected_session.as_ref().unwrap().archived);
+        assert_eq!(view.read(cx).selection.selected_session_host.as_deref(), Some("host-b"));
+        assert!(!view.read(cx).selection.selected_session.as_ref().unwrap().archived);
         while rx_a.try_recv().is_ok() {}
         while rx_b.try_recv().is_ok() {}
         window.press("ctrl-k", cx);
@@ -297,7 +297,7 @@ fn daily_driver_session_switch_paths_focus_composer(cx: &mut TestAppContext) {
         let beta = make_session("focus-beta", AgentKind::Codex, "Focus Beta", false);
         let shell = make_session("focus-shell", AgentKind::Shell, "Focus Shell", false);
         view.update(cx, |v, cx| {
-            v.sessions = vec![alpha.clone(), beta.clone(), shell.clone()];
+            v.connection.sessions = vec![alpha.clone(), beta.clone(), shell.clone()];
             v.set_sidebar_mode_synced(SidebarMode::Open, cx);
         });
         for path in [
@@ -319,12 +319,13 @@ fn daily_driver_session_switch_paths_focus_composer(cx: &mut TestAppContext) {
                     },
                     cx,
                 );
-                v.prompt_input
+                v.inputs
+                    .prompt_input
                     .update(cx, |input, cx| input.set_value("", window, cx));
             });
             window.render_frame(cx);
             view.update(cx, |v, cx| {
-                window.focus(&v.root_focus_handle, cx);
+                window.focus(&v.focus.root_focus_handle, cx);
                 cx.notify();
             });
             window.render_frame(cx);
@@ -354,6 +355,7 @@ fn daily_driver_session_switch_paths_focus_composer(cx: &mut TestAppContext) {
             assert_eq!(view.read(cx).main_surface, MainSurface::Chat, "{path}");
             assert!(
                 view.read(cx)
+                    .inputs
                     .prompt_input
                     .read(cx)
                     .focus_handle(cx)
@@ -362,7 +364,7 @@ fn daily_driver_session_switch_paths_focus_composer(cx: &mut TestAppContext) {
             );
             window.input("ready", cx);
             assert_eq!(
-                view.read(cx).prompt_input.read(cx).value(),
+                view.read(cx).inputs.prompt_input.read(cx).value(),
                 "ready",
                 "{path}"
             );
@@ -378,8 +380,8 @@ fn composer_enter_inserts_newline_without_sending(cx: &mut TestAppContext) {
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
             let session = make_session("newline", AgentKind::Claude, "Newline", false);
-            v.daemon_tx = Some(tx);
-            v.sessions = vec![session.clone()];
+            v.connection.daemon_tx = Some(tx);
+            v.connection.sessions = vec![session.clone()];
             v.select_session(session, cx);
         });
         window.render_frame(cx);
@@ -391,10 +393,10 @@ fn composer_enter_inserts_newline_without_sending(cx: &mut TestAppContext) {
         window.input("third", cx);
         window.render_frame(cx);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value(),
+            view.read(cx).inputs.prompt_input.read(cx).value(),
             "first\nsecond\nthird"
         );
-        assert!(view.read(cx).messages.is_empty());
+        assert!(view.read(cx).history.messages.is_empty());
         assert!(rx.try_recv().is_err());
     })
     .unwrap();
@@ -407,8 +409,8 @@ fn composer_ctrl_enter_sends_multiline_message(cx: &mut TestAppContext) {
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
             let session = make_session("multiline", AgentKind::Claude, "Multiline", false);
-            v.daemon_tx = Some(tx);
-            v.sessions = vec![session.clone()];
+            v.connection.daemon_tx = Some(tx);
+            v.connection.sessions = vec![session.clone()];
             v.select_session(session, cx);
         });
         window.render_frame(cx);
@@ -418,7 +420,7 @@ fn composer_ctrl_enter_sends_multiline_message(cx: &mut TestAppContext) {
         window.input("second", cx);
         window.press("ctrl-enter", cx);
         window.render_frame(cx);
-        assert_eq!(view.read(cx).prompt_input.read(cx).value(), "");
+        assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value(), "");
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "first\nsecond"));
         assert!(rx.try_recv().is_err());
     }).unwrap();
@@ -431,8 +433,8 @@ fn daily_driver_composer_grows_upward_caps_scrolls_and_sends(cx: &mut TestAppCon
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
             let session = make_session("growing", AgentKind::Claude, "Growing", false);
-            v.daemon_tx = Some(tx);
-            v.sessions = vec![session.clone()];
+            v.connection.daemon_tx = Some(tx);
+            v.connection.sessions = vec![session.clone()];
             v.select_session(session, cx);
         });
         window.render_frame(cx);
@@ -441,7 +443,7 @@ fn daily_driver_composer_grows_upward_caps_scrolls_and_sends(cx: &mut TestAppCon
         window.press("shift-enter", cx);
         window.input("second", cx);
         window.render_frame(cx);
-        assert_eq!(view.read(cx).prompt_input.read(cx).value(), "first\nsecond");
+        assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value(), "first\nsecond");
         let grown = window.find("prompt-input").bounds();
         assert!(grown.size.height > initial.size.height);
         assert!((grown.bottom() - initial.bottom()).abs() <= px(1.0));
@@ -450,7 +452,7 @@ fn daily_driver_composer_grows_upward_caps_scrolls_and_sends(cx: &mut TestAppCon
         }
         window.press("ctrl-enter", cx);
         window.render_frame(cx);
-        assert_eq!(view.read(cx).prompt_input.read(cx).value(), "");
+        assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value(), "");
         let mut sent = false;
         while let Ok(request) = rx.try_recv() {
             sent |= matches!(request, ClientRequest::SendPrompt { text, .. } if text == "first\nsecond");
@@ -462,7 +464,7 @@ fn daily_driver_composer_grows_upward_caps_scrolls_and_sends(cx: &mut TestAppCon
         window.render_frame(cx);
         assert!(window.find("prompt-input").bounds().size.height > initial.size.height);
         view.update(cx, |v, cx| {
-            v.prompt_input.update(cx, |input, cx| input.replace_all((1..=10).map(|n| n.to_string()).collect::<Vec<_>>().join("\n"), window, cx));
+            v.inputs.prompt_input.update(cx, |input, cx| input.replace_all((1..=10).map(|n| n.to_string()).collect::<Vec<_>>().join("\n"), window, cx));
         });
         window.render_frame(cx);
         let capped = window.find("prompt-input").bounds().size.height;
@@ -473,14 +475,14 @@ fn daily_driver_composer_grows_upward_caps_scrolls_and_sends(cx: &mut TestAppCon
         }
         window.render_frame(cx);
         assert_eq!(window.find("prompt-input").bounds().size.height, capped);
-        let input = view.read(cx).prompt_input.read(cx);
+        let input = view.read(cx).inputs.prompt_input.read(cx);
         assert!(input.scroll_offset().y < px(0.0));
         let caret = input.cursor_layout().unwrap().0;
         assert!(caret.top() + input.scroll_offset().y >= input.input_bounds().top() - px(1.0));
         assert!(caret.bottom() + input.scroll_offset().y <= input.input_bounds().bottom() + px(1.0));
         view.update(cx, |v, cx| v.append_dictation_transcript(&"dictation continues ".repeat(80), window, cx));
         window.render_frame(cx);
-        let input = view.read(cx).prompt_input.read(cx);
+        let input = view.read(cx).inputs.prompt_input.read(cx);
         assert_eq!(input.cursor(), input.value().len());
         assert_eq!(window.find("prompt-input").bounds().size.height, capped);
         let caret = input.cursor_layout().unwrap().0;
@@ -495,7 +497,7 @@ fn daily_driver_shell_and_computer_view_share_the_split(cx: &mut TestAppContext)
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
             let session = make_session("split-shell", AgentKind::Shell, "Split Shell", false);
-            v.sessions = vec![session.clone()];
+            v.connection.sessions = vec![session.clone()];
             v.select_session(session, cx);
         });
         window.render_frame(cx);
@@ -543,7 +545,8 @@ fn daily_driver_shortcuts_search_filters_and_never_changes_the_draft(cx: &mut Te
         view.update(cx, |v, cx| {
             let session = make_session("search-shortcuts", AgentKind::Claude, "Shortcuts", false);
             v.select_session(session, cx);
-            v.prompt_input
+            v.inputs
+                .prompt_input
                 .update(cx, |input, cx| input.set_value("unsent draft", window, cx));
         });
         window.render_frame(cx);
@@ -556,7 +559,7 @@ fn daily_driver_shortcuts_search_filters_and_never_changes_the_draft(cx: &mut Te
                 window.press("f1", cx);
             }
             window.render_frame(cx);
-            let input = view.read(cx).shortcuts_search_input.clone();
+            let input = view.read(cx).inputs.shortcuts_search_input.clone();
             assert!(input.read(cx).focus_handle(cx).is_focused(window));
             assert_eq!(input.read(cx).value(), "");
             for spec in multibot_keys::SHORTCUTS {
@@ -611,9 +614,13 @@ fn daily_driver_shortcuts_search_filters_and_never_changes_the_draft(cx: &mut Te
             window.press("escape", cx);
             window.render_frame(cx);
             assert_eq!(view.read(cx).active_modal, ActiveModal::None);
-            assert_eq!(view.read(cx).prompt_input.read(cx).value(), "unsent draft");
+            assert_eq!(
+                view.read(cx).inputs.prompt_input.read(cx).value(),
+                "unsent draft"
+            );
             assert!(
                 view.read(cx)
+                    .inputs
                     .prompt_input
                     .read(cx)
                     .focus_handle(cx)
@@ -627,6 +634,7 @@ fn daily_driver_shortcuts_search_filters_and_never_changes_the_draft(cx: &mut Te
         assert_eq!(view.read(cx).active_modal, ActiveModal::None);
         assert!(
             view.read(cx)
+                .inputs
                 .prompt_input
                 .read(cx)
                 .focus_handle(cx)
@@ -643,7 +651,7 @@ fn daily_driver_spawned_chat_and_shell_switches_focus_the_active_input(cx: &mut 
         let first = make_session("shell-one", AgentKind::Shell, "Shell One", false);
         let second = make_session("shell-two", AgentKind::Shell, "Shell Two", false);
         view.update(cx, |v, cx| {
-            v.sessions = vec![first.clone(), second.clone()];
+            v.connection.sessions = vec![first.clone(), second.clone()];
             v.select_session(first.clone(), cx);
         });
         window.render_frame(cx);
@@ -658,11 +666,11 @@ fn daily_driver_spawned_chat_and_shell_switches_focus_the_active_input(cx: &mut 
                     .unwrap()
                     .is_focused(window)
             );
-            assert!(!view.read(cx).pending_focus_input);
+            assert!(!view.read(cx).focus.pending_focus_input);
         }
         let (tx, _rx) = mpsc::unbounded_channel();
         view.update(cx, |v, cx| {
-            v.daemon_tx = Some(tx);
+            v.connection.daemon_tx = Some(tx);
             assert!(v.spawn_new_session(AgentKind::Claude, "/srv/app".into(), None, None, cx));
             v.handle_daemon_server_event(
                 ServerEvent::SessionSpawned {
@@ -673,11 +681,17 @@ fn daily_driver_spawned_chat_and_shell_switches_focus_the_active_input(cx: &mut 
         });
         window.render_frame(cx);
         assert_eq!(
-            view.read(cx).selected_session.as_ref().unwrap().id,
+            view.read(cx)
+                .selection
+                .selected_session
+                .as_ref()
+                .unwrap()
+                .id,
             "spawned-chat"
         );
         assert!(
             view.read(cx)
+                .inputs
                 .prompt_input
                 .read(cx)
                 .focus_handle(cx)
@@ -685,7 +699,7 @@ fn daily_driver_spawned_chat_and_shell_switches_focus_the_active_input(cx: &mut 
         );
         window.input("new chat ready", cx);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value(),
+            view.read(cx).inputs.prompt_input.read(cx).value(),
             "new chat ready"
         );
     })
@@ -698,14 +712,14 @@ fn daily_driver_pending_focus_yields_to_find_rename_and_computer(cx: &mut TestAp
     cx.update_window(handle, |_, window, cx| {
         let session = make_session("focus-guards", AgentKind::Claude, "Focus Guards", false);
         view.update(cx, |v, cx| {
-            v.sessions = vec![session.clone()];
+            v.connection.sessions = vec![session.clone()];
             v.select_session(session.clone(), cx);
         });
         window.render_frame(cx);
         window.press("ctrl-f", cx);
         window.render_frame(cx);
         view.update(cx, |v, cx| {
-            v.pending_focus_input = true;
+            v.focus.pending_focus_input = true;
             cx.notify();
         });
         window.render_frame(cx);
@@ -722,7 +736,7 @@ fn daily_driver_pending_focus_yields_to_find_rename_and_computer(cx: &mut TestAp
         window.press("f2", cx);
         window.render_frame(cx);
         view.update(cx, |v, cx| {
-            v.pending_focus_input = true;
+            v.focus.pending_focus_input = true;
             cx.notify();
         });
         window.render_frame(cx);
@@ -730,6 +744,7 @@ fn daily_driver_pending_focus_yields_to_find_rename_and_computer(cx: &mut TestAp
         assert!(
             !view
                 .read(cx)
+                .inputs
                 .prompt_input
                 .read(cx)
                 .focus_handle(cx)
@@ -778,7 +793,7 @@ fn lifecycle_each_view_keeps_workspace_and_favorites_splits(cx: &mut TestAppCont
                     }
                     _ => {}
                 }
-                v.sessions.push(session);
+                v.connection.sessions.push(session);
             }
             v.sync_sessions_to_shared(cx);
             v.sync_workspace_to_shared(cx);
@@ -825,11 +840,12 @@ fn lifecycle_single_chords_and_removed_leader_preserve_composer(cx: &mut TestApp
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
             let session = make_session("go", AgentKind::Claude, "Go", false);
-            v.sessions = vec![session.clone()];
+            v.connection.sessions = vec![session.clone()];
             v.select_session(session, cx);
-            v.prompt_input
+            v.inputs
+                .prompt_input
                 .update(cx, |input, cx| input.replace("draft", window, cx));
-            let focus = v.prompt_input.read(cx).focus_handle(cx);
+            let focus = v.inputs.prompt_input.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
         });
         window.render_frame(cx);
@@ -840,7 +856,7 @@ fn lifecycle_single_chords_and_removed_leader_preserve_composer(cx: &mut TestApp
         ] {
             view.update(cx, |v, cx| {
                 v.set_main_surface(MainSurface::Chat);
-                let focus = v.prompt_input.read(cx).focus_handle(cx);
+                let focus = v.inputs.prompt_input.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
             });
             window.render_frame(cx);
@@ -849,7 +865,7 @@ fn lifecycle_single_chords_and_removed_leader_preserve_composer(cx: &mut TestApp
             assert_eq!(view.read(cx).inbox_state.lifecycle, lifecycle);
             assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
             assert_eq!(
-                view.read(cx).prompt_input.read(cx).value().as_ref(),
+                view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
                 "draft"
             );
             for id in [
@@ -863,7 +879,7 @@ fn lifecycle_single_chords_and_removed_leader_preserve_composer(cx: &mut TestApp
         }
         view.update(cx, |v, cx| {
             v.set_main_surface(MainSurface::Chat);
-            let focus = v.prompt_input.read(cx).focus_handle(cx);
+            let focus = v.inputs.prompt_input.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
         });
         window.render_frame(cx);
@@ -872,7 +888,7 @@ fn lifecycle_single_chords_and_removed_leader_preserve_composer(cx: &mut TestApp
         window.render_frame(cx);
         assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "drafte"
         );
         window.press("alt-i", cx);
@@ -898,9 +914,9 @@ fn lifecycle_done_hibernate_modes_peek_reply_and_timer(cx: &mut TestAppContext) 
             let mut session = make_session("hidden", AgentKind::Claude, "Hidden", false);
             session.last_assistant_id = Some("reply-1".into());
             session.last_assistant_ms = Some(100);
-            v.sessions = vec![session.clone()];
+            v.connection.sessions = vec![session.clone()];
             v.select_session(session, cx);
-            let focus = v.prompt_input.read(cx).focus_handle(cx);
+            let focus = v.inputs.prompt_input.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
         });
         window.render_frame(cx);
@@ -912,7 +928,7 @@ fn lifecycle_done_hibernate_modes_peek_reply_and_timer(cx: &mut TestAppContext) 
         window.render_frame(cx);
         assert!(window.find("lifecycle-peek-banner").visible());
         view.read_with(cx, |v, _| {
-            let s = v.selected_session.as_ref().unwrap();
+            let s = v.selection.selected_session.as_ref().unwrap();
             let key = v.session_key_for(s);
             assert_eq!(
                 v.sidebar_state
@@ -953,7 +969,7 @@ fn lifecycle_done_hibernate_modes_peek_reply_and_timer(cx: &mut TestAppContext) 
             window.click("inbox-row-0", cx);
             window.render_frame(cx);
             view.update(cx, |v, cx| {
-                let mut s = v.selected_session.clone().unwrap();
+                let mut s = v.selection.selected_session.clone().unwrap();
                 let key = v.session_key_for(&s);
                 assert_eq!(
                     v.sidebar_state
@@ -989,7 +1005,7 @@ fn lifecycle_done_hibernate_modes_peek_reply_and_timer(cx: &mut TestAppContext) 
             window.render_frame(cx);
         }
         view.update(cx, |v, cx| {
-            let mut session = v.selected_session.clone().unwrap();
+            let mut session = v.selection.selected_session.clone().unwrap();
             let key = v.session_key_for(&session);
             v.sidebar_state.workspace_store.archive_to_waiting_session(
                 &key,
@@ -1032,9 +1048,9 @@ fn lifecycle_dissolved_peek_keeps_workspace_and_reactivates_exact_history(cx: &m
             let key = v.session_key_for(&session);
             let workspace = v.sidebar_state.workspace_store.create_workspace("Saved workspace", None).unwrap();
             v.sidebar_state.workspace_store.assign_session_workspace(&key, &workspace.id);
-            v.sessions = vec![session.clone()];
-            v.daemon_tx = Some(tx);
-            v.chat_cache.put(CacheKey::new("local", AgentKind::Claude, "saved"), CachedSession {
+            v.connection.sessions = vec![session.clone()];
+            v.connection.daemon_tx = Some(tx);
+            v.history.chat_cache.put(CacheKey::new("local", AgentKind::Claude, "saved"), CachedSession {
                 source_path: session.source_path.clone(), messages: vec![ChatMessage {
                     id: "saved-reply".into(), role: MessageRole::Assistant, text: "Saved full history".into(), ..Default::default()
                 }], ..Default::default()
@@ -1054,9 +1070,9 @@ fn lifecycle_dissolved_peek_keeps_workspace_and_reactivates_exact_history(cx: &m
         window.render_frame(cx);
         assert!(window.find("move-chat-to-inbox").visible());
         view.read_with(cx, |v, _| {
-            let session = v.selected_session.as_ref().unwrap();
+            let session = v.selection.selected_session.as_ref().unwrap();
             let key = v.session_key_for(session);
-            assert_eq!(v.messages[0].text, "Saved full history");
+            assert_eq!(v.history.messages[0].text, "Saved full history");
             let serialized = serde_json::to_string(&v.sidebar_state.workspace_store).unwrap();
             let restored: multibot_core::workspaces::WorkspaceStore = serde_json::from_str(&serialized).unwrap();
             assert_eq!(restored.session_lifecycle(&key, session, now_unix_ms()), SessionLifecycle::Dissolved);
@@ -1066,22 +1082,22 @@ fn lifecycle_dissolved_peek_keeps_workspace_and_reactivates_exact_history(cx: &m
             assert!(matches!(request, ClientRequest::ReadHistory { .. }), "peek must only read history, got {request:?}");
         }
         view.update(cx, |v, _| {
-            let session = v.selected_session.as_ref().unwrap();
+            let session = v.selection.selected_session.as_ref().unwrap();
             let key = ChatOutbox::session_key("local", session.agent, &session.id);
-            v.shared_chat_outbox.lock().unwrap().outbox.enqueue(&key, "queued before dissolve", now_unix_ms()).unwrap();
+            v.outbox.shared_chat_outbox.lock().unwrap().outbox.enqueue(&key, "queued before dissolve", now_unix_ms()).unwrap();
             assert_eq!(v.flush_outbox_for_host("local"), 0);
         });
         assert!(rx.try_recv().is_err());
         window.click("move-chat-to-inbox", cx);
         window.render_frame(cx);
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::UnarchiveSession { ref session_id }) if session_id == "saved"));
-        assert!(!view.read(cx).selected_session.as_ref().unwrap().archived);
+        assert!(!view.read(cx).selection.selected_session.as_ref().unwrap().archived);
         window.press("ctrl-shift-w", cx);
         window.press("ctrl-shift-t", cx);
         window.render_frame(cx);
-        assert_eq!(view.read(cx).selected_session.as_ref().unwrap().id, "saved");
-        assert!(!view.read(cx).selected_session.as_ref().unwrap().archived);
-        assert_eq!(view.read(cx).messages[0].text, "Saved full history");
+        assert_eq!(view.read(cx).selection.selected_session.as_ref().unwrap().id, "saved");
+        assert!(!view.read(cx).selection.selected_session.as_ref().unwrap().archived);
+        assert_eq!(view.read(cx).history.messages[0].text, "Saved full history");
         while rx.try_recv().is_ok() {}
         window.press("ctrl-shift-w", cx);
         window.press("alt-shift-d", cx);
@@ -1090,7 +1106,7 @@ fn lifecycle_dissolved_peek_keeps_workspace_and_reactivates_exact_history(cx: &m
         window.render_frame(cx);
         while rx.try_recv().is_ok() {}
         view.update(cx, |v, cx| {
-            v.prompt_input.update(cx, |input, cx| { input.set_value("Continue saved chat", window, cx); input.focus(window, cx); });
+            v.inputs.prompt_input.update(cx, |input, cx| { input.set_value("Continue saved chat", window, cx); input.focus(window, cx); });
         });
         window.render_frame(cx);
         window.press("ctrl-enter", cx);
@@ -1099,16 +1115,16 @@ fn lifecycle_dissolved_peek_keeps_workspace_and_reactivates_exact_history(cx: &m
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { ref session_id, ref text, .. }) if session_id == "saved" && text == "queued before dissolve"));
         view.update(cx, |v, cx| {
             for working in [true, false] {
-                let mut session = v.selected_session.clone().unwrap();
+                let mut session = v.selection.selected_session.clone().unwrap();
                 session.working = working;
                 v.handle_bridge_event(UiBridgeEvent::Server(ServerEvent::SessionUpdated { session }), cx);
             }
         });
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { ref session_id, ref text, .. }) if session_id == "saved" && text == "Continue saved chat"));
-        assert!(!view.read(cx).selected_session.as_ref().unwrap().archived);
+        assert!(!view.read(cx).selection.selected_session.as_ref().unwrap().archived);
 
         view.update(cx, |v, cx| {
-            let session = v.selected_session.clone().unwrap();
+            let session = v.selection.selected_session.clone().unwrap();
             let key = v.session_key_for(&session);
             v.dissolve_session_key(&key, cx);
             let (host, session) = v.host_for_session_key(&key).unwrap();
@@ -1118,7 +1134,7 @@ fn lifecycle_dissolved_peek_keeps_workspace_and_reactivates_exact_history(cx: &m
                 message_id: "retry-saved".into(), text: "Retry saved chat".into(), reason: "offline".into(),
             });
             assert!(v.retry_failed_send("retry-saved", cx));
-            assert!(!v.selected_session.as_ref().unwrap().archived);
+            assert!(!v.selection.selected_session.as_ref().unwrap().archived);
             assert!(matches!(rx.try_recv(), Ok(ClientRequest::UnarchiveSession { ref session_id }) if session_id == "saved"));
             assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { ref session_id, ref text, .. }) if session_id == "saved" && text == "Retry saved chat"));
         });
@@ -1131,8 +1147,8 @@ fn reminder_and_snooze_shortcuts_presets_and_inbox_dismiss(cx: &mut TestAppConte
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
             let session = make_session("reminder", AgentKind::Claude, "Follow up", false);
-            v.sessions = vec![session.clone()];
-            v.selected_session = Some(session);
+            v.connection.sessions = vec![session.clone()];
+            v.selection.selected_session = Some(session);
             v.sync_sessions_to_shared(cx);
             cx.notify();
         });
@@ -1143,7 +1159,7 @@ fn reminder_and_snooze_shortcuts_presets_and_inbox_dismiss(cx: &mut TestAppConte
         window.click("pal-reminder-0", cx);
         window.render_frame(cx);
         view.read_with(cx, |v, cx| {
-            let key = v.session_key_for(v.selected_session.as_ref().unwrap());
+            let key = v.session_key_for(v.selection.selected_session.as_ref().unwrap());
             assert!(
                 v.sidebar_state.workspace_store.session_meta[&key]
                     .remind_at_ms
@@ -1170,7 +1186,7 @@ fn reminder_and_snooze_shortcuts_presets_and_inbox_dismiss(cx: &mut TestAppConte
                 .is_empty()
         );
         view.update(cx, |v, cx| {
-            let key = v.session_key_for(v.selected_session.as_ref().unwrap());
+            let key = v.session_key_for(v.selection.selected_session.as_ref().unwrap());
             let ws = v.sidebar_state.workspace_store.effective_workspace_id(&key);
             v.set_workspace_snooze(&ws, None, cx);
             v.sidebar_state.workspace_store.set_reminder(
@@ -1189,7 +1205,7 @@ fn reminder_and_snooze_shortcuts_presets_and_inbox_dismiss(cx: &mut TestAppConte
         window.click("dismiss-reminder-0", cx);
         window.render_frame(cx);
         view.read_with(cx, |v, _| {
-            let key = v.session_key_for(v.selected_session.as_ref().unwrap());
+            let key = v.session_key_for(v.selection.selected_session.as_ref().unwrap());
             assert!(
                 !v.sidebar_state
                     .workspace_store
@@ -1338,8 +1354,11 @@ fn multi_host_chat_routes_identical_session_ids_and_rejects_other_host_history(
             view.update(cx, |v, cx| {
                 let key = canonical_session_key(host, session.agent, &session.id);
                 v.open_session_key_with_tracking(&key, false, cx);
-                assert_eq!(v.selected_session_host.as_deref(), Some(host));
-                assert_eq!(v.active_switch_token.as_ref().unwrap().key.host, host);
+                assert_eq!(v.selection.selected_session_host.as_deref(), Some(host));
+                assert_eq!(
+                    v.history.active_switch_token.as_ref().unwrap().key.host,
+                    host
+                );
                 v.send_or_queue_prompt(&session, "msg".into(), "hello".into());
                 assert!(v.interrupt_active_session(cx));
             });
@@ -1379,7 +1398,7 @@ fn multi_host_chat_routes_identical_session_ids_and_rejects_other_host_history(
                 text: "B".into(),
                 ..Default::default()
             };
-            v.messages = vec![message.clone()];
+            v.history.messages = vec![message.clone()];
             v.handle_daemon_server_event_with_hint(
                 "host-a",
                 ServerEvent::History {
@@ -1396,12 +1415,12 @@ fn multi_host_chat_routes_identical_session_ids_and_rejects_other_host_history(
                 false,
                 cx,
             );
-            assert_eq!(v.messages, vec![message]);
+            assert_eq!(v.history.messages, vec![message]);
             MultibotView::disconnect_host_on_app("host-b", cx);
             v.sync_from_shared_store(cx);
             v.send_or_queue_prompt(&session, "offline".into(), "only for B".into());
             assert!(
-                v.chat_outbox.entries.iter().any(|e| e.session_key
+                v.outbox.chat_outbox.entries.iter().any(|e| e.session_key
                     == ChatOutbox::session_key("host-b", session.agent, &session.id))
             );
             assert_eq!(v.flush_outbox_for_host("host-a"), 0);
@@ -1438,14 +1457,14 @@ fn multi_host_composer_options_follow_prompt_queue_and_spawn(cx: &mut TestAppCon
     cx.update_window(handle, |_, _, cx| {
         view.update(cx, |v, cx| {
             v.sync_from_shared_store(cx);
-            v.selected_session = Some(session.clone());
+            v.selection.selected_session = Some(session.clone());
             for (host, options) in [("host-a", &options_a), ("host-b", &options_b)] {
                 let (rx, other) = if host == "host-a" {
                     (&mut rx_a, &mut rx_b)
                 } else {
                     (&mut rx_b, &mut rx_a)
                 };
-                v.selected_session_host = Some(host.into());
+                v.selection.selected_session_host = Some(host.into());
                 let key = canonical_session_key(host, session.agent, &session.id);
                 v.chat_state.composer_options.insert(key, options.clone());
                 v.send_or_queue_prompt(&session, "send".into(), "hello".into());
@@ -1458,7 +1477,7 @@ fn multi_host_composer_options_follow_prompt_queue_and_spawn(cx: &mut TestAppCon
             }
             v.send_or_queue_prompt_on_host("host-a", &session, "delayed".into(), "uploaded".into());
             assert!(rx_a.try_recv().is_err());
-            assert_eq!(v.chat_outbox.entries.last().unwrap().options.as_ref(), Some(&options_a));
+            assert_eq!(v.outbox.chat_outbox.entries.last().unwrap().options.as_ref(), Some(&options_a));
             for working in [true, false] {
                 let mut updated = session.clone();
                 updated.working = working;
@@ -1470,7 +1489,7 @@ fn multi_host_composer_options_follow_prompt_queue_and_spawn(cx: &mut TestAppCon
             assert!(matches!(rx_a.try_recv(), Ok(ClientRequest::SendPrompt { options: Some(ref o), .. }) if o == &options_a));
             assert!(rx_b.try_recv().is_err());
 
-            v.selected_session_host = Some("host-a".into());
+            v.selection.selected_session_host = Some("host-a".into());
             let spawned = make_session("spawned", session.agent, "New", false);
             v.handle_daemon_server_event_with_hint(
                 "host-a",
@@ -1478,7 +1497,7 @@ fn multi_host_composer_options_follow_prompt_queue_and_spawn(cx: &mut TestAppCon
                 false,
                 cx,
             );
-            assert_eq!(v.pending_spawn_host.as_deref(), Some("host-b"));
+            assert_eq!(v.selection.pending_spawn_host.as_deref(), Some("host-b"));
             assert_eq!(v.chat_state.pending_spawn_options, Some(options_b.clone()));
             v.handle_daemon_server_event_with_hint(
                 "host-b",
@@ -1486,19 +1505,19 @@ fn multi_host_composer_options_follow_prompt_queue_and_spawn(cx: &mut TestAppCon
                 false,
                 cx,
             );
-            assert_eq!(v.selected_session_host.as_deref(), Some("host-b"));
+            assert_eq!(v.selection.selected_session_host.as_deref(), Some("host-b"));
             assert_eq!(v.composer_options_for(&spawned), Some(options_b.clone()));
             assert!(!v.chat_state.composer_options.contains_key(
                 &canonical_session_key("host-a", spawned.agent, &spawned.id)
             ));
             assert!(v.chat_state.pending_spawn_options.is_none());
-            assert!(v.pending_spawn_host.is_none());
+            assert!(v.selection.pending_spawn_host.is_none());
             while rx_b.try_recv().is_ok() {}
 
             MultibotView::disconnect_host_on_app("host-b", cx);
             v.sync_from_shared_store(cx);
             v.send_or_queue_prompt(&spawned, "offline".into(), "queued".into());
-            assert_eq!(v.chat_outbox.entries.last().unwrap().options, Some(options_b));
+            assert_eq!(v.outbox.chat_outbox.entries.last().unwrap().options, Some(options_b));
             assert_eq!(v.flush_outbox_for_host("host-a"), 0);
             assert!(rx_a.try_recv().is_err());
         });
@@ -1669,7 +1688,7 @@ fn wave1_general_preferences_control_send_key_and_queue_delivery(cx: &mut TestAp
         }
         view.update(cx, |v, cx| {
             v.sync_from_shared_store(cx);
-            v.selected_session = Some(session);
+            v.selection.selected_session = Some(session);
         });
         window.render_frame(cx);
         window.press("ctrl-,", cx);
@@ -1680,6 +1699,7 @@ fn wave1_general_preferences_control_send_key_and_queue_delivery(cx: &mut TestAp
             window.render_frame(cx);
             assert!(
                 view.read(cx)
+                    .focus
                     .settings_focus_handle
                     .contains_focused(window, cx)
             );
@@ -1697,17 +1717,20 @@ fn wave1_general_preferences_control_send_key_and_queue_delivery(cx: &mut TestAp
         window.press("ctrl-enter", cx);
         window.render_frame(cx);
         assert!(rx.try_recv().is_err());
-        assert_eq!(view.read(cx).chat_outbox.entries[0].text, "Send now");
+        assert_eq!(view.read(cx).outbox.chat_outbox.entries[0].text, "Send now");
         view.update(cx, |v, cx| {
             v.settings.queue_while_working = true;
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("Wait for agent", window, cx)
             });
         });
         window.press("ctrl-enter", cx);
         window.render_frame(cx);
         assert!(rx.try_recv().is_err());
-        assert_eq!(view.read(cx).chat_outbox.entries[1].text, "Wait for agent");
+        assert_eq!(
+            view.read(cx).outbox.chat_outbox.entries[1].text,
+            "Wait for agent"
+        );
     })
     .unwrap();
 }
@@ -1717,8 +1740,8 @@ fn wave1_queue_bar_tracks_daemon_acknowledgements_and_offline_outbox(cx: &mut Te
     let (handle, view) = open_test_view_with_entity(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![make_session("queued", AgentKind::Claude, "Queue", true)];
-            v.selected_session = Some(v.sessions[0].clone());
+            v.connection.sessions = vec![make_session("queued", AgentKind::Claude, "Queue", true)];
+            v.selection.selected_session = Some(v.connection.sessions[0].clone());
             cx.notify();
         });
         window.render_frame(cx);
@@ -1750,7 +1773,7 @@ fn wave1_queue_bar_tracks_daemon_acknowledgements_and_offline_outbox(cx: &mut Te
         window.render_frame(cx);
         assert!(window.try_find("queued-messages-bar").is_none());
         view.update(cx, |v, cx| {
-            let session = v.selected_session.clone().unwrap();
+            let session = v.selection.selected_session.clone().unwrap();
             v.send_or_queue_prompt(&session, "offline-1".into(), "Offline draft".into());
             cx.notify();
         });
@@ -1855,12 +1878,12 @@ fn focused_composer_ctrl_d_dictates_and_shift_d_still_copies_code(cx: &mut TestA
         view.update(cx, |v, cx| {
             // An invalid manual override makes this independent of host credentials/audio.
             v.settings.voice.api_key = "invalid key".into();
-            v.messages = vec![ChatMessage {
+            v.history.messages = vec![ChatMessage {
                 role: MessageRole::Assistant,
                 text: "```rust\nlet answer = 42;\n```".into(),
                 ..Default::default()
             }];
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("Unsent draft", window, cx);
                 input.focus(window, cx);
             });
@@ -1870,7 +1893,7 @@ fn focused_composer_ctrl_d_dictates_and_shift_d_still_copies_code(cx: &mut TestA
         window.press("ctrl-d", cx);
         assert!(view.read(cx).notice.as_deref().unwrap().contains("API key"));
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_str(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_str(),
             "Unsent draft"
         );
         view.update(cx, |v, _| {
@@ -1897,7 +1920,7 @@ fn focused_composer_ctrl_d_dictates_and_shift_d_still_copies_code(cx: &mut TestA
             multibot_core::voice::DictationPhase::Finishing
         );
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_str(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_str(),
             "Unsent draft"
         );
         view.update(cx, |v, _| v.voice.phase.start());
@@ -1916,7 +1939,8 @@ fn dictation_shortcut_and_mic_report_invalid_key_without_changing_draft(cx: &mut
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
             v.settings.voice.api_key = "invalid key".into();
-            v.prompt_input
+            v.inputs
+                .prompt_input
                 .update(cx, |input, cx| input.set_value("Unsent draft", window, cx));
         });
         window.press("ctrl-shift-space", cx);
@@ -1930,7 +1954,7 @@ fn dictation_shortcut_and_mic_report_invalid_key_without_changing_draft(cx: &mut
         window.click("composer-voice", cx);
         assert!(view.read(cx).notice.as_deref().unwrap().contains("API key"));
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_str(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_str(),
             "Unsent draft"
         );
     })
@@ -1948,9 +1972,11 @@ fn dictation_settings_save_language_and_key_and_escape_stops_listening(cx: &mut 
         assert!(window.try_find("deepgram-api-key").is_some());
         assert!(window.try_find("deepgram-language").is_some());
         view.update(cx, |v, cx| {
-            v.deepgram_key_input
+            v.inputs
+                .deepgram_key_input
                 .update(cx, |input, cx| input.set_value("test-key", window, cx));
-            v.deepgram_language_input
+            v.inputs
+                .deepgram_language_input
                 .update(cx, |input, cx| input.set_value("de", window, cx));
         });
         window.click("save-deepgram-settings", cx);
@@ -1960,7 +1986,7 @@ fn dictation_settings_save_language_and_key_and_escape_stops_listening(cx: &mut 
         window.press("escape", cx);
         view.update(cx, |v, cx| {
             v.voice.phase.start();
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("Keep this draft", window, cx);
                 input.focus(window, cx);
             });
@@ -1971,7 +1997,7 @@ fn dictation_settings_save_language_and_key_and_escape_stops_listening(cx: &mut 
             multibot_core::voice::DictationPhase::Off
         );
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_str(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_str(),
             "Keep this draft"
         );
         view.update(cx, |v, _| {
@@ -2004,7 +2030,7 @@ fn shell_fullscreen_restores_on_first_frame_and_shortcut_saves_both_choices(
                 "Multi Bot AGY Shell",
                 false,
             );
-            v.sessions = vec![shell.clone()];
+            v.connection.sessions = vec![shell.clone()];
             let key = v.session_key_for(&shell);
             v.sidebar_state
                 .workspace_store
@@ -2071,7 +2097,7 @@ fn shell_fullscreen_defaults_to_regular_width_on_initial_load(cx: &mut TestAppCo
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
             let shell = make_session("term-deadbeef", AgentKind::Shell, "Shell", false);
-            v.sessions = vec![shell.clone()];
+            v.connection.sessions = vec![shell.clone()];
             v.select_session(shell, cx);
         });
         window.render_frame(cx);
@@ -2090,7 +2116,7 @@ fn dev_stats_start_compact_and_toggle_by_click_and_escape_in_both_sidebar_modes(
         view.update(cx, |v, _| {
             v.gpu_report = multibot_gpu::parse_gpu_report("MODE\tauto_integrated\nACTIVE\t00000000:00012345\t8086\t9a49\t128\t0\tIntel(R) Arc(TM) Pro Graphics\n");
             v.footprint_label = "120.5 MB · 2.2% CPU".into();
-            v.connection_status = "3/3 hosts · 106 sessions".into();
+            v.connection.connection_status = "3/3 hosts · 106 sessions".into();
         });
         for mode in [SidebarMode::Open, SidebarMode::Collapsed] {
             view.update(cx, |v, cx| v.set_sidebar_mode_synced(mode, cx));
@@ -2193,18 +2219,18 @@ fn workspace_header_palette_filters_all_favorites_and_named_workspace(cx: &mut T
             first.updated_at_ms = 10;
             let mut second = make_session("second", AgentKind::Codex, "Second", false);
             second.updated_at_ms = 20;
-            v.sessions = vec![first, second];
+            v.connection.sessions = vec![first, second];
             let workspace = v
                 .sidebar_state
                 .workspace_store
                 .create_workspace("Work", None)
                 .unwrap();
-            let key = v.session_key_for(&v.sessions[0]);
+            let key = v.session_key_for(&v.connection.sessions[0]);
             v.sidebar_state
                 .workspace_store
                 .assign_session_workspace(&key, &workspace.id);
             v.sidebar_state.workspace_store.toggle_favorite(&key);
-            v.open_session_with_tracking(v.sessions[0].clone(), false, cx);
+            v.open_session_with_tracking(v.connection.sessions[0].clone(), false, cx);
             cx.notify();
         });
         window.render_frame(cx);
@@ -2360,10 +2386,10 @@ fn wave1_composer_controls_preserve_drafts_and_stop_working_session(cx: &mut Tes
     let (tx, mut rx) = mpsc::unbounded_channel();
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![make_session("active", AgentKind::Claude, "Active", true)];
-            v.selected_session = Some(v.sessions[0].clone());
-            v.daemon_tx = Some(tx);
-            v.prompt_input.update(cx, |input, cx| input.set_value("Unsent draft", window, cx));
+            v.connection.sessions = vec![make_session("active", AgentKind::Claude, "Active", true)];
+            v.selection.selected_session = Some(v.connection.sessions[0].clone());
+            v.connection.daemon_tx = Some(tx);
+            v.inputs.prompt_input.update(cx, |input, cx| input.set_value("Unsent draft", window, cx));
             cx.notify();
         });
         window.render_frame(cx);
@@ -2375,12 +2401,12 @@ fn wave1_composer_controls_preserve_drafts_and_stop_working_session(cx: &mut Tes
         window.click("composer-effort-3", cx);
         window.render_frame(cx);
         assert_eq!(window.find("composer-effort-3").checked(), Some(true));
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "Unsent draft");
+        assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value().as_str(), "Unsent draft");
         window.click("stop-agent", cx);
         window.render_frame(cx);
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::InterruptSession { session_id, .. }) if session_id == "active"));
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "Unsent draft");
-        view.update(cx, |v, cx| v.prompt_input.update(cx, |input, cx| input.set_value("", window, cx)));
+        assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value().as_str(), "Unsent draft");
+        view.update(cx, |v, cx| v.inputs.prompt_input.update(cx, |input, cx| input.set_value("", window, cx)));
         window.click("attach-file-btn", cx);
         window.render_frame(cx);
         assert!(window.try_find("composer-options").is_none());
@@ -2390,9 +2416,9 @@ fn wave1_composer_controls_preserve_drafts_and_stop_working_session(cx: &mut Tes
         window.render_frame(cx);
         assert_eq!(window.find("composer-model-1").checked(), Some(true));
         assert_eq!(window.find("composer-effort-3").checked(), Some(true));
-        assert!(view.read(cx).prompt_input.read(cx).value().is_empty());
+        assert!(view.read(cx).inputs.prompt_input.read(cx).value().is_empty());
         let v = view.read(cx);
-        let options = v.composer_options_for(v.selected_session.as_ref().unwrap()).unwrap();
+        let options = v.composer_options_for(v.selection.selected_session.as_ref().unwrap()).unwrap();
         assert_eq!(options.model.as_deref(), Some("opus"));
         assert_eq!(options.effort, Some(multibot_proto::EffortLevel::High));
     }).unwrap();
@@ -2940,9 +2966,9 @@ fn m6_keyboard_actions_and_palette_m5_commands_work_end_to_end(cx: &mut TestAppC
         let s1 = make_session("s1", AgentKind::Claude, "Alpha", false);
         let s2 = make_session("s2", AgentKind::Codex, "Beta", false);
         view.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone(), s2.clone()];
-            v.selected_session = Some(s1.clone());
-            v.messages = vec![ChatMessage {
+            v.connection.sessions = vec![s1.clone(), s2.clone()];
+            v.selection.selected_session = Some(s1.clone());
+            v.history.messages = vec![ChatMessage {
                 id: "m1".into(),
                 role: MessageRole::Assistant,
                 text: "```rust\nfn main() {}\n```\n\n| ColA | ColB |\n| --- | --- |\n| 1 | 2 |"
@@ -3137,10 +3163,10 @@ fn close_overlay_respects_exact_z_order_and_interrupts_working_agent(cx: &mut Te
     cx.update_window(handle, |_, window, cx| {
         let working_sess = make_session("w1", AgentKind::Claude, "Working", true);
         view.update(cx, |v, cx| {
-            v.daemon_tx = Some(req_tx);
-            v.sessions = vec![working_sess.clone()];
-            v.selected_session = Some(working_sess);
-            v.messages = vec![ChatMessage {
+            v.connection.daemon_tx = Some(req_tx);
+            v.connection.sessions = vec![working_sess.clone()];
+            v.selection.selected_session = Some(working_sess);
+            v.history.messages = vec![ChatMessage {
                 id: "m1".into(),
                 role: MessageRole::Assistant,
                 text: "| A | B |\n| --- | --- |\n| 1 | 2 |".into(),
@@ -3229,8 +3255,8 @@ fn shared_app_store_syncs_across_ctrl_n_windows_and_decrements_count_on_close(
     let s1 = make_session("sync-1", AgentKind::Claude, "Synced", false);
     cx.update_window(handle1, |_, _window, cx| {
         view1.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone()];
-            v.selected_session = Some(s1.clone());
+            v.connection.sessions = vec![s1.clone()];
+            v.selection.selected_session = Some(s1.clone());
             v.sync_sessions_to_shared(cx);
             v.toggle_active_favorite(cx);
             v.toggle_unread_only(cx);
@@ -3242,8 +3268,8 @@ fn shared_app_store_syncs_across_ctrl_n_windows_and_decrements_count_on_close(
 
     cx.update_window(handle2, |_, _window, cx| {
         let v2 = view2.read(cx);
-        assert_eq!(v2.sessions.len(), 1);
-        assert_eq!(v2.sessions[0].id, "sync-1");
+        assert_eq!(v2.connection.sessions.len(), 1);
+        assert_eq!(v2.connection.sessions[0].id, "sync-1");
         assert!(v2.sidebar_state.unread_only);
         let key = v2.session_key_for(&s1);
         assert!(v2.sidebar_state.workspace_store.is_favorite(&key));
@@ -3317,9 +3343,9 @@ fn dissolved_shell_stays_hidden_after_reload_and_fresh_session_lists(cx: &mut Te
         let active_key = canonical_session_key("VPS", AgentKind::Shell, &active.id);
         let (tx, _rx) = mpsc::unbounded_channel();
         view.update(cx, |v, cx| {
-            v.connected_host = Some("VPS".into());
-            v.daemon_tx = Some(tx);
-            v.sessions = vec![dead.clone(), active.clone()];
+            v.connection.connected_host = Some("VPS".into());
+            v.connection.daemon_tx = Some(tx);
+            v.connection.sessions = vec![dead.clone(), active.clone()];
             v.sync_sessions_to_shared(cx);
             v.dissolve_session_key(&key, cx);
             v.dissolve_session_key(&key, cx);
@@ -3328,7 +3354,7 @@ fn dissolved_shell_stays_hidden_after_reload_and_fresh_session_lists(cx: &mut Te
         for app_scoped in [false, true] {
             view.update(cx, |v, cx| {
                 v.clear_active_session_view();
-                v.sessions.clear();
+                v.connection.sessions.clear();
                 v.sidebar_state.workspace_store = WorkspaceStore::load_from(&path).unwrap();
                 v.sync_workspace_to_shared(cx);
                 v.sync_sessions_to_shared(cx);
@@ -3352,7 +3378,7 @@ fn dissolved_shell_stays_hidden_after_reload_and_fresh_session_lists(cx: &mut Te
                 } else {
                     v.handle_bridge_event(event, cx);
                 }
-                assert_eq!(v.selected_session.as_ref().unwrap().id, active.id);
+                assert_eq!(v.selection.selected_session.as_ref().unwrap().id, active.id);
                 assert_eq!(
                     v.sidebar_state
                         .workspace_store
@@ -3393,7 +3419,7 @@ fn session_lists_reconcile_imported_keys_in_app_and_view_paths(cx: &mut TestAppC
                 store.favorites.insert(imported);
                 store.record_session_view(&live, 123);
                 v.sidebar_state.workspace_store = store;
-                v.connected_host = Some("VPS Hetzner".into());
+                v.connection.connected_host = Some("VPS Hetzner".into());
                 v.sync_workspace_to_shared(cx);
                 v.sync_sessions_to_shared(cx);
                 let event = UiBridgeEvent::Server(ServerEvent::Sessions {
@@ -3440,7 +3466,7 @@ fn server_workspace_hint_lands_in_app_and_view_paths_and_keeps_manual_moves(
             let sid = "e2f2f8d3-b2de-4c17-9727-d3beef065f6d";
             let mut summary = make_session(sid, AgentKind::Claude, "HT Product Lead", false);
             summary.workspace = Some("HT Product".into());
-            v.connected_host = Some("VPS Hetzner".into());
+            v.connection.connected_host = Some("VPS Hetzner".into());
             for app_scoped in [false, true] {
                 // Fresh store per path so the second iteration starts unassigned.
                 v.sidebar_state.workspace_store = WorkspaceStore::new();
@@ -3518,8 +3544,8 @@ fn manual_import_reconciles_already_loaded_sessions(cx: &mut TestAppContext) {
         view.update(cx, |v, cx| {
             let sid = "c0a80101-1234-4567-89ab-0123456789ab";
             let live = format!("vps hetzner:codex:{sid}");
-            v.connected_host = Some("VPS Hetzner".into());
-            v.sessions = vec![make_session(sid, AgentKind::Codex, "Live", false)];
+            v.connection.connected_host = Some("VPS Hetzner".into());
+            v.connection.sessions = vec![make_session(sid, AgentKind::Codex, "Live", false)];
             v.sidebar_state
                 .workspace_store
                 .record_session_view(&live, 123);
@@ -3751,10 +3777,10 @@ fn select_session_uses_chat_cache_frame0_and_discards_late_stale_history(cx: &mu
         let sb = make_session("sb", AgentKind::Claude, "Session B", false);
 
         view.update(cx, |v, cx| {
-            v.sessions = vec![sa.clone(), sb.clone()];
+            v.connection.sessions = vec![sa.clone(), sb.clone()];
             let key_a = CacheKey::new("local", AgentKind::Claude, "sa");
             let key_b = CacheKey::new("local", AgentKind::Claude, "sb");
-            v.chat_cache.put(
+            v.history.chat_cache.put(
                 key_a,
                 CachedSession {
                     source_path: sa.source_path.clone(),
@@ -3767,7 +3793,7 @@ fn select_session_uses_chat_cache_frame0_and_discards_late_stale_history(cx: &mu
                     ..Default::default()
                 },
             );
-            v.chat_cache.put(
+            v.history.chat_cache.put(
                 key_b,
                 CachedSession {
                     source_path: sb.source_path.clone(),
@@ -3783,14 +3809,14 @@ fn select_session_uses_chat_cache_frame0_and_discards_late_stale_history(cx: &mu
 
             // Switch A -> B -> A synchronously from memory cache
             v.select_session(sa.clone(), cx);
-            assert_eq!(v.messages.len(), 1);
-            assert_eq!(v.messages[0].text, "Cached A");
+            assert_eq!(v.history.messages.len(), 1);
+            assert_eq!(v.history.messages[0].text, "Cached A");
 
             v.select_session(sb.clone(), cx);
-            assert_eq!(v.messages[0].text, "Cached B");
+            assert_eq!(v.history.messages[0].text, "Cached B");
 
             v.select_session(sa.clone(), cx);
-            assert_eq!(v.messages[0].text, "Cached A");
+            assert_eq!(v.history.messages[0].text, "Cached A");
 
             // Late ServerEvent::History for B updates B's cache only and NEVER corrupts active A
             v.handle_bridge_event(
@@ -3812,9 +3838,10 @@ fn select_session_uses_chat_cache_frame0_and_discards_late_stale_history(cx: &mu
                 }),
                 cx,
             );
-            assert_eq!(v.messages.len(), 1);
-            assert_eq!(v.messages[0].text, "Cached A");
+            assert_eq!(v.history.messages.len(), 1);
+            assert_eq!(v.history.messages[0].text, "Cached A");
             let cached_b = v
+                .history
                 .chat_cache
                 .get(&CacheKey::new("local", AgentKind::Claude, "sb"))
                 .unwrap();
@@ -3832,13 +3859,13 @@ fn offline_send_queues_in_outbox_and_flushes_fifo_on_hello_ack(cx: &mut TestAppC
     cx.update_window(handle, |_, _window, cx| {
         let sess = make_session("off1", AgentKind::Claude, "Offline Session", false);
         view.update(cx, |v, cx| {
-            v.sessions = vec![sess.clone()];
-            v.selected_session = Some(sess.clone());
-            v.daemon_tx = None;
+            v.connection.sessions = vec![sess.clone()];
+            v.selection.selected_session = Some(sess.clone());
+            v.connection.daemon_tx = None;
 
             v.send_or_queue_prompt(&sess, "local-0".into(), "First message".into());
             v.send_or_queue_prompt(&sess, "local-1".into(), "Second message".into());
-            assert_eq!(v.chat_outbox.entries.len(), 2);
+            assert_eq!(v.outbox.chat_outbox.entries.len(), 2);
 
             // Reconnect + HelloAck flushes FIFO in exact order
             v.handle_bridge_event(
@@ -3858,7 +3885,7 @@ fn offline_send_queues_in_outbox_and_flushes_fifo_on_hello_ack(cx: &mut TestAppC
                 }),
                 cx,
             );
-            assert_eq!(v.chat_outbox.entries.len(), 1);
+            assert_eq!(v.outbox.chat_outbox.entries.len(), 1);
             for working in [true, false] {
                 let mut session = sess.clone();
                 session.working = working;
@@ -3867,7 +3894,7 @@ fn offline_send_queues_in_outbox_and_flushes_fifo_on_hello_ack(cx: &mut TestAppC
                     cx,
                 );
             }
-            assert!(v.chat_outbox.entries.is_empty());
+            assert!(v.outbox.chat_outbox.entries.is_empty());
         });
     })
     .unwrap();
@@ -3888,7 +3915,7 @@ fn new_antigravity_empty_history_can_send_and_render_first_reply(cx: &mut TestAp
     let session = make_session("new-agy", AgentKind::Antigravity, "New AGY", false);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.daemon_tx = Some(tx);
+            v.connection.daemon_tx = Some(tx);
             assert!(v.spawn_new_session(AgentKind::Antigravity, "/repo".into(), None, None, cx));
             assert!(matches!(
                 rx.try_recv(),
@@ -3918,9 +3945,12 @@ fn new_antigravity_empty_history_can_send_and_render_first_reply(cx: &mut TestAp
                 }),
                 cx,
             );
-            assert_eq!(v.selected_session.as_ref().unwrap().id, session.id);
-            assert!(v.messages.is_empty());
-            v.prompt_input.update(cx, |input, cx| {
+            assert_eq!(
+                v.selection.selected_session.as_ref().unwrap().id,
+                session.id
+            );
+            assert!(v.history.messages.is_empty());
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("Hello new AGY", window, cx);
                 input.focus(window, cx);
             });
@@ -3961,7 +3991,12 @@ fn new_antigravity_empty_history_can_send_and_render_first_reply(cx: &mut TestAp
                 }),
                 cx,
             );
-            assert!(v.messages.iter().any(|m| m.text == "First AGY reply"));
+            assert!(
+                v.history
+                    .messages
+                    .iter()
+                    .any(|m| m.text == "First AGY reply")
+            );
             assert!(
                 !v.notice
                     .as_deref()
@@ -3972,6 +4007,7 @@ fn new_antigravity_empty_history_can_send_and_render_first_reply(cx: &mut TestAp
         window.render_frame(cx);
         let reply_index = view
             .read(cx)
+            .history
             .messages
             .iter()
             .position(|m| m.id == "first-reply")
@@ -3993,8 +4029,8 @@ fn server_events_update_sessions_commands_search_and_interrupt(cx: &mut TestAppC
                 }),
                 cx,
             );
-            assert_eq!(v.sessions.len(), 1);
-            assert_eq!(v.selected_session.as_ref().unwrap().id, "ev1");
+            assert_eq!(v.connection.sessions.len(), 1);
+            assert_eq!(v.selection.selected_session.as_ref().unwrap().id, "ev1");
 
             v.handle_bridge_event(
                 UiBridgeEvent::Server(ServerEvent::SessionInterrupted {
@@ -4004,7 +4040,7 @@ fn server_events_update_sessions_commands_search_and_interrupt(cx: &mut TestAppC
                 }),
                 cx,
             );
-            assert!(!v.selected_session.as_ref().unwrap().working);
+            assert!(!v.selection.selected_session.as_ref().unwrap().working);
 
             v.handle_bridge_event(
                 UiBridgeEvent::Server(ServerEvent::Commands {
@@ -4027,7 +4063,7 @@ fn server_events_update_sessions_commands_search_and_interrupt(cx: &mut TestAppC
                     .any(|c| c.name == "deploy")
             );
 
-            v.remote_search_request_id = Some("search-1".into());
+            v.history.remote_search_request_id = Some("search-1".into());
             v.handle_bridge_event(
                 UiBridgeEvent::Server(ServerEvent::SearchResults {
                     request_id: "search-1".into(),
@@ -4042,9 +4078,9 @@ fn server_events_update_sessions_commands_search_and_interrupt(cx: &mut TestAppC
                 }),
                 cx,
             );
-            assert_eq!(v.remote_search_hits.len(), 1);
+            assert_eq!(v.history.remote_search_hits.len(), 1);
 
-            v.last_dispatched_prompt = Some(("local-9".into(), "retry me".into()));
+            v.selection.last_dispatched_prompt = Some(("local-9".into(), "retry me".into()));
             v.handle_bridge_event(
                 UiBridgeEvent::Server(ServerEvent::PromptStatus {
                     session_id: "ev1".into(),
@@ -4077,10 +4113,10 @@ fn load_older_history_sends_none_probe_and_clears_pending_on_select_or_tail(
     cx.update_window(handle, |_, _window, cx| {
         let s1 = make_session("p1", AgentKind::Claude, "Paged", false);
         view.update(cx, |v, cx| {
-            v.daemon_tx = Some(req_tx);
-            v.sessions = vec![s1.clone()];
+            v.connection.daemon_tx = Some(req_tx);
+            v.connection.sessions = vec![s1.clone()];
             let key = CacheKey::new("local", AgentKind::Claude, "p1");
-            v.chat_cache.put(
+            v.history.chat_cache.put(
                 key,
                 CachedSession {
                     source_path: s1.source_path.clone(),
@@ -4138,13 +4174,19 @@ fn load_older_history_sends_none_probe_and_clears_pending_on_select_or_tail(
                 cx,
             );
             assert_eq!(
-                v.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+                v.history
+                    .messages
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>(),
                 vec!["m-old", "m-new"]
             );
-            assert!(!v.pending_older_page_before.contains_key("p1"));
+            assert!(!v.history.pending_older_page_before.contains_key("p1"));
 
             // Stale pending_older_page_before is cleared by non-older tail History
-            v.pending_older_page_before.insert("p1".into(), 1000);
+            v.history
+                .pending_older_page_before
+                .insert("p1".into(), 1000);
             v.handle_bridge_event(
                 UiBridgeEvent::Server(ServerEvent::History {
                     session_id: "p1".into(),
@@ -4164,16 +4206,22 @@ fn load_older_history_sends_none_probe_and_clears_pending_on_select_or_tail(
                 }),
                 cx,
             );
-            assert!(!v.pending_older_page_before.contains_key("p1"));
+            assert!(!v.history.pending_older_page_before.contains_key("p1"));
             assert_eq!(
-                v.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+                v.history
+                    .messages
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>(),
                 vec!["m-tail"]
             );
 
             // Stale pending_older_page_before is also cleared on select_session
-            v.pending_older_page_before.insert("p1".into(), 1500);
+            v.history
+                .pending_older_page_before
+                .insert("p1".into(), 1500);
             v.select_session(s1, cx);
-            assert!(!v.pending_older_page_before.contains_key("p1"));
+            assert!(!v.history.pending_older_page_before.contains_key("p1"));
         });
     })
     .unwrap();
@@ -4249,9 +4297,9 @@ fn esc_modal_precedence_table_modal_over_palette_and_find_over_sidebar_inbox_ren
     cx.update_window(handle, |_, window, cx| {
         let s1 = make_session("esc1", AgentKind::Claude, "Alpha", false);
         view.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone()];
-            v.selected_session = Some(s1.clone());
-            v.messages = vec![ChatMessage {
+            v.connection.sessions = vec![s1.clone()];
+            v.selection.selected_session = Some(s1.clone());
+            v.history.messages = vec![ChatMessage {
                 id: "m1".into(),
                 role: MessageRole::Assistant,
                 text: "| A | B |\n| --- | --- |\n| 1 | 2 |".into(),
@@ -4260,7 +4308,7 @@ fn esc_modal_precedence_table_modal_over_palette_and_find_over_sidebar_inbox_ren
             // Stack Palette AND topmost table_modal simultaneously, with focus in palette_input
             v.open_palette(window, cx);
             v.expand_best_table(cx);
-            v.palette_input.update(cx, |input, cx| {
+            v.inputs.palette_input.update(cx, |input, cx| {
                 input.focus(window, cx);
             });
             cx.notify();
@@ -4478,13 +4526,13 @@ fn delete_and_archive_session_switch_transcript_cleanly_without_stale_leak(
     cx.update_window(handle, |_, window, cx| {
         let (tx, _rx) = mpsc::unbounded_channel();
         view.update(cx, |v, _| {
-            v.daemon_tx = Some(tx);
+            v.connection.daemon_tx = Some(tx);
         });
         let s1 = make_session("del1", AgentKind::Claude, "Alpha", false);
         let s2 = make_session("del2", AgentKind::Claude, "Beta", false);
         view.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone(), s2.clone()];
-            v.chat_cache.put(
+            v.connection.sessions = vec![s1.clone(), s2.clone()];
+            v.history.chat_cache.put(
                 CacheKey::new("local", AgentKind::Claude, "del1"),
                 CachedSession {
                     source_path: s1.source_path.clone(),
@@ -4497,7 +4545,7 @@ fn delete_and_archive_session_switch_transcript_cleanly_without_stale_leak(
                     ..Default::default()
                 },
             );
-            v.chat_cache.put(
+            v.history.chat_cache.put(
                 CacheKey::new("local", AgentKind::Claude, "del2"),
                 CachedSession {
                     source_path: s2.source_path.clone(),
@@ -4513,18 +4561,26 @@ fn delete_and_archive_session_switch_transcript_cleanly_without_stale_leak(
             v.select_session(s1.clone(), cx);
         });
         window.render_frame(cx);
-        assert_eq!(view.read(cx).messages[0].text, "Alpha secret transcript");
+        assert_eq!(
+            view.read(cx).history.messages[0].text,
+            "Alpha secret transcript"
+        );
 
         // DeleteSession (Ctrl+Shift+W) switches transcript cleanly to Beta (zero stale Alpha leak)
         window.press("ctrl-shift-w", cx);
         window.render_frame(cx);
         {
             let v = view.read(cx);
-            assert_eq!(v.selected_session.as_ref().unwrap().id, "del2");
-            assert_eq!(v.messages.len(), 1);
-            assert_eq!(v.messages[0].text, "Beta transcript");
+            assert_eq!(v.selection.selected_session.as_ref().unwrap().id, "del2");
+            assert_eq!(v.history.messages.len(), 1);
+            assert_eq!(v.history.messages[0].text, "Beta transcript");
             assert_eq!(
-                v.active_switch_token.as_ref().unwrap().key.session_id,
+                v.history
+                    .active_switch_token
+                    .as_ref()
+                    .unwrap()
+                    .key
+                    .session_id,
                 "del2"
             );
         }
@@ -4535,14 +4591,14 @@ fn delete_and_archive_session_switch_transcript_cleanly_without_stale_leak(
         {
             let v = view.read(cx);
             assert!(
-                v.selected_session.is_none(),
+                v.selection.selected_session.is_none(),
                 "Done removes the final active chat"
             );
             assert!(
-                v.messages.is_empty(),
+                v.history.messages.is_empty(),
                 "the final chat must not leave a stale transcript"
             );
-            assert!(v.active_switch_token.is_none());
+            assert!(v.history.active_switch_token.is_none());
             let key = v.session_key_for(&s2);
             assert!(
                 v.sidebar_state
@@ -4565,7 +4621,7 @@ fn multi_window_daemon_event_fanout_and_unread_pill_sync(cx: &mut TestAppContext
 
     cx.update_window(handle1, |_, _window, cx| {
         view1.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone(), s2.clone()];
+            v.connection.sessions = vec![s1.clone(), s2.clone()];
             v.select_session(s1.clone(), cx);
             v.sync_sessions_to_shared(cx);
             v.toggle_unread_only(cx);
@@ -4646,7 +4702,8 @@ fn multi_window_daemon_event_fanout_and_unread_pill_sync(cx: &mut TestAppContext
     cx.update_window(handle2, |_, _window, cx| {
         let v2 = view2.read(cx);
         assert_eq!(
-            v2.messages
+            v2.history
+                .messages
                 .iter()
                 .map(|m| m.text.as_str())
                 .collect::<Vec<_>>(),
@@ -4677,8 +4734,8 @@ fn inbox_prev_clamp_rename_guards_find_focus_and_update_error_sanitizer(cx: &mut
 
         // 1. InboxPrev (Alt+K) clamps out-of-range selected_row before decrementing
         view.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone(), s2.clone(), s3.clone()];
-            v.selected_session = Some(s1.clone());
+            v.connection.sessions = vec![s1.clone(), s2.clone(), s3.clone()];
+            v.selection.selected_session = Some(s1.clone());
             v.main_surface = MainSurface::Inbox;
             v.inbox_state.select_all_split();
             v.inbox_state.selected_row = 99;
@@ -4719,13 +4776,13 @@ fn inbox_prev_clamp_rename_guards_find_focus_and_update_error_sanitizer(cx: &mut
         view.update(cx, |v, cx| {
             v.inbox_state.rename = None;
             v.main_surface = MainSurface::Chat;
-            v.messages = vec![ChatMessage {
+            v.history.messages = vec![ChatMessage {
                 id: "m1".into(),
                 role: MessageRole::Assistant,
                 text: "Find this needle here".into(),
                 ..Default::default()
             }];
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("keep draft", window, cx);
                 input.focus(window, cx);
             });
@@ -4741,7 +4798,7 @@ fn inbox_prev_clamp_rename_guards_find_focus_and_update_error_sanitizer(cx: &mut
         assert_eq!(view.read(cx).chat_state.find_query, "needle");
         assert_eq!(view.read(cx).chat_state.find_matches, vec![0]);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "keep draft",
             "Ctrl+F typing must never leak into composer prompt_input"
         );
@@ -4920,9 +4977,14 @@ fn app_scoped_daemon_connection_survives_window1_close_guards_stale_disconnect_a
     cx.run_until_parked();
     cx.update_window(handle2, |_, _window, cx| {
         let v2 = view2.read(cx);
-        assert_eq!(v2.sessions.len(), 1);
-        assert_eq!(v2.sessions[0].id, "survive-1");
-        assert!(v2.daemon_tx.as_ref().is_some_and(|tx| !tx.is_closed()));
+        assert_eq!(v2.connection.sessions.len(), 1);
+        assert_eq!(v2.connection.sessions[0].id, "survive-1");
+        assert!(
+            v2.connection
+                .daemon_tx
+                .as_ref()
+                .is_some_and(|tx| !tx.is_closed())
+        );
     })
     .unwrap();
 
@@ -4933,6 +4995,7 @@ fn app_scoped_daemon_connection_survives_window1_close_guards_stale_disconnect_a
         assert!(
             view2
                 .read(cx)
+                .connection
                 .daemon_tx
                 .as_ref()
                 .is_some_and(|tx| tx.is_closed())
@@ -4947,9 +5010,11 @@ fn app_scoped_daemon_connection_survives_window1_close_guards_stale_disconnect_a
             "ReconnectSession must not falsely report refresh on a closed daemon_tx"
         );
         assert!(
-            v2.connection_status.starts_with("Connecting to host-b"),
+            v2.connection
+                .connection_status
+                .starts_with("Connecting to host-b"),
             "ReconnectSession must reconnect closed daemon_tx, got: {}",
-            v2.connection_status
+            v2.connection.connection_status
         );
     })
     .unwrap();
@@ -5007,14 +5072,14 @@ fn multi_window_structural_older_page_pagination_prepends_without_clobbering_tai
 
     cx.update_window(handle1, |_, _window, cx| {
         view1.update(cx, |v, cx| {
-            v.chat_cache.dir = Some(cache_dir.clone());
+            v.history.chat_cache.dir = Some(cache_dir.clone());
             v.select_session(sess_a.clone(), cx);
         });
     })
     .unwrap();
     cx.update_window(handle2, |_, _window, cx| {
         view2.update(cx, |v, cx| {
-            v.chat_cache.dir = Some(cache_dir.clone());
+            v.history.chat_cache.dir = Some(cache_dir.clone());
             v.select_session(sess_a.clone(), cx);
         });
     })
@@ -5100,13 +5165,17 @@ fn multi_window_structural_older_page_pagination_prepends_without_clobbering_tai
     for (label, handle, view) in [("Window 1", handle1, &view1), ("Window 2", handle2, &view2)] {
         cx.update_window(handle, |_, _window, cx| {
             let v = view.read(cx);
-            let ids: Vec<&str> = v.messages.iter().map(|m| m.id.as_str()).collect();
+            let ids: Vec<&str> = v.history.messages.iter().map(|m| m.id.as_str()).collect();
             assert_eq!(
                 ids,
                 vec!["msg-027", "msg-028", "msg-029", "msg-030"],
                 "{label} must preserve newest tail and prepend older page"
             );
-            let cached = v.chat_cache.get(&key_a).expect("cached tail present");
+            let cached = v
+                .history
+                .chat_cache
+                .get(&key_a)
+                .expect("cached tail present");
             assert_eq!(cached.oldest_offset, 10140);
             assert_eq!(cached.consumed_offset, 11700);
             assert_eq!(cached.probe_sha256.as_deref(), Some("b2ddfa98de80"));
@@ -5132,13 +5201,13 @@ fn multi_window_structural_older_page_pagination_prepends_without_clobbering_tai
     cx.update_window(handle1, |_, _window, cx| {
         view1.update(cx, |v, cx| {
             v.select_session(sess_b.clone(), cx);
-            v.messages = vec![ChatMessage {
+            v.history.messages = vec![ChatMessage {
                 id: "b-only".into(),
                 role: MessageRole::Assistant,
                 text: "Session B message".into(),
                 ..Default::default()
             }];
-            v.chat_cache.remove_memory(&key_a);
+            v.history.chat_cache.remove_memory(&key_a);
         });
     })
     .unwrap();
@@ -5184,22 +5253,24 @@ fn multi_window_structural_older_page_pagination_prepends_without_clobbering_tai
     // Window 1 stayed cleanly on Session B and did NOT cache truncated Session A
     cx.update_window(handle1, |_, _window, cx| {
         let v1 = view1.read(cx);
-        assert_eq!(v1.selected_session.as_ref().unwrap().id, "sess-b");
+        assert_eq!(v1.selection.selected_session.as_ref().unwrap().id, "sess-b");
         assert_eq!(
-            v1.messages
+            v1.history
+                .messages
                 .iter()
                 .map(|m| m.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["b-only"]
         );
-        assert!(v1.chat_cache.get(&key_a).is_none());
+        assert!(v1.history.chat_cache.get(&key_a).is_none());
     })
     .unwrap();
     // Window 2 now has all 6 messages
     cx.update_window(handle2, |_, _window, cx| {
         let v2 = view2.read(cx);
         assert_eq!(
-            v2.messages
+            v2.history
+                .messages
                 .iter()
                 .map(|m| m.id.as_str())
                 .collect::<Vec<_>>(),
@@ -5419,13 +5490,14 @@ fn partial_trailing_line_history_loads_cold_warm_and_truncated_reset(cx: &mut Te
 
     cx.update_window(handle, |_, _window, cx| {
         let v = view.read(cx);
-        let ids: Vec<&str> = v.messages.iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = v.history.messages.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(
             ids,
             vec!["u1", "a1"],
             "cold-open uncached session with partial trailing line must NOT be dropped"
         );
         let cached = v
+            .history
             .chat_cache
             .get(&key)
             .expect("cold-open must populate Tier-1 cache");
@@ -5483,13 +5555,17 @@ fn partial_trailing_line_history_loads_cold_warm_and_truncated_reset(cx: &mut Te
 
     cx.update_window(handle, |_, _window, cx| {
         let v = view.read(cx);
-        let ids: Vec<&str> = v.messages.iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = v.history.messages.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(
             ids,
             vec!["u1", "a1", "u2", "a2"],
             "warm-refresh with partial trailing line must update messages cleanly"
         );
-        let cached = v.chat_cache.get(&key).expect("cached session present");
+        let cached = v
+            .history
+            .chat_cache
+            .get(&key)
+            .expect("cached session present");
         assert_eq!(cached.consumed_offset, 500);
         assert_eq!(cached.file_size, 530);
     })
@@ -5556,13 +5632,17 @@ fn partial_trailing_line_history_loads_cold_warm_and_truncated_reset(cx: &mut Te
 
     cx.update_window(handle, |_, _window, cx| {
         let v = view.read(cx);
-        let ids: Vec<&str> = v.messages.iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = v.history.messages.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(
             ids,
             vec!["rot-1"],
             "truncated/rotated reset with partial trailing line must replace stale cache cleanly"
         );
-        let cached = v.chat_cache.get(&key).expect("cached session present");
+        let cached = v
+            .history
+            .chat_cache
+            .get(&key)
+            .expect("cached session present");
         assert_eq!(cached.oldest_offset, 0);
         assert_eq!(cached.consumed_offset, 119);
         assert_eq!(cached.file_size, 156);
@@ -5652,7 +5732,10 @@ fn rotated_truncated_fallback_during_pending_older_page_replaces_stale_transcrip
         cx.update_window(handle, |_, _window, cx| {
             view.update(cx, |v, cx| {
                 assert!(v.load_older_history(cx));
-                assert_eq!(v.pending_older_page_before.get("sess-rot"), Some(&11667));
+                assert_eq!(
+                    v.history.pending_older_page_before.get("sess-rot"),
+                    Some(&11667)
+                );
             });
         })
         .unwrap();
@@ -5697,19 +5780,19 @@ fn rotated_truncated_fallback_during_pending_older_page_replaces_stale_transcrip
         // Must REPLACE stale transcript cleanly (ZERO prepending ahead of old-029/old-030)
         cx.update_window(handle, |_, _window, cx| {
             let v = view.read(cx);
-            let ids: Vec<&str> = v.messages.iter().map(|m| m.id.as_str()).collect();
+            let ids: Vec<&str> = v.history.messages.iter().map(|m| m.id.as_str()).collect();
             assert_eq!(
                 ids,
                 vec![msg_id],
                 "variant={variant}: rotated fallback during pending load_older_history must replace stale transcript"
             );
-            let cached = v.chat_cache.get(&key).expect("cached session present");
+            let cached = v.history.chat_cache.get(&key).expect("cached session present");
             assert_eq!(cached.oldest_offset, 0);
             assert_eq!(cached.consumed_offset, latest);
             assert_eq!(cached.file_size, fsize);
             assert!(!cached.has_more);
             assert!(
-                !v.pending_older_page_before.contains_key("sess-rot"),
+                !v.history.pending_older_page_before.contains_key("sess-rot"),
                 "variant={variant}: local pending_older_page_before must be cleared"
             );
         })
@@ -5764,7 +5847,7 @@ fn non_contiguous_sibling_older_page_ignored_and_evicted_sibling_preserves_disk_
     for (handle, view) in [(handle1, &view1), (handle2, &view2), (handle3, &view3)] {
         cx.update_window(handle, |_, _window, cx| {
             view.update(cx, |v, cx| {
-                v.chat_cache.dir = Some(cache_dir.clone());
+                v.history.chat_cache.dir = Some(cache_dir.clone());
                 v.select_session(sess_a.clone(), cx);
             });
         })
@@ -5811,7 +5894,7 @@ fn non_contiguous_sibling_older_page_ignored_and_evicted_sibling_preserves_disk_
     // Window 3 switches to Session B and evicts Session A from memory cache.
     cx.update_window(handle1, |_, _window, cx| {
         view1.update(cx, |v, _| {
-            let mut cached = v.chat_cache.get(&key_a).cloned().unwrap();
+            let mut cached = v.history.chat_cache.get(&key_a).cloned().unwrap();
             cached.messages = vec![
                 ChatMessage {
                     id: "msg-027".into(),
@@ -5839,21 +5922,21 @@ fn non_contiguous_sibling_older_page_ignored_and_evicted_sibling_preserves_disk_
                 },
             ];
             cached.oldest_offset = 10140;
-            v.messages = cached.messages.clone();
-            v.chat_cache.put(key_a.clone(), cached);
+            v.history.messages = cached.messages.clone();
+            v.history.chat_cache.put(key_a.clone(), cached);
         });
     })
     .unwrap();
     cx.update_window(handle3, |_, _window, cx| {
         view3.update(cx, |v, cx| {
             v.select_session(sess_b.clone(), cx);
-            v.messages = vec![ChatMessage {
+            v.history.messages = vec![ChatMessage {
                 id: "b-only".into(),
                 role: MessageRole::Assistant,
                 text: "Session B".into(),
                 ..Default::default()
             }];
-            v.chat_cache.remove_memory(&key_a);
+            v.history.chat_cache.remove_memory(&key_a);
         });
     })
     .unwrap();
@@ -5902,14 +5985,14 @@ fn non_contiguous_sibling_older_page_ignored_and_evicted_sibling_preserves_disk_
     // Window 1 prepended [msg-025, msg-026] cleanly (oldest_offset = 9360)
     cx.update_window(handle1, |_, _window, cx| {
         let v1 = view1.read(cx);
-        let ids: Vec<&str> = v1.messages.iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = v1.history.messages.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(
             ids,
             vec![
                 "msg-025", "msg-026", "msg-027", "msg-028", "msg-029", "msg-030"
             ]
         );
-        let c1 = v1.chat_cache.get(&key_a).unwrap();
+        let c1 = v1.history.chat_cache.get(&key_a).unwrap();
         assert_eq!(c1.oldest_offset, 9360);
         assert_eq!(c1.consumed_offset, 11700);
     })
@@ -5918,13 +6001,13 @@ fn non_contiguous_sibling_older_page_ignored_and_evicted_sibling_preserves_disk_
     // Window 2 at shallower oldest_offset=10920 MUST ignore non-contiguous [9360..10140] (ZERO middle gap!)
     cx.update_window(handle2, |_, _window, cx| {
         let v2 = view2.read(cx);
-        let ids: Vec<&str> = v2.messages.iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = v2.history.messages.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(
             ids,
             vec!["msg-029", "msg-030"],
             "Window 2 must ignore non-contiguous older page and avoid creating an unreachable middle gap"
         );
-        let c2 = v2.chat_cache.get(&key_a).unwrap();
+        let c2 = v2.history.chat_cache.get(&key_a).unwrap();
         assert_eq!(c2.oldest_offset, 10920);
         assert_eq!(c2.consumed_offset, 11700);
     })
@@ -5933,10 +6016,10 @@ fn non_contiguous_sibling_older_page_ignored_and_evicted_sibling_preserves_disk_
     // Window 3 (evicted Session A from memory) ignored the older page via is_older_page_hint=true
     cx.update_window(handle3, |_, _window, cx| {
         let v3 = view3.read(cx);
-        assert_eq!(v3.selected_session.as_ref().unwrap().id, "sess-b");
-        let ids: Vec<&str> = v3.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(v3.selection.selected_session.as_ref().unwrap().id, "sess-b");
+        let ids: Vec<&str> = v3.history.messages.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["b-only"]);
-        assert!(v3.chat_cache.get(&key_a).is_none());
+        assert!(v3.history.chat_cache.get(&key_a).is_none());
     })
     .unwrap();
 
@@ -5988,14 +6071,14 @@ fn multi_window_hello_ack_flushes_shared_chat_outbox_exactly_once(cx: &mut TestA
     // Queue offline prompts from BOTH Window 1 and Window 2
     cx.update_window(handle1, |_, _window, cx| {
         view1.update(cx, |v, _| {
-            v.selected_session = Some(sess.clone());
+            v.selection.selected_session = Some(sess.clone());
             v.send_or_queue_prompt(&sess, "w1-local-0".into(), "Offline prompt 1".into());
         });
     })
     .unwrap();
     cx.update_window(handle2, |_, _window, cx| {
         view2.update(cx, |v, _| {
-            v.selected_session = Some(sess.clone());
+            v.selection.selected_session = Some(sess.clone());
             v.send_or_queue_prompt(&sess, "w2-local-0".into(), "Offline prompt 2".into());
             v.send_or_queue_prompt(&sess, "w2-local-1".into(), "Offline prompt 3".into());
         });
@@ -6103,8 +6186,8 @@ fn multi_window_hello_ack_flushes_shared_chat_outbox_exactly_once(cx: &mut TestA
     for (handle, view) in [(handle1, &view1), (handle2, &view2)] {
         cx.update_window(handle, |_, _window, cx| {
             let v = view.read(cx);
-            assert!(v.chat_outbox.entries.is_empty());
-            assert!(v.outbox_msg_map.is_empty());
+            assert!(v.outbox.chat_outbox.entries.is_empty());
+            assert!(v.outbox.outbox_msg_map.is_empty());
         })
         .unwrap();
     }
@@ -6121,8 +6204,8 @@ fn f2_and_palette_rename_in_collapsed_sidebar_with_focused_composer_and_overlays
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![sess.clone()];
-            v.selected_session = Some(sess.clone());
+            v.connection.sessions = vec![sess.clone()];
+            v.selection.selected_session = Some(sess.clone());
             v.sidebar_state.mode = SidebarMode::Collapsed;
             v.settings.sidebar_mode = SidebarMode::Collapsed;
             v.chat_state.find_open = true;
@@ -6132,7 +6215,7 @@ fn f2_and_palette_rename_in_collapsed_sidebar_with_focused_composer_and_overlays
                 preview: "q".into(),
                 full_text: "q".into(),
             });
-            v.prompt_input.update(cx, |inp, cx| {
+            v.inputs.prompt_input.update(cx, |inp, cx| {
                 inp.set_value("hello", window, cx);
                 inp.focus(window, cx);
             });
@@ -6152,7 +6235,7 @@ fn f2_and_palette_rename_in_collapsed_sidebar_with_focused_composer_and_overlays
         window.press("backspace", cx);
         window.render_frame(cx);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "hello",
             "Backspace during Collapsed-sidebar F2 rename must NOT edit prompt-input"
         );
@@ -6171,7 +6254,7 @@ fn f2_and_palette_rename_in_collapsed_sidebar_with_focused_composer_and_overlays
         window.render_frame(cx);
         assert!(view.read(cx).sidebar_state.rename.is_none());
         assert!(
-            view.read(cx).messages.is_empty(),
+            view.read(cx).history.messages.is_empty(),
             "Enter during Collapsed-sidebar F2 rename must NOT send prompt-input"
         );
         let key = view.read(cx).session_key_for(&sess);
@@ -6187,7 +6270,7 @@ fn f2_and_palette_rename_in_collapsed_sidebar_with_focused_composer_and_overlays
         view.update(cx, |v, cx| {
             v.sidebar_state.mode = SidebarMode::Hidden;
             v.settings.sidebar_mode = SidebarMode::Hidden;
-            v.prompt_input.update(cx, |inp, cx| {
+            v.inputs.prompt_input.update(cx, |inp, cx| {
                 inp.set_value("keepme", window, cx);
                 inp.focus(window, cx);
             });
@@ -6198,7 +6281,7 @@ fn f2_and_palette_rename_in_collapsed_sidebar_with_focused_composer_and_overlays
         window.press("ctrl-k", cx);
         window.render_frame(cx);
         view.update(cx, |v, cx| {
-            v.palette_input.update(cx, |inp, cx| {
+            v.inputs.palette_input.update(cx, |inp, cx| {
                 inp.set_value("rename session", window, cx);
                 inp.focus(window, cx);
             });
@@ -6213,10 +6296,10 @@ fn f2_and_palette_rename_in_collapsed_sidebar_with_focused_composer_and_overlays
         window.press("enter", cx);
         window.render_frame(cx);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "keepme"
         );
-        assert!(view.read(cx).messages.is_empty());
+        assert!(view.read(cx).history.messages.is_empty());
         assert_eq!(
             view.read(cx)
                 .sidebar_state
@@ -6239,8 +6322,8 @@ fn multi_window_workspace_create_waiting_and_unread_only_stay_synced(cx: &mut Te
 
     cx.update_window(handle1, |_, window, cx| {
         view1.update(cx, |v, cx| {
-            v.sessions = vec![sess.clone()];
-            v.selected_session = Some(sess.clone());
+            v.connection.sessions = vec![sess.clone()];
+            v.selection.selected_session = Some(sess.clone());
             v.sync_sessions_to_shared(cx);
             v.sync_workspace_to_shared(cx);
             cx.notify();
@@ -6280,7 +6363,7 @@ fn multi_window_workspace_create_waiting_and_unread_only_stay_synced(cx: &mut Te
             );
             let key = view2.read(cx).session_key_for(&sess);
             view2.update(cx, |v, cx| {
-                v.selected_session = Some(sess.clone());
+                v.selection.selected_session = Some(sess.clone());
                 v.toggle_active_favorite(cx);
             });
             window.render_frame(cx);
@@ -6376,7 +6459,7 @@ fn pending_attachments_cleared_on_select_session_and_clear_active_session_view(
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![sess_a.clone(), sess_b.clone()];
+            v.connection.sessions = vec![sess_a.clone(), sess_b.clone()];
             v.select_session(sess_a.clone(), cx);
             v.stage_dropped_paths(&[secret_png.clone()], window, cx);
             assert_eq!(v.chat_state.pending_attachments.len(), 1);
@@ -6417,7 +6500,7 @@ fn global_shortcuts_survive_unmounted_child_focus_transitions_and_inbox_buttons_
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![sess.clone()];
+            v.connection.sessions = vec![sess.clone()];
             v.select_session(sess.clone(), cx);
         });
         window.render_frame(cx);
@@ -6442,7 +6525,9 @@ fn global_shortcuts_survive_unmounted_child_focus_transitions_and_inbox_buttons_
 
         // 2. Focus prompt_input -> Ctrl+, (Settings) -> Ctrl+, (back to Chat) -> focus host_input -> Esc -> Ctrl+K
         view.update(cx, |v, cx| {
-            v.prompt_input.update(cx, |inp, cx| inp.focus(window, cx));
+            v.inputs
+                .prompt_input
+                .update(cx, |inp, cx| inp.focus(window, cx));
         });
         window.render_frame(cx);
         window.press("ctrl-,", cx);
@@ -6460,7 +6545,9 @@ fn global_shortcuts_survive_unmounted_child_focus_transitions_and_inbox_buttons_
         window.press("ctrl-,", cx);
         window.render_frame(cx);
         view.update(cx, |v, cx| {
-            v.host_input.update(cx, |inp, cx| inp.focus(window, cx));
+            v.inputs
+                .host_input
+                .update(cx, |inp, cx| inp.focus(window, cx));
         });
         window.render_frame(cx);
         window.press("ctrl-,", cx);
@@ -6546,9 +6633,9 @@ fn ctrl_slash_from_root_focuses_prompt_input_so_down_enter_and_tab_work(cx: &mut
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![sess.clone()];
+            v.connection.sessions = vec![sess.clone()];
             v.select_session(sess.clone(), cx);
-            window.focus(&v.root_focus_handle, cx);
+            window.focus(&v.focus.root_focus_handle, cx);
             cx.notify();
         });
         window.render_frame(cx);
@@ -6562,6 +6649,7 @@ fn ctrl_slash_from_root_focuses_prompt_input_so_down_enter_and_tab_work(cx: &mut
         );
         assert!(
             view.read(cx)
+                .inputs
                 .prompt_input
                 .read(cx)
                 .focus_handle(cx)
@@ -6591,17 +6679,19 @@ fn ctrl_slash_from_root_focuses_prompt_input_so_down_enter_and_tab_work(cx: &mut
         assert!(!view.read(cx).slash_picker_state.is_open());
         assert!(
             view.read(cx)
+                .inputs
                 .prompt_input
                 .read(cx)
                 .value()
                 .contains(&expected_second),
             "Enter must insert the selected slash command ({expected_second:?}), got {:?}",
-            view.read(cx).prompt_input.read(cx).value()
+            view.read(cx).inputs.prompt_input.read(cx).value()
         );
 
         // Also verify Ctrl+F -> Ctrl+/ -> Tab inserts the first command cleanly
         view.update(cx, |v, cx| {
-            v.prompt_input
+            v.inputs
+                .prompt_input
                 .update(cx, |inp, cx| inp.set_value("", window, cx));
         });
         window.render_frame(cx);
@@ -6626,12 +6716,13 @@ fn ctrl_slash_from_root_focuses_prompt_input_so_down_enter_and_tab_work(cx: &mut
         assert!(!view.read(cx).slash_picker_state.is_open());
         assert!(
             view.read(cx)
+                .inputs
                 .prompt_input
                 .read(cx)
                 .value()
                 .contains(&expected_first),
             "Tab after Ctrl+F -> Ctrl+/ must insert {expected_first:?}, got {:?}",
-            view.read(cx).prompt_input.read(cx).value()
+            view.read(cx).inputs.prompt_input.read(cx).value()
         );
     })
     .unwrap();
@@ -6647,15 +6738,15 @@ fn unmounted_button_focus_recovers_for_shortcuts_sidebar_settings_find_and_updat
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone(), s2.clone()];
+            v.connection.sessions = vec![s1.clone(), s2.clone()];
             v.select_session(s1.clone(), cx);
-            v.messages = vec![ChatMessage {
+            v.history.messages = vec![ChatMessage {
                 id: "m1".into(),
                 role: MessageRole::Assistant,
                 text: "alpha needle beta".into(),
                 ..Default::default()
             }];
-            window.focus(&v.root_focus_handle, cx);
+            window.focus(&v.focus.root_focus_handle, cx);
             cx.notify();
         });
         window.render_frame(cx);
@@ -6896,7 +6987,7 @@ fn inbox_modal_dismissal_and_palette_commands_restore_inbox_focus(cx: &mut TestA
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone(), s2.clone()];
+            v.connection.sessions = vec![s1.clone(), s2.clone()];
             v.select_session(s1.clone(), cx);
             let now = now_unix_ms();
             let k1 = v.session_key_for(&s1);
@@ -6906,7 +6997,7 @@ fn inbox_modal_dismissal_and_palette_commands_restore_inbox_focus(cx: &mut TestA
             v.sidebar_state.workspace_store.record_session_input(&k2, now);
             v.sidebar_state.workspace_store.toggle_session_unread(&k1, &s1);
             v.sidebar_state.workspace_store.toggle_session_unread(&k2, &s2);
-            window.focus(&v.root_focus_handle, cx);
+            window.focus(&v.focus.root_focus_handle, cx);
             cx.notify();
         });
         window.render_frame(cx);
@@ -7013,7 +7104,7 @@ fn inbox_modal_dismissal_and_palette_commands_restore_inbox_focus(cx: &mut TestA
         window.render_frame(cx);
         assert_eq!(view.read(cx).active_modal, ActiveModal::Palette);
         view.update(cx, |v, cx| {
-            v.palette_input
+            v.inputs.palette_input
                 .update(cx, |inp, cx| inp.set_value("Copy Chat ID", window, cx));
             v.palette_state.selected_index = 0;
             cx.notify();
@@ -7051,7 +7142,7 @@ fn inbox_modal_dismissal_and_palette_commands_restore_inbox_focus(cx: &mut TestA
         window.render_frame(cx);
         assert_eq!(view.read(cx).active_modal, ActiveModal::Palette);
         view.update(cx, |v, cx| {
-            v.palette_input.update(cx, |inp, cx| {
+            v.inputs.palette_input.update(cx, |inp, cx| {
                 inp.set_value("Toggle Unread-Only Filter", window, cx)
             });
             v.palette_state.selected_index = 0;
@@ -7085,9 +7176,9 @@ fn test_round4_find_bar_tab_focused_buttons_enter_and_space_no_double_fire(
     cx.update_window(handle, |_, window, cx| {
         let sess = make_session("s-find-btn", AgentKind::Claude, "Find Buttons", false);
         view.update(cx, |v, cx| {
-            v.sessions = vec![sess.clone()];
-            v.selected_session = Some(sess);
-            v.messages = vec![
+            v.connection.sessions = vec![sess.clone()];
+            v.selection.selected_session = Some(sess);
+            v.history.messages = vec![
                 ChatMessage {
                     id: "m0".into(),
                     role: MessageRole::Assistant,
@@ -7119,7 +7210,7 @@ fn test_round4_find_bar_tab_focused_buttons_enter_and_space_no_double_fire(
                     quoted_message_id: None,
                 },
             ];
-            window.focus(&v.root_focus_handle, cx);
+            window.focus(&v.focus.root_focus_handle, cx);
             cx.notify();
         });
         window.render_frame(cx);
@@ -7245,9 +7336,9 @@ fn test_round4_gfm_markdown_pipe_table_expand_click_focuses_modal_and_scrolls(
 
         let sess = make_session("s-gfm-table", AgentKind::Claude, "GFM Table", false);
         view.update(cx, |v, cx| {
-            v.sessions = vec![sess.clone()];
-            v.selected_session = Some(sess);
-            v.messages = vec![ChatMessage {
+            v.connection.sessions = vec![sess.clone()];
+            v.selection.selected_session = Some(sess);
+            v.history.messages = vec![ChatMessage {
                 id: "m-table".into(),
                 role: MessageRole::Assistant,
                 text: table_md.clone(),
@@ -7257,7 +7348,7 @@ fn test_round4_gfm_markdown_pipe_table_expand_click_focuses_modal_and_scrolls(
                 source_byte_range: None,
                 quoted_message_id: None,
             }];
-            window.focus(&v.root_focus_handle, cx);
+            window.focus(&v.focus.root_focus_handle, cx);
             cx.notify();
         });
         window.render_frame(cx);
@@ -7324,9 +7415,9 @@ fn test_round4_table_modal_dismissed_by_global_surface_and_modal_actions(cx: &mu
         let sample_table = crate::table_modal::parse_table(&sample_md).expect("valid sample table");
 
         view.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone(), s2.clone()];
-            v.selected_session = Some(s1);
-            window.focus(&v.root_focus_handle, cx);
+            v.connection.sessions = vec![s1.clone(), s2.clone()];
+            v.selection.selected_session = Some(s1);
+            window.focus(&v.focus.root_focus_handle, cx);
             cx.notify();
         });
         window.render_frame(cx);
@@ -7388,6 +7479,7 @@ fn test_round4_table_modal_dismissed_by_global_surface_and_modal_actions(cx: &mu
         assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
         assert!(
             view.read(cx)
+                .inputs
                 .prompt_input
                 .read(cx)
                 .focus_handle(cx)
@@ -7433,7 +7525,7 @@ fn test_round4_table_modal_dismissed_by_global_surface_and_modal_actions(cx: &mu
             "Ctrl+, (ToggleSettings) must close open Table Modal"
         );
         assert_eq!(view.read(cx).main_surface, MainSurface::Settings);
-        assert!(view.read(cx).settings_focus_handle.is_focused(window));
+        assert!(view.read(cx).focus.settings_focus_handle.is_focused(window));
         window.press("ctrl-k", cx);
         window.render_frame(cx);
         assert_eq!(
@@ -7456,6 +7548,7 @@ fn test_round4_table_modal_dismissed_by_global_surface_and_modal_actions(cx: &mu
         assert_eq!(view.read(cx).active_modal, ActiveModal::Shortcuts);
         assert!(
             view.read(cx)
+                .inputs
                 .shortcuts_search_input
                 .read(cx)
                 .focus_handle(cx)
@@ -7480,12 +7573,12 @@ fn test_round5_chat_overlays_do_not_block_inbox_nav_or_swallow_esc_on_inbox_and_
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone(), s2.clone(), s3.clone()];
+            v.connection.sessions = vec![s1.clone(), s2.clone(), s3.clone()];
             // Keep Favorites non-empty so the Inbox bar has a second visible split to cycle
             let k1 = v.session_key_for(&s1);
             v.sidebar_state.workspace_store.toggle_favorite(&k1);
-            v.selected_session = Some(s1.clone());
-            v.messages = vec![
+            v.selection.selected_session = Some(s1.clone());
+            v.history.messages = vec![
                 ChatMessage {
                     id: "m0".into(),
                     role: MessageRole::User,
@@ -7630,8 +7723,8 @@ fn test_round5_inbox_rename_cleared_on_leaving_inbox_does_not_poison_chat_or_set
                 .sidebar_state
                 .workspace_store
                 .create_workspace("Second WS", None);
-            v.sessions = vec![s1.clone(), s2.clone()];
-            v.selected_session = Some(s1.clone());
+            v.connection.sessions = vec![s1.clone(), s2.clone()];
+            v.selection.selected_session = Some(s1.clone());
             cx.notify();
         });
         window.render_frame(cx);
@@ -7778,8 +7871,8 @@ fn test_round5_collapsed_sidebar_top_pill_rename_does_not_hijack_inbox_or_settin
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone(), s2.clone()];
-            v.selected_session = Some(s1.clone());
+            v.connection.sessions = vec![s1.clone(), s2.clone()];
+            v.selection.selected_session = Some(s1.clone());
             v.sidebar_state.mode = SidebarMode::Collapsed;
             v.settings.sidebar_mode = SidebarMode::Collapsed;
             cx.notify();
@@ -7892,11 +7985,11 @@ fn test_round6_open_sidebar_rename_cleared_on_cross_surface_transitions(cx: &mut
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone(), s2.clone()];
+            v.connection.sessions = vec![s1.clone(), s2.clone()];
             // Keep Favorites non-empty so the Inbox bar has a second visible split to cycle
             let k1 = v.session_key_for(&s1);
             v.sidebar_state.workspace_store.toggle_favorite(&k1);
-            v.selected_session = Some(s1.clone());
+            v.selection.selected_session = Some(s1.clone());
             v.sidebar_state.mode = SidebarMode::Open;
             v.settings.sidebar_mode = SidebarMode::Open;
             cx.notify();
@@ -8026,10 +8119,10 @@ fn test_round6_sidebar_rename_cleared_on_session_switch_delete_and_visibility_ch
 
     cx.update_window(handle1, |_, window, cx| {
         let (tx, _rx) = mpsc::unbounded_channel();
-        view1.update(cx, |v, _| v.daemon_tx = Some(tx));
+        view1.update(cx, |v, _| v.connection.daemon_tx = Some(tx));
         view1.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone(), s2.clone()];
-            v.selected_session = Some(s1.clone());
+            v.connection.sessions = vec![s1.clone(), s2.clone()];
+            v.selection.selected_session = Some(s1.clone());
             v.sidebar_state.mode = SidebarMode::Collapsed;
             v.settings.sidebar_mode = SidebarMode::Collapsed;
             v.sync_sessions_to_shared(cx);
@@ -8050,6 +8143,7 @@ fn test_round6_sidebar_rename_cleared_on_session_switch_delete_and_visibility_ch
         assert_eq!(
             view1
                 .read(cx)
+                .selection
                 .selected_session
                 .as_ref()
                 .map(|s| s.id.as_str()),
@@ -8086,8 +8180,8 @@ fn test_round6_sidebar_rename_cleared_on_session_switch_delete_and_visibility_ch
 
         // --- Trace A2: Hidden sidebar F2 on sole session -> Ctrl+Shift+W deletes & clears rename ---
         view1.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone()];
-            v.selected_session = Some(s1.clone());
+            v.connection.sessions = vec![s1.clone()];
+            v.selection.selected_session = Some(s1.clone());
             v.sidebar_state.mode = SidebarMode::Hidden;
             v.settings.sidebar_mode = SidebarMode::Hidden;
             cx.notify();
@@ -8099,8 +8193,15 @@ fn test_round6_sidebar_rename_cleared_on_session_switch_delete_and_visibility_ch
 
         window.press("ctrl-shift-w", cx);
         window.render_frame(cx);
-        assert!(view1.read(cx).sessions.iter().all(|s| s.archived));
-        assert!(view1.read(cx).selected_session.is_none());
+        assert!(
+            view1
+                .read(cx)
+                .connection
+                .sessions
+                .iter()
+                .all(|s| s.archived)
+        );
+        assert!(view1.read(cx).selection.selected_session.is_none());
         assert!(
             view1.read(cx).sidebar_state.rename.is_none(),
             "Deleting sole session via Ctrl+Shift+W must clear top-pill rename"
@@ -8125,8 +8226,8 @@ fn test_round6_sidebar_rename_cleared_on_session_switch_delete_and_visibility_ch
                 .workspace_store
                 .create_workspace("Second WS", None);
             v.sidebar_state.workspace_store.move_to_inbox(&k1);
-            v.sessions = vec![s1.clone(), s2.clone()];
-            v.selected_session = Some(s1.clone());
+            v.connection.sessions = vec![s1.clone(), s2.clone()];
+            v.selection.selected_session = Some(s1.clone());
             v.sidebar_state.mode = SidebarMode::Open;
             v.settings.sidebar_mode = SidebarMode::Open;
             v.sidebar_state.workspace_store.toggle_group_for_session(
@@ -8222,6 +8323,7 @@ fn test_round6_sidebar_rename_cleared_on_session_switch_delete_and_visibility_ch
         assert_eq!(
             view1
                 .read(cx)
+                .selection
                 .selected_session
                 .as_ref()
                 .map(|s| s.id.as_str()),
@@ -8246,7 +8348,7 @@ fn test_round6_sidebar_rename_cleared_on_session_switch_delete_and_visibility_ch
     cx.update_window(handle2, |_, window, cx| {
         view2.update(cx, |v, cx| {
             v.sync_from_shared_store(cx);
-            v.sessions.clear();
+            v.connection.sessions.clear();
             v.sync_sessions_to_shared(cx);
             cx.notify();
         });
@@ -8283,8 +8385,8 @@ fn test_round6_inbox_rename_cleared_on_filter_split_changes_and_palette_empty_in
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone(), s2.clone(), s3.clone()];
-            v.selected_session = Some(s1.clone());
+            v.connection.sessions = vec![s1.clone(), s2.clone(), s3.clone()];
+            v.selection.selected_session = Some(s1.clone());
             cx.notify();
         });
         window.render_frame(cx);
@@ -8336,7 +8438,7 @@ fn test_round6_inbox_rename_cleared_on_filter_split_changes_and_palette_empty_in
         window.render_frame(cx);
         assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
         assert_eq!(
-            view.read(cx).selected_session.as_ref().map(|s| s.id.as_str()),
+            view.read(cx).selection.selected_session.as_ref().map(|s| s.id.as_str()),
             Some("r6-in1"),
             "Enter must open the selected Inbox row r6-in1"
         );
@@ -8388,7 +8490,7 @@ fn test_round6_inbox_rename_cleared_on_filter_split_changes_and_palette_empty_in
         window.render_frame(cx);
         assert_eq!(view.read(cx).active_modal, ActiveModal::Palette);
         view.update(cx, |v, cx| {
-            v.palette_input.update(cx, |inp, cx| {
+            v.inputs.palette_input.update(cx, |inp, cx| {
                 inp.set_value("rename session", window, cx);
             });
         });
@@ -8410,7 +8512,7 @@ fn test_round6_inbox_rename_cleared_on_filter_split_changes_and_palette_empty_in
         //    for s2 and visibly mounts top-pill rename for s2!
         view.update(cx, |v, cx| {
             v.open_palette_tab_context(k2.clone(), window, cx);
-            v.palette_input.update(cx, |inp, cx| {
+            v.inputs.palette_input.update(cx, |inp, cx| {
                 inp.set_value("rename session", window, cx);
             });
         });
@@ -8419,7 +8521,7 @@ fn test_round6_inbox_rename_cleared_on_filter_split_changes_and_palette_empty_in
         window.render_frame(cx);
         assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
         assert_eq!(
-            view.read(cx).selected_session.as_ref().map(|s| s.id.as_str()),
+            view.read(cx).selection.selected_session.as_ref().map(|s| s.id.as_str()),
             Some("r6-in2")
         );
         assert_eq!(
@@ -8442,7 +8544,7 @@ fn test_round6_inbox_rename_cleared_on_filter_split_changes_and_palette_empty_in
         assert_eq!(view.read(cx).inbox_state.selected_row, 0);
         view.update(cx, |v, cx| {
             v.open_palette_tab_context(k2.clone(), window, cx);
-            v.palette_input.update(cx, |inp, cx| {
+            v.inputs.palette_input.update(cx, |inp, cx| {
                 inp.set_value("rename session", window, cx);
             });
         });
@@ -8477,15 +8579,15 @@ fn f2_rename_selects_all_and_typing_replaces_name(cx: &mut TestAppContext) {
             (MainSurface::Inbox, SidebarMode::Open),
         ] {
             view.update(cx, |v, cx| {
-                v.sessions = vec![session.clone()];
-                v.selected_session = Some(session.clone());
+                v.connection.sessions = vec![session.clone()];
+                v.selection.selected_session = Some(session.clone());
                 v.main_surface = surface;
                 v.sidebar_state.mode = mode;
                 v.settings.sidebar_mode = mode;
                 v.sidebar_state.workspace_store = WorkspaceStore::new();
                 v.inbox_state.active_split = multibot_core::workspaces::InboxSplit::All;
                 v.inbox_state.selected_row = 0;
-                v.prompt_input.update(cx, |input, cx| {
+                v.inputs.prompt_input.update(cx, |input, cx| {
                     input.set_value("composer untouched", window, cx);
                     input.focus(window, cx);
                 });
@@ -8515,7 +8617,7 @@ fn f2_rename_selects_all_and_typing_replaces_name(cx: &mut TestAppContext) {
                             .unwrap()
                             .is_focused(window)
                     } else {
-                        v.root_focus_handle.is_focused(window)
+                        v.focus.root_focus_handle.is_focused(window)
                     },
                 )
             };
@@ -8538,7 +8640,7 @@ fn f2_rename_selects_all_and_typing_replaces_name(cx: &mut TestAppContext) {
                 "Typing after F2 must replace the entire name on {surface:?}/{mode:?}"
             );
             assert_eq!(
-                v.prompt_input.read(cx).value().as_ref(),
+                v.inputs.prompt_input.read(cx).value().as_ref(),
                 "composer untouched"
             );
             assert!(v.sidebar_state.rename.is_none());
@@ -8560,8 +8662,8 @@ fn test_round6b_focus_restored_to_sidebar_rename_after_modals_and_palette_expand
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone(), s2.clone()];
-            v.selected_session = Some(s1.clone());
+            v.connection.sessions = vec![s1.clone(), s2.clone()];
+            v.selection.selected_session = Some(s1.clone());
             v.sidebar_state.mode = SidebarMode::Open;
             v.settings.sidebar_mode = SidebarMode::Open;
             cx.notify();
@@ -8749,7 +8851,7 @@ fn test_round6b_focus_restored_to_sidebar_rename_after_modals_and_palette_expand
         window.render_frame(cx);
         assert_eq!(view.read(cx).active_modal, ActiveModal::Palette);
         view.update(cx, |v, cx| {
-            v.palette_input.update(cx, |inp, cx| {
+            v.inputs.palette_input.update(cx, |inp, cx| {
                 inp.set_value("Expand Sidebar", window, cx);
             });
         });
@@ -8797,9 +8899,9 @@ fn test_round6b_chat_find_and_browse_commands_clear_sidebar_rename_cleanly(
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone()];
-            v.selected_session = Some(s1.clone());
-            v.messages = vec![ChatMessage {
+            v.connection.sessions = vec![s1.clone()];
+            v.selection.selected_session = Some(s1.clone());
+            v.history.messages = vec![ChatMessage {
                 id: "m1".into(),
                 role: MessageRole::Assistant,
                 text: "Hello searchable chat message".into(),
@@ -8879,7 +8981,7 @@ fn test_round6b_chat_find_and_browse_commands_clear_sidebar_rename_cleanly(
 
         // 3. Focusing prompt_input directly (e.g., clicking composer) also clears rename cleanly
         view.update(cx, |v, cx| {
-            v.prompt_input.update(cx, |inp, cx| {
+            v.inputs.prompt_input.update(cx, |inp, cx| {
                 inp.focus(window, cx);
             });
         });
@@ -8911,13 +9013,13 @@ fn test_round7_minimal_inbox_hides_sidebar_and_restores_it_on_leave(cx: &mut Tes
                 .create_workspace("Work", None)
                 .expect("Work workspace must be created")
                 .id;
-            v.sessions = vec![s1.clone(), s2.clone()];
+            v.connection.sessions = vec![s1.clone(), s2.clone()];
             // One session in `Work` keeps that split non-empty (0-count splits are hidden)
             let k2 = v.session_key_for(&s2);
             v.sidebar_state
                 .workspace_store
                 .assign_session_workspace(&k2, &work_id);
-            v.selected_session = Some(s1.clone());
+            v.selection.selected_session = Some(s1.clone());
             v.sidebar_state.mode = SidebarMode::Open;
             v.settings.sidebar_mode = SidebarMode::Open;
             v.sync_sessions_to_shared(cx);
@@ -8985,6 +9087,7 @@ fn test_round7_minimal_inbox_hides_sidebar_and_restores_it_on_leave(cx: &mut Tes
         assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
         assert_eq!(
             view.read(cx)
+                .selection
                 .selected_session
                 .as_ref()
                 .map(|s| s.id.as_str()),
@@ -9040,9 +9143,9 @@ fn test_round7_chat_find_slash_picker_and_message_nav_restore_focus_after_modals
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![s1.clone()];
-            v.selected_session = Some(s1.clone());
-            v.messages = vec![
+            v.connection.sessions = vec![s1.clone()];
+            v.selection.selected_session = Some(s1.clone());
+            v.history.messages = vec![
                 ChatMessage {
                     id: "m0".into(),
                     role: MessageRole::Assistant,
@@ -9228,7 +9331,7 @@ fn test_round7_chat_find_slash_picker_and_message_nav_restore_focus_after_modals
         assert!(view.read(cx).slash_picker_state.is_open());
         assert!(
             view.read(cx)
-                .prompt_input
+                .inputs.prompt_input
                 .read(cx)
                 .focus_handle(cx)
                 .is_focused(window),
@@ -9252,14 +9355,14 @@ fn test_round7_chat_find_slash_picker_and_message_nav_restore_focus_after_modals
         window.press("c", cx);
         window.render_frame(cx);
         assert_eq!(view.read(cx).slash_picker_state.selected, sel_before_f1);
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "");
+        assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value().as_ref(), "");
         window.press("escape", cx);
         window.render_frame(cx);
         assert_eq!(view.read(cx).active_modal, ActiveModal::None);
         assert!(view.read(cx).slash_picker_state.is_open());
         assert!(
             view.read(cx)
-                .prompt_input
+                .inputs.prompt_input
                 .read(cx)
                 .focus_handle(cx)
                 .is_focused(window),
@@ -9270,7 +9373,7 @@ fn test_round7_chat_find_slash_picker_and_message_nav_restore_focus_after_modals
         window.press("p", cx);
         window.press("l", cx);
         window.render_frame(cx);
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "/pl");
+        assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value().as_ref(), "/pl");
         assert!(view.read(cx).slash_picker_state.is_open());
 
         // 2B-3: Table Modal -> Esc restores Slash Picker focus so Tab accepts cleanly
@@ -9286,7 +9389,7 @@ fn test_round7_chat_find_slash_picker_and_message_nav_restore_focus_after_modals
         assert!(view.read(cx).slash_picker_state.is_open());
         assert!(
             view.read(cx)
-                .prompt_input
+                .inputs.prompt_input
                 .read(cx)
                 .focus_handle(cx)
                 .is_focused(window)
@@ -9299,7 +9402,7 @@ fn test_round7_chat_find_slash_picker_and_message_nav_restore_focus_after_modals
         );
         assert!(
             view.read(cx)
-                .prompt_input
+                .inputs.prompt_input
                 .read(cx)
                 .value()
                 .starts_with("/plan"),
@@ -9311,7 +9414,7 @@ fn test_round7_chat_find_slash_picker_and_message_nav_restore_focus_after_modals
         //           survive Ctrl+K -> Esc and F1 -> Esc with full Up/Down/Enter
         // =================================================================
         view.update(cx, |v, cx| {
-            v.prompt_input.update(cx, |inp, cx| {
+            v.inputs.prompt_input.update(cx, |inp, cx| {
                 inp.set_value("", window, cx);
                 inp.focus(window, cx);
             });

@@ -131,7 +131,7 @@ impl MultibotView {
     }
 
     pub(crate) fn add_ssh_host_from_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let raw = self.host_input.read(cx).value().to_string();
+        let raw = self.inputs.host_input.read(cx).value().to_string();
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return;
@@ -160,7 +160,7 @@ impl MultibotView {
             let _ = self.settings.save();
             self.auto_connect_configured_hosts(cx);
         }
-        self.host_input.update(cx, |state, cx| {
+        self.inputs.host_input.update(cx, |state, cx| {
             state.set_value("", window, cx);
         });
         self.notice = Some("SSH host added.".into());
@@ -189,9 +189,9 @@ impl MultibotView {
             .into_iter()
             .map(|input| (input.host.to_string(), input.summary.clone()))
             .collect();
-        self.sidebar_state.workspace_store.reconcile_live_sessions(
-            live.iter().map(|(host, summary)| (host.as_str(), summary)),
-        );
+        self.sidebar_state
+            .workspace_store
+            .reconcile_live_sessions(live.iter().map(|(host, summary)| (host.as_str(), summary)));
 
         self.sync_settings_to_shared(cx);
         self.sync_workspace_to_shared(cx);
@@ -201,20 +201,24 @@ impl MultibotView {
         }
         self.persist_workspace_store_if_enabled();
 
-        self.notice = Some(if hosts_found == 0 && ws_found == 0 && fav_found == 0 && sessions_found == 0 {
-            "No SSH hosts, workspaces, sessions, or favorites found in %APPDATA%\\ZigShell (read-only check)."
+        self.notice = Some(
+            if hosts_found == 0 && ws_found == 0 && fav_found == 0 && sessions_found == 0 {
+                "No SSH hosts, workspaces, sessions, or favorites found in %APPDATA%\\ZigShell (read-only check)."
                 .into()
-        } else {
-            format!(
-                "Imported {hosts_added} host(s), {} workspace(s), {} session assignment(s), and {} favorite(s) from ZigShell (read-only).",
-                merge_stats.workspaces_added, merge_stats.sessions_assigned, merge_stats.favorites_added
-            )
-        });
+            } else {
+                format!(
+                    "Imported {hosts_added} host(s), {} workspace(s), {} session assignment(s), and {} favorite(s) from ZigShell (read-only).",
+                    merge_stats.workspaces_added,
+                    merge_stats.sessions_assigned,
+                    merge_stats.favorites_added
+                )
+            },
+        );
         cx.notify();
     }
 
     pub(crate) fn disconnect_host(&mut self, cx: &mut Context<Self>) {
-        if !self.host_statuses.is_empty() {
+        if !self.connection.host_statuses.is_empty() {
             let host = self.active_session_host().to_string();
             Self::disconnect_host_on_app(&host, cx);
             self.sync_from_shared_store(cx);
@@ -234,9 +238,9 @@ impl MultibotView {
             store.bump_revision();
             self.sync_from_shared_store(cx);
         } else {
-            self.daemon_tx = None;
-            self.connected_host = None;
-            self.connection_status = "Disconnected".into();
+            self.connection.daemon_tx = None;
+            self.connection.connected_host = None;
+            self.connection.connection_status = "Disconnected".into();
         }
         cx.notify();
     }
@@ -245,12 +249,10 @@ impl MultibotView {
         let mut discovered_col = v_flex().gap_2();
 
         if self.gpu_report.discovered.is_empty() {
-            discovered_col = discovered_col.child(
-                div()
-                    .text_xs()
-                    .text_color(theme::text_muted())
-                    .child("Windows DXGI GPU list appears here automatically when running on Windows."),
-            );
+            discovered_col =
+                discovered_col.child(div().text_xs().text_color(theme::text_muted()).child(
+                    "Windows DXGI GPU list appears here automatically when running on Windows.",
+                ));
         } else {
             for (idx, gpu) in self.gpu_report.discovered.iter().enumerate() {
                 let luid = gpu.luid.clone();
@@ -290,38 +292,74 @@ impl MultibotView {
         match self.settings_tab {
             SettingsTab::Account => {
                 let account = &cx.global::<crate::state::SharedAppStore>().account;
-                let mut card = v_flex().gap_3().p_4().rounded(RADIUS_BUBBLE)
-                    .bg(theme::bg_surface()).border_1().border_color(theme::border_subtle())
+                let mut card = v_flex()
+                    .gap_3()
+                    .p_4()
+                    .rounded(RADIUS_BUBBLE)
+                    .bg(theme::bg_surface())
+                    .border_1()
+                    .border_color(theme::border_subtle())
                     .child(div().text_sm().child("Multibot Account"))
-                    .child(div().id("account-status").text_xs()
-                        .text_color(theme::text_secondary()).child(account.status.clone()));
+                    .child(
+                        div()
+                            .id("account-status")
+                            .text_xs()
+                            .text_color(theme::text_secondary())
+                            .child(account.status.clone()),
+                    );
                 if let Some(email) = &account.email {
                     card = card
-                        .child(div().id("account-email").test_support().text_sm().child(format!("Signed in as {email}")))
-                        .child(Button::new("account-sync").label("Sync Deepgram Key Now").disabled(account.busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.start_account_job(crate::account::AccountJob::Sync, cx);
-                            })))
-                        .child(Button::new("account-sign-out").label("Sign out").disabled(account.busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.voice.cancel();
-                                this.start_account_job(crate::account::AccountJob::SignOut, cx);
-                            })));
+                        .child(
+                            div()
+                                .id("account-email")
+                                .test_support()
+                                .text_sm()
+                                .child(format!("Signed in as {email}")),
+                        )
+                        .child(
+                            Button::new("account-sync")
+                                .label("Sync Deepgram Key Now")
+                                .disabled(account.busy)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.start_account_job(crate::account::AccountJob::Sync, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("account-sign-out")
+                                .label("Sign out")
+                                .disabled(account.busy)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.voice.cancel();
+                                    this.start_account_job(crate::account::AccountJob::SignOut, cx);
+                                })),
+                        );
                 } else {
-                    card = card.child(Button::new("account-sign-in").label("Sign in to Multibot Account")
-                        .disabled(account.busy).on_click(cx.listener(|this, _, _, cx| {
-                            this.start_account_job(crate::account::AccountJob::SignIn, cx);
-                        })));
+                    card = card.child(
+                        Button::new("account-sign-in")
+                            .label("Sign in to Multibot Account")
+                            .disabled(account.busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.start_account_job(crate::account::AccountJob::SignIn, cx);
+                            })),
+                    );
                 }
                 content = content.child(card);
             }
             SettingsTab::Voice => {
                 let draft = multibot_core::voice::VoiceSettings {
-                    api_key: self.deepgram_key_input.read(cx).value().to_string(),
-                    language: self.deepgram_language_input.read(cx).value().to_string(),
+                    api_key: self.inputs.deepgram_key_input.read(cx).value().to_string(),
+                    language: self
+                        .inputs
+                        .deepgram_language_input
+                        .read(cx)
+                        .value()
+                        .to_string(),
                 };
                 let (_, source) = draft.resolved(
-                    cx.global::<crate::state::SharedAppStore>().account.deepgram_key.as_deref(),
+                    cx.global::<crate::state::SharedAppStore>()
+                        .account
+                        .deepgram_key
+                        .as_deref(),
                 );
                 let source_hint = source.map_or(
                     "No API key detected. Enter an override or set DEEPGRAM_API_KEY.",
@@ -333,18 +371,18 @@ impl MultibotView {
                     .child(div().text_xs().text_color(theme::text_secondary())
                         .child("Dictation sends audio to Deepgram. Ctrl+D or Ctrl+Shift+Space toggles the mic; Esc cancels."))
                     .child(div().text_xs().child("API key override (optional, stored only in Multibot)"))
-                    .child(Input::new(&self.deepgram_key_input).mask_toggle().id("deepgram-api-key"))
+                    .child(Input::new(&self.inputs.deepgram_key_input).mask_toggle().id("deepgram-api-key"))
                     .child(div().id("deepgram-key-source").text_xs().text_color(theme::text_secondary()).child(source_hint))
                     .child(div().text_xs().child("Language code"))
-                    .child(Input::new(&self.deepgram_language_input).id("deepgram-language"))
+                    .child(Input::new(&self.inputs.deepgram_language_input).id("deepgram-language"))
                     .child(div().text_xs().text_color(theme::text_secondary())
                         .child("Sign in under Account to sync your Deepgram key. Saving a new override also updates your account."))
                     .child(Button::new("save-deepgram-settings").label("Save dictation settings")
                         .disabled(cx.global::<crate::state::SharedAppStore>().account.busy)
                         .on_click(cx.listener(|this, _, _, cx| {
                             let config = multibot_core::voice::VoiceSettings {
-                                api_key: multibot_core::voice::normalize_api_key(this.deepgram_key_input.read(cx).value().as_str()),
-                                language: this.deepgram_language_input.read(cx).value().trim().to_owned(),
+                                api_key: multibot_core::voice::normalize_api_key(this.inputs.deepgram_key_input.read(cx).value().as_str()),
+                                language: this.inputs.deepgram_language_input.read(cx).value().trim().to_owned(),
                             };
                             if !config.api_key.is_empty() {
                                 if let Err(err) = config.validate() {
@@ -380,7 +418,7 @@ impl MultibotView {
             SettingsTab::Hosts => {
                 let mut hosts = v_flex().gap_3().p_4().rounded(RADIUS_BUBBLE)
                     .bg(theme::bg_surface()).border_1().border_color(theme::border_subtle())
-                    .child(div().text_xs().text_color(theme::text_secondary()).child(self.connection_status.clone()))
+                    .child(div().text_xs().text_color(theme::text_secondary()).child(self.connection.connection_status.clone()))
                     .child(h_flex().justify_between().items_center().gap_2().child("Local")
                         .child(Button::new("connect-local").small().label("Connect")
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -388,7 +426,7 @@ impl MultibotView {
                                     this.connect_to_target("localhost".into(), multibot_core::DaemonTarget::LocalBinary(bin), cx);
                                 } else { this.notice = Some("No local multibotd found. Add a remote SSH host below.".into()); cx.notify(); }
                             }))));
-                if self.settings.ssh_hosts.len() > 1 || self.host_statuses.len() > 1 {
+                if self.settings.ssh_hosts.len() > 1 || self.connection.host_statuses.len() > 1 {
                     hosts = hosts.child(
                         h_flex()
                             .gap_2()
@@ -414,10 +452,12 @@ impl MultibotView {
                 for (idx, host) in self.settings.ssh_hosts.iter().enumerate() {
                     let host = host.clone();
                     let snapshot = self
+                        .connection
                         .host_statuses
                         .iter()
                         .find(|s| s.host_label == host.name);
-                    let active = snapshot.is_some_and(|s| s.connected || s.status.starts_with("Connecting to "));
+                    let active = snapshot
+                        .is_some_and(|s| s.connected || s.status.starts_with("Connecting to "));
                     let status = snapshot
                         .map(|s| {
                             if s.connected {
@@ -467,7 +507,7 @@ impl MultibotView {
                             ),
                     );
                 }
-                if self.connected_host.is_some() {
+                if self.connection.connected_host.is_some() {
                     hosts = hosts.child(
                         Button::new("disconnect-host")
                             .small()
@@ -478,7 +518,7 @@ impl MultibotView {
                 content = content.child(hosts).child(v_flex().gap_3().p_4().rounded(RADIUS_BUBBLE)
                     .bg(theme::bg_surface()).border_1().border_color(theme::border_subtle())
                     .child(div().text_sm().child("Add a host"))
-                    .child(h_flex().gap_2().child(div().flex_1().min_w_0().child(Input::new(&self.host_input).id("host-input")))
+                    .child(h_flex().gap_2().child(div().flex_1().min_w_0().child(Input::new(&self.inputs.host_input).id("host-input")))
                         .child(Button::new("add-host").label("Add Host").on_click(cx.listener(|this, _, window, cx| this.add_ssh_host_from_input(window, cx)))))
                     .child(Button::new("import-zigshel").label("Import from ZigShell (read-only)")
                         .on_click(cx.listener(|this, _, _, cx| this.import_from_zigshel(cx))))
@@ -543,7 +583,7 @@ impl MultibotView {
                             .label("Manage workspaces…")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_palette(window, cx);
-                                this.palette_input.update(cx, |input, cx| {
+                                this.inputs.palette_input.update(cx, |input, cx| {
                                     input.set_value("workspace", window, cx)
                                 });
                             })),
@@ -567,7 +607,10 @@ impl MultibotView {
                                     .child(format!("Active GPU: {gpu}")),
                             )
                             .child(div().text_xs().text_color(theme::text_secondary()).child(
-                                format!("{} · {}", self.footprint_label, self.connection_status),
+                                format!(
+                                    "{} · {}",
+                                    self.footprint_label, self.connection.connection_status
+                                ),
                             ))
                             .child(
                                 Button::new("gpu-mode-auto")
@@ -676,7 +719,7 @@ impl MultibotView {
                     .selected(self.settings_tab == tab)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.settings_tab = tab;
-                        window.focus(&this.settings_focus_handle, cx);
+                        window.focus(&this.focus.settings_focus_handle, cx);
                         cx.notify();
                     })),
             );
@@ -712,7 +755,7 @@ impl MultibotView {
                     .border_1()
                     .border_color(theme::border_subtle())
                     .occlude()
-                    .focus_trap("settings-console", &self.settings_focus_handle)
+                    .focus_trap("settings-console", &self.focus.settings_focus_handle)
                     .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation()
                     })

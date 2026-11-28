@@ -141,28 +141,56 @@ mod windows {
                 })
         }
 
-        pub(crate) fn handle_browser_command(&self, host: &str, session: &str, binding_id: &str, request_id: u64, command: multibot_proto::BrowserCommand) {
+        pub(crate) fn handle_browser_command(
+            &self,
+            host: &str,
+            session: &str,
+            binding_id: &str,
+            request_id: u64,
+            command: multibot_proto::BrowserCommand,
+        ) {
             for tab in self.browser.tabs.values() {
-                let (Tab::Starting(_, browser) | Tab::Ready(_, browser)) = tab else { continue };
-                let Some((bound_host, bound_session, tx)) = &browser.bridge else { continue };
-                if bound_host != host || bound_session != session || browser.binding_id != binding_id { continue; }
+                let (Tab::Starting(_, browser) | Tab::Ready(_, browser)) = tab else {
+                    continue;
+                };
+                let Some((bound_host, bound_session, tx)) = &browser.bridge else {
+                    continue;
+                };
+                if bound_host != host
+                    || bound_session != session
+                    || browser.binding_id != binding_id
+                {
+                    continue;
+                }
                 let controller = browser.cdp.clone();
                 let tx = tx.clone();
                 let binding_id = binding_id.to_owned();
                 self.runtime.spawn(async move {
                     let response = controller.execute(command).await;
-                    let _ = tx.send(multibot_proto::ClientRequest::BrowserResult { request_id, binding_id, response });
+                    let _ = tx.send(multibot_proto::ClientRequest::BrowserResult {
+                        request_id,
+                        binding_id,
+                        response,
+                    });
                 });
                 return;
             }
         }
 
         pub(crate) fn rebind_browsers(&mut self, host: &str) {
-            let Some(tx) = self.tx_for_host(host).cloned() else { return };
+            let Some(tx) = self.tx_for_host(host).cloned() else {
+                return;
+            };
             for tab in self.browser.tabs.values_mut() {
-                let (Tab::Starting(_, browser) | Tab::Ready(_, browser)) = tab else { continue };
-                let Some((bound_host, session, _)) = &browser.bridge else { continue };
-                if bound_host == host { browser.bind(host.to_owned(), session.clone(), tx.clone()); }
+                let (Tab::Starting(_, browser) | Tab::Ready(_, browser)) = tab else {
+                    continue;
+                };
+                let Some((bound_host, session, _)) = &browser.bridge else {
+                    continue;
+                };
+                if bound_host == host {
+                    browser.bind(host.to_owned(), session.clone(), tx.clone());
+                }
             }
         }
 
@@ -171,7 +199,7 @@ mod windows {
                 && self.active_modal == ActiveModal::None
                 && !self.table_modal_state.is_open()
                 && !self.computer.is_open())
-            .then(|| self.selected_session.as_ref())
+            .then(|| self.selection.selected_session.as_ref())
             .flatten()
             .map(|session| self.session_key_for(session))
         }
@@ -351,7 +379,12 @@ mod windows {
                                     }),
                                     _ => {
                                         native::focus(parent);
-                                        entity.read(cx).root_focus_handle.clone().focus(window, cx);
+                                        entity
+                                            .read(cx)
+                                            .focus
+                                            .root_focus_handle
+                                            .clone()
+                                            .focus(window, cx);
                                         if let Ok(key) = Keystroke::parse(chord) {
                                             window.dispatch_keystroke(key, cx);
                                         }
@@ -388,7 +421,7 @@ mod windows {
                     return;
                 }
             };
-            if let Some(session) = &self.selected_session {
+            if let Some(session) = &self.selection.selected_session {
                 let host = self.active_session_host().to_owned();
                 if let Some(tx) = self.tx_for_host(&host) {
                     browser.bind(host, session.id.clone(), tx.clone());
@@ -643,7 +676,15 @@ pub(crate) use windows::DesktopBrowserPane;
 
 #[cfg(not(windows))]
 impl MultibotView {
-    pub(crate) fn handle_browser_command(&self, _host: &str, _session: &str, _binding_id: &str, _request_id: u64, _command: multibot_proto::BrowserCommand) {}
+    pub(crate) fn handle_browser_command(
+        &self,
+        _host: &str,
+        _session: &str,
+        _binding_id: &str,
+        _request_id: u64,
+        _command: multibot_proto::BrowserCommand,
+    ) {
+    }
     pub(crate) fn rebind_browsers(&mut self, _host: &str) {}
 
     pub(crate) fn toggle_browser_pane(&mut self, _window: &mut Window, cx: &mut Context<Self>) {

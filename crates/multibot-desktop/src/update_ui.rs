@@ -62,7 +62,9 @@ impl UpdateUiState {
             let changed_version = self
                 .last_release
                 .as_ref()
-                .map(|prev| Self::normalize_version(&prev.version) != Self::normalize_version(&info.version))
+                .map(|prev| {
+                    Self::normalize_version(&prev.version) != Self::normalize_version(&info.version)
+                })
                 .unwrap_or(true);
             if changed_version {
                 self.notes_expanded = false;
@@ -178,7 +180,10 @@ impl UpdateUiState {
     }
 
     /// Overflow-safe download progress calculation returning `(0.0..=1.0, 0..=100)`.
-    pub(crate) fn download_progress(bytes_done: u64, bytes_total: Option<u64>) -> Option<(f32, u8)> {
+    pub(crate) fn download_progress(
+        bytes_done: u64,
+        bytes_total: Option<u64>,
+    ) -> Option<(f32, u8)> {
         let total = bytes_total.filter(|&t| t > 0)?;
         let clamped = bytes_done.min(total);
         let frac = (clamped as f64 / total as f64).clamp(0.0, 1.0) as f32;
@@ -271,10 +276,7 @@ impl UpdateUiState {
                 "Checking package integrity".to_string(),
             ],
             UpdateState::Error { message, retryable } => {
-                let mut out = vec![
-                    "Update failed".to_string(),
-                    Self::error_detail(message),
-                ];
+                let mut out = vec!["Update failed".to_string(), Self::error_detail(message)];
                 if *retryable {
                     out.push("Retry".to_string());
                 }
@@ -393,7 +395,7 @@ impl MultibotView {
     }
 
     pub(crate) fn trigger_update_check(&mut self, cx: &mut Context<Self>) {
-        if self.update_in_flight
+        if self.updater.update_in_flight
             || matches!(
                 self.update_ui.state,
                 UpdateState::Checking
@@ -750,37 +752,32 @@ impl MultibotView {
             }
             UpdateState::Verifying { version } | UpdateState::Applying { version } => {
                 let applying = matches!(self.update_ui.state, UpdateState::Applying { .. });
-                let card = v_flex()
-                    .id("update-card")
-                    .test_support()
-                    .w_full()
-                    .px_3()
-                    .py_2p5()
-                    .gap_1()
-                    .rounded(RADIUS_ROW)
-                    .bg(theme::bg_surface())
-                    .border_1()
-                    .border_color(theme::border_subtle())
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme::text_primary())
-                            .child(if applying {
+                let card =
+                    v_flex()
+                        .id("update-card")
+                        .test_support()
+                        .w_full()
+                        .px_3()
+                        .py_2p5()
+                        .gap_1()
+                        .rounded(RADIUS_ROW)
+                        .bg(theme::bg_surface())
+                        .border_1()
+                        .border_color(theme::border_subtle())
+                        .child(div().text_xs().text_color(theme::text_primary()).child(
+                            if applying {
                                 "Installing & restarting...".to_string()
                             } else {
                                 UpdateUiState::verifying_headline(version)
-                            }),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme::text_muted())
-                            .child(if applying {
+                            },
+                        ))
+                        .child(div().text_xs().text_color(theme::text_muted()).child(
+                            if applying {
                                 "Multibot will reopen automatically"
                             } else {
                                 "Checking package integrity"
-                            }),
-                    );
+                            },
+                        ));
                 Some(card.into_any_element())
             }
             UpdateState::Error { message, retryable } => {
@@ -963,7 +960,9 @@ mod tests {
         }
     }
 
-    fn open_test_view(cx: &mut TestAppContext) -> (gpui_kit::AnyWindowHandle, Entity<MultibotView>) {
+    fn open_test_view(
+        cx: &mut TestAppContext,
+    ) -> (gpui_kit::AnyWindowHandle, Entity<MultibotView>) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::theme::apply_multibot_dark_theme(cx);
@@ -1075,7 +1074,10 @@ mod tests {
             UpdateState::Verifying {
                 version: "0.1.5".into(),
             },
-            UpdateState::ReadyToRestart(sample_staged("0.1.5", vec!["Note 1", "Note 2", "Note 3", "Note 4"])),
+            UpdateState::ReadyToRestart(sample_staged(
+                "0.1.5",
+                vec!["Note 1", "Note 2", "Note 3", "Note 4"],
+            )),
             UpdateState::Applying {
                 version: "0.1.5".into(),
             },
@@ -1139,7 +1141,10 @@ mod tests {
         ui.set_update_state(UpdateState::UpToDate);
         assert!(!ui.is_card_visible(SidebarMode::Open, true, None));
 
-        ui.set_update_state(UpdateState::Available(sample_release("0.1.5", vec!["Fast"])));
+        ui.set_update_state(UpdateState::Available(sample_release(
+            "0.1.5",
+            vec!["Fast"],
+        )));
         assert!(ui.is_card_visible(SidebarMode::Open, true, None));
         assert!(!ui.is_card_visible(SidebarMode::Collapsed, true, None));
         assert!(!ui.is_card_visible(SidebarMode::Hidden, true, None));
@@ -1150,7 +1155,10 @@ mod tests {
         assert!(!ui.is_card_visible(SidebarMode::Open, true, Some("0.1.6")));
         assert!(ui.is_card_visible(SidebarMode::Open, true, Some("0.1.4")));
 
-        ui.set_update_state(UpdateState::Available(sample_release("0.1.6", vec!["Newer"])));
+        ui.set_update_state(UpdateState::Available(sample_release(
+            "0.1.6",
+            vec!["Newer"],
+        )));
         assert!(ui.is_card_visible(SidebarMode::Open, true, Some("0.1.5")));
 
         // Downloading / Verifying stay visible when sidebar is Open.
@@ -1207,7 +1215,10 @@ mod tests {
     fn download_progress_clamps_and_handles_edge_cases() {
         assert_eq!(UpdateUiState::download_progress(0, None), None);
         assert_eq!(UpdateUiState::download_progress(50, Some(0)), None);
-        assert_eq!(UpdateUiState::download_progress(0, Some(100)), Some((0.0, 0)));
+        assert_eq!(
+            UpdateUiState::download_progress(0, Some(100)),
+            Some((0.0, 0))
+        );
         assert_eq!(
             UpdateUiState::download_progress(50, Some(100)),
             Some((0.5, 50))
@@ -1227,25 +1238,40 @@ mod tests {
     fn palette_commands_reflect_every_update_state() {
         let mut ui = UpdateUiState::default();
         assert_eq!(ui.palette_entries("0.1.0").len(), 4);
-        assert_eq!(ui.palette_entries("0.1.0")[1].label, "Update: Up to date (v0.1.0)");
+        assert_eq!(
+            ui.palette_entries("0.1.0")[1].label,
+            "Update: Up to date (v0.1.0)"
+        );
 
         ui.set_update_state(UpdateState::Available(sample_release("0.2.0", vec![])));
-        assert_eq!(ui.palette_entries("0.1.0")[1].label, "Update: Download & Relaunch");
+        assert_eq!(
+            ui.palette_entries("0.1.0")[1].label,
+            "Update: Download & Relaunch"
+        );
 
         ui.set_update_state(UpdateState::ReadyToRestart(sample_staged("0.2.0", vec![])));
-        assert_eq!(ui.palette_entries("0.1.0")[1].label, "Update: Relaunch to v0.2.0");
+        assert_eq!(
+            ui.palette_entries("0.1.0")[1].label,
+            "Update: Relaunch to v0.2.0"
+        );
 
         ui.set_update_state(UpdateState::Downloading {
             version: "0.2.0".into(),
             bytes_done: 75,
             bytes_total: Some(100),
         });
-        assert_eq!(ui.palette_entries("0.1.0")[1].label, "Update: Downloading v0.2.0 (75%)");
+        assert_eq!(
+            ui.palette_entries("0.1.0")[1].label,
+            "Update: Downloading v0.2.0 (75%)"
+        );
 
         ui.set_update_state(UpdateState::Verifying {
             version: "0.2.0".into(),
         });
-        assert_eq!(ui.palette_entries("0.1.0")[1].label, "Update: Verifying v0.2.0");
+        assert_eq!(
+            ui.palette_entries("0.1.0")[1].label,
+            "Update: Verifying v0.2.0"
+        );
 
         ui.set_update_state(UpdateState::Error {
             message: "Network error".into(),
@@ -1637,7 +1663,10 @@ mod tests {
             ],
         );
         ui.set_update_state(UpdateState::ReadyToRestart(all_bad));
-        assert!(ui.visible_notes(&["Update takes 5 seconds".into()]).is_empty());
+        assert!(
+            ui.visible_notes(&["Update takes 5 seconds".into()])
+                .is_empty()
+        );
         assert!(
             UpdateUiState::safe_notes(&[
                 "\u{0085}Leading C1".into(),
@@ -1717,7 +1746,7 @@ mod tests {
             // Downloading + update_in_flight = true -> trigger_update_check must be a no-op
             view.update(cx, |v, cx| {
                 v.settings.sidebar_mode = SidebarMode::Open;
-                v.update_in_flight = true;
+                v.updater.update_in_flight = true;
                 v.update_ui.pending_action = None;
                 v.set_update_state(
                     UpdateState::Downloading {
@@ -1738,7 +1767,10 @@ mod tests {
             assert!(
                 matches!(
                     view.read(cx).update_ui.state,
-                    UpdateState::Downloading { bytes_done: 512, .. }
+                    UpdateState::Downloading {
+                        bytes_done: 512,
+                        ..
+                    }
                 ),
                 "trigger_update_check must NOT overwrite Downloading state"
             );
@@ -1763,7 +1795,7 @@ mod tests {
                 },
             ] {
                 view.update(cx, |v, cx| {
-                    v.update_in_flight = false;
+                    v.updater.update_in_flight = false;
                     v.update_ui.pending_action = None;
                     v.update_ui.state = active_state.clone();
                     v.trigger_update_check(cx);

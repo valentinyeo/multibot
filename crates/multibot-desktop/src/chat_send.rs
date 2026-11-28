@@ -25,7 +25,7 @@ impl MultibotView {
         let Some(failed) = self.chat_state.failed_sends.get(msg_id).cloned() else {
             return false;
         };
-        let Some(session) = self.selected_session.clone() else {
+        let Some(session) = self.selection.selected_session.clone() else {
             return false;
         };
         let key = self.session_key_for(&session);
@@ -69,7 +69,7 @@ impl MultibotView {
         quoted_message_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.selected_session.clone() else {
+        let Some(session) = self.selection.selected_session.clone() else {
             self.notice = Some("Select a session first.".into());
             cx.notify();
             return;
@@ -99,13 +99,14 @@ impl MultibotView {
         }
         let is_selected = self.active_session_host() == host
             && self
+                .selection
                 .selected_session
                 .as_ref()
                 .is_some_and(|s| s.id == session.id && s.agent == session.agent);
-        let msg_id = format!("local-msg-{}", self.messages.len());
+        let msg_id = format!("local-msg-{}", self.history.messages.len());
         if is_selected {
             self.follow_chat_from_composer(cx);
-            self.messages.push(ChatMessage {
+            self.history.messages.push(ChatMessage {
                 id: msg_id.clone(),
                 role: MessageRole::User,
                 text: text.clone(),
@@ -151,16 +152,18 @@ impl MultibotView {
 
     pub(crate) fn track_queued_prompt(&mut self, session_id: &str, message_id: &str, status: &str) {
         let Some(session) = self
+            .selection
             .selected_session
             .as_ref()
             .filter(|s| s.id == session_id)
             .or_else(|| {
-                self.host_sessions
+                self.connection
+                    .host_sessions
                     .iter()
                     .find(|(h, s)| h == self.active_session_host() && s.id == session_id)
                     .map(|(_, s)| s)
             })
-            .or_else(|| self.sessions.iter().find(|s| s.id == session_id))
+            .or_else(|| self.connection.sessions.iter().find(|s| s.id == session_id))
         else {
             return;
         };
@@ -186,7 +189,12 @@ impl MultibotView {
             .chat_state
             .pending_harness_switch
             .as_ref()
-            .is_some_and(|id| self.selected_session.as_ref().is_some_and(|s| &s.id == id))
+            .is_some_and(|id| {
+                self.selection
+                    .selected_session
+                    .as_ref()
+                    .is_some_and(|s| &s.id == id)
+            })
         {
             self.notice = Some("Wait for the provider / harness switch to finish.".into());
             cx.notify();
@@ -210,7 +218,7 @@ impl MultibotView {
         if trimmed.is_empty() {
             return;
         }
-        let Some(session) = self.selected_session.clone() else {
+        let Some(session) = self.selection.selected_session.clone() else {
             self.notice = Some("Select a session first.".into());
             cx.notify();
             return;
@@ -218,7 +226,8 @@ impl MultibotView {
 
         let key = self.session_key_for(&session);
         if session.agent == AgentKind::Codex && matches!(trimmed.as_str(), "/exit" | "/quit") {
-            self.prompt_input
+            self.inputs
+                .prompt_input
                 .update(cx, |state, cx| state.set_value("", window, cx));
             self.slash_picker_state.close();
             self.dissolve_session_key(&key, cx);
@@ -243,7 +252,7 @@ impl MultibotView {
             .filter(|s| !s.is_empty())
         {
             let key = self.session_key_for(&session);
-            self.prompt_input.update(cx, |state, cx| {
+            self.inputs.prompt_input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
             });
             self.slash_picker_state.close();
@@ -255,7 +264,7 @@ impl MultibotView {
         let payload = compose_quoted_reply(quote.as_ref().map(|q| q.full_text.as_str()), &trimmed);
         let quoted_id = quote.as_ref().map(|q| q.message_id.clone());
 
-        self.prompt_input.update(cx, |state, cx| {
+        self.inputs.prompt_input.update(cx, |state, cx| {
             state.set_value("", window, cx);
         });
         self.slash_picker_state.close();
@@ -365,16 +374,17 @@ impl MultibotView {
     ) {
         self.notice = Some(err_msg);
         let same_session = self
+            .selection
             .selected_session
             .as_ref()
             .is_some_and(|s| s.id == target_session.id && s.agent == target_session.agent);
-        let prompt_empty = self.prompt_input.read(cx).value().trim().is_empty();
+        let prompt_empty = self.inputs.prompt_input.read(cx).value().trim().is_empty();
         if same_session && prompt_empty && self.chat_state.pending_attachments.is_empty() {
             self.chat_state.pending_attachments = staged;
             if self.chat_state.reply_quote.is_none() {
                 self.chat_state.reply_quote = quote;
             }
-            self.prompt_input.update(cx, |state, cx| {
+            self.inputs.prompt_input.update(cx, |state, cx| {
                 state.select_all(window, cx);
                 state.replace(raw_prompt, window, cx);
             });

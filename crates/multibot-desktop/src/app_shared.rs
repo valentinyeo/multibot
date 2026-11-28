@@ -5,9 +5,9 @@ impl MultibotView {
     /// Loads the shared App-scoped `ChatOutbox` from disk ONCE so `Ctrl+N` sibling windows share
     /// the same queue without reloading or double-flushing entries on `HelloAck`.
     pub(crate) fn enable_disk_persistence(&mut self) {
-        self.chat_cache.dir = Some(MultibotSettings::chat_cache_dir());
-        self.persist_outbox_to_disk = true;
-        if let Ok(mut shared) = self.shared_chat_outbox.lock() {
+        self.history.chat_cache.dir = Some(MultibotSettings::chat_cache_dir());
+        self.outbox.persist_outbox_to_disk = true;
+        if let Ok(mut shared) = self.outbox.shared_chat_outbox.lock() {
             if !shared.loaded_from_disk {
                 let disk_outbox = ChatOutbox::load();
                 for entry in disk_outbox.entries {
@@ -16,7 +16,7 @@ impl MultibotView {
                 shared.loaded_from_disk = true;
             }
             shared.persist_to_disk = true;
-            self.chat_outbox = shared.outbox.clone();
+            self.outbox.chat_outbox = shared.outbox.clone();
         }
     }
 
@@ -40,7 +40,7 @@ impl MultibotView {
                 store.settings = self.settings.clone();
                 store.bump_revision()
             };
-            self.last_synced_revision = rev;
+            self.sync.last_synced_revision = rev;
         }
     }
 
@@ -48,9 +48,10 @@ impl MultibotView {
         if cx.has_global::<SharedAppStore>() {
             let rev = {
                 let store = cx.global_mut::<SharedAppStore>();
-                if !store.host_connections.is_empty() && !self.host_statuses.is_empty() {
+                if !store.host_connections.is_empty() && !self.connection.host_statuses.is_empty() {
                     for (host, entry) in &mut store.host_connections {
                         entry.sessions = self
+                            .connection
                             .host_sessions
                             .iter()
                             .filter(|(h, _)| h == host)
@@ -59,21 +60,21 @@ impl MultibotView {
                     }
                     store.rebuild_merged_sessions();
                     store.refresh_connection_summary();
-                    self.sessions = store.sessions.clone();
-                    self.host_statuses = store.host_status_snapshots();
-                    self.connection_status = store.connection_status.clone();
+                    self.connection.sessions = store.sessions.clone();
+                    self.connection.host_statuses = store.host_status_snapshots();
+                    self.connection.connection_status = store.connection_status.clone();
                     store.bump_revision()
                 } else {
-                    store.sessions = self.sessions.clone();
-                    store.connected_host = self.connected_host.clone();
-                    store.connection_status = self.connection_status.clone();
-                    store.daemon_tx = self.daemon_tx.clone();
-                    store.daemon_version = self.daemon_version.clone();
-                    store.daemon_binary_hash = self.daemon_binary_hash.clone();
+                    store.sessions = self.connection.sessions.clone();
+                    store.connected_host = self.connection.connected_host.clone();
+                    store.connection_status = self.connection.connection_status.clone();
+                    store.daemon_tx = self.connection.daemon_tx.clone();
+                    store.daemon_version = self.connection.daemon_version.clone();
+                    store.daemon_binary_hash = self.connection.daemon_binary_hash.clone();
                     store.bump_revision()
                 }
             };
-            self.last_synced_revision = rev;
+            self.sync.last_synced_revision = rev;
         }
     }
 
@@ -86,7 +87,7 @@ impl MultibotView {
                 store.unread_only = self.sidebar_state.unread_only;
                 store.bump_revision()
             };
-            self.last_synced_revision = rev;
+            self.sync.last_synced_revision = rev;
             SharedAppStore::schedule_reminder_timer(cx);
         }
     }
@@ -97,10 +98,10 @@ impl MultibotView {
                 let store = cx.global_mut::<SharedAppStore>();
                 store.update_state = self.update_ui.state.clone();
                 store.update_last_release = self.update_ui.last_release.clone();
-                store.update_in_flight = self.update_in_flight;
+                store.update_in_flight = self.updater.update_in_flight;
                 store.bump_revision()
             };
-            self.last_synced_revision = rev;
+            self.sync.last_synced_revision = rev;
         }
     }
 
@@ -131,17 +132,17 @@ impl MultibotView {
             )
         };
 
-        self.update_in_flight = update_in_flight;
+        self.updater.update_in_flight = update_in_flight;
         if !update_in_flight {
             self.update_ui.pending_action = None;
         }
         if update_action_tx.is_some() {
-            self.update_action_tx = update_action_tx;
+            self.updater.update_action_tx = update_action_tx;
         }
 
         if settings_diff {
             let mut next_settings = next_settings;
-            if self.selected_session.is_some() {
+            if self.selection.selected_session.is_some() {
                 next_settings.shell_fullscreen = self.settings.shell_fullscreen;
             }
             let visible_changed = !settings_visible_eq(&self.settings, &next_settings);
@@ -186,16 +187,16 @@ impl MultibotView {
             changed = true;
         }
 
-        if rev != self.last_synced_revision {
+        if rev != self.sync.last_synced_revision {
             let store = cx.global::<SharedAppStore>();
-            if self.host_sessions != store.host_sessions
-                || self.host_statuses != store.host_status_snapshots()
+            if self.connection.host_sessions != store.host_sessions
+                || self.connection.host_statuses != store.host_status_snapshots()
             {
                 changed = true;
             }
-            self.host_sessions = store.host_sessions.clone();
-            self.host_statuses = store.host_status_snapshots();
-            self.host_txs = store
+            self.connection.host_sessions = store.host_sessions.clone();
+            self.connection.host_statuses = store.host_status_snapshots();
+            self.connection.host_txs = store
                 .host_connections
                 .iter()
                 .filter_map(|(host, entry)| entry.daemon_tx.clone().map(|tx| (host.clone(), tx)))
@@ -235,34 +236,34 @@ impl MultibotView {
                 )
             };
 
-            if connection_gen != self.last_synced_connection_gen
+            if connection_gen != self.sync.last_synced_connection_gen
                 && cx.global::<SharedAppStore>().host_connections.is_empty()
             {
-                self.last_synced_connection_gen = connection_gen;
+                self.sync.last_synced_connection_gen = connection_gen;
                 self.clear_active_session_view();
-                self.pending_switch_tokens.clear();
-                self.pending_older_page_before.clear();
-                self.pending_spawn_open = false;
+                self.history.pending_switch_tokens.clear();
+                self.history.pending_older_page_before.clear();
+                self.selection.pending_spawn_open = false;
                 self.notice = None;
                 changed = true;
             }
-            if self.sessions != sessions {
-                self.sessions = sessions;
-                if let Some(ref sel) = self.selected_session.clone()
+            if self.connection.sessions != sessions {
+                self.connection.sessions = sessions;
+                if let Some(ref sel) = self.selection.selected_session.clone()
                     && let Some((_, fresh)) = self.host_for_session_key(&canonical_session_key(
                         self.active_session_host(),
                         sel.agent,
                         &sel.id,
                     ))
                 {
-                    self.selected_session = Some(fresh);
+                    self.selection.selected_session = Some(fresh);
                 }
                 changed = true;
             }
             if self.sidebar_state.workspace_store != workspace_store {
                 self.sidebar_state.recents_collapsed = workspace_store.recents_section_collapsed;
                 self.sidebar_state.workspace_store = workspace_store;
-                if let Some(session) = &self.selected_session {
+                if let Some(session) = &self.selection.selected_session {
                     let full_width = self
                         .sidebar_state
                         .workspace_store
@@ -283,44 +284,44 @@ impl MultibotView {
                 self.sidebar_state.unread_only = unread_only;
                 changed = true;
             }
-            if self.connected_host != connected_host {
-                self.connected_host = connected_host;
+            if self.connection.connected_host != connected_host {
+                self.connection.connected_host = connected_host;
                 changed = true;
             }
-            if self.connection_status != connection_status {
-                self.connection_status = connection_status;
+            if self.connection.connection_status != connection_status {
+                self.connection.connection_status = connection_status;
                 changed = true;
             }
-            if self.daemon_tx.is_some() != daemon_tx.is_some() {
-                self.daemon_tx = daemon_tx;
+            if self.connection.daemon_tx.is_some() != daemon_tx.is_some() {
+                self.connection.daemon_tx = daemon_tx;
                 changed = true;
             } else if daemon_tx.is_some() {
-                self.daemon_tx = daemon_tx;
+                self.connection.daemon_tx = daemon_tx;
             }
-            if self.daemon_version != daemon_version {
-                self.daemon_version = daemon_version;
+            if self.connection.daemon_version != daemon_version {
+                self.connection.daemon_version = daemon_version;
                 changed = true;
             }
-            if self.daemon_binary_hash != daemon_binary_hash {
-                self.daemon_binary_hash = daemon_binary_hash;
+            if self.connection.daemon_binary_hash != daemon_binary_hash {
+                self.connection.daemon_binary_hash = daemon_binary_hash;
                 changed = true;
             }
-            if daemon_notice_seq != self.last_daemon_notice_seq {
-                self.last_daemon_notice_seq = daemon_notice_seq;
+            if daemon_notice_seq != self.sync.last_daemon_notice_seq {
+                self.sync.last_daemon_notice_seq = daemon_notice_seq;
                 if let Some(msg) = daemon_notice {
                     self.notice = Some(msg);
                     changed = true;
                 }
             }
-            if update_notice_seq != self.last_update_notice_seq {
-                self.last_update_notice_seq = update_notice_seq;
+            if update_notice_seq != self.updater.last_update_notice_seq {
+                self.updater.last_update_notice_seq = update_notice_seq;
                 if let Some(msg) = update_notice {
                     self.notice = Some(msg);
                     changed = true;
                 }
             }
 
-            self.last_synced_revision = rev;
+            self.sync.last_synced_revision = rev;
         }
 
         if self.chat_state.pending_harness_switch.is_some()

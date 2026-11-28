@@ -252,7 +252,7 @@ fn renders_minimal_inbox_without_header_or_filter_chips_and_opens_clicked_row(
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
             v.main_surface = MainSurface::Inbox;
-            v.sessions = vec![
+            v.connection.sessions = vec![
                 SessionSummary {
                     id: "c1".into(),
                     agent: AgentKind::Claude,
@@ -274,7 +274,7 @@ fn renders_minimal_inbox_without_header_or_filter_chips_and_opens_clicked_row(
                     ..Default::default()
                 },
             ];
-            let k1 = v.session_key_for(&v.sessions[0]);
+            let k1 = v.session_key_for(&v.connection.sessions[0]);
             // Favorites and Frequent each hold one session so their pills render
             v.sidebar_state.workspace_store.toggle_favorite(&k1);
             v.sidebar_state
@@ -323,7 +323,7 @@ fn renders_minimal_inbox_without_header_or_filter_chips_and_opens_clicked_row(
         let (surface, sel_id) = view.read_with(cx, |v, _| {
             (
                 v.main_surface,
-                v.selected_session.as_ref().map(|s| s.id.clone()),
+                v.selection.selected_session.as_ref().map(|s| s.id.clone()),
             )
         });
         assert_eq!(surface, MainSurface::Chat);
@@ -356,7 +356,7 @@ fn minimal_inbox_keeps_keyboard_navigation_and_esc_close(cx: &mut TestAppContext
     let now = now_unix_ms();
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![
+            v.connection.sessions = vec![
                 SessionSummary {
                     id: "kb-1".into(),
                     agent: AgentKind::Claude,
@@ -469,6 +469,7 @@ fn minimal_inbox_keeps_keyboard_navigation_and_esc_close(cx: &mut TestAppContext
         assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
         assert_eq!(
             view.read(cx)
+                .selection
                 .selected_session
                 .as_ref()
                 .map(|s| s.id.as_str()),
@@ -555,7 +556,7 @@ fn inbox_stepping_disarms_outside_inbox_and_close_overlay_respects_rename_filter
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![
+            v.connection.sessions = vec![
                 SessionSummary {
                     id: "c1".into(),
                     agent: AgentKind::Claude,
@@ -573,17 +574,17 @@ fn inbox_stepping_disarms_outside_inbox_and_close_overlay_respects_rename_filter
                     ..Default::default()
                 },
             ];
-            let k1 = v.session_key_for(&v.sessions[0]);
-            let k2 = v.session_key_for(&v.sessions[1]);
+            let k1 = v.session_key_for(&v.connection.sessions[0]);
+            let k2 = v.session_key_for(&v.connection.sessions[1]);
 
             // Arm stepping via Inbox
             v.inbox_state.step_order = vec![k1.clone(), k2.clone()];
             v.inbox_state.step_index = Some(0);
             assert!(v.step_inbox_session(1, cx));
-            assert_eq!(v.selected_session.as_ref().unwrap().id, "c2");
+            assert_eq!(v.selection.selected_session.as_ref().unwrap().id, "c2");
 
             // Opening a session from Sidebar (from_inbox = false) disarms stepping completely
-            let s1 = v.sessions[0].clone();
+            let s1 = v.connection.sessions[0].clone();
             v.open_session_with_tracking(s1, false, cx);
             assert!(v.inbox_state.step_index.is_none());
             assert!(v.inbox_state.step_order.is_empty());
@@ -645,7 +646,7 @@ fn inbox_close_overlay_and_keydown_yield_to_active_modal_precedence(cx: &mut Tes
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![SessionSummary {
+            v.connection.sessions = vec![SessionSummary {
                 id: "c1".into(),
                 agent: AgentKind::Claude,
                 title: "Deploy Prod".into(),
@@ -654,7 +655,7 @@ fn inbox_close_overlay_and_keydown_yield_to_active_modal_precedence(cx: &mut Tes
                 needs_attention: true,
                 ..Default::default()
             }];
-            let k1 = v.session_key_for(&v.sessions[0]);
+            let k1 = v.session_key_for(&v.connection.sessions[0]);
             v.main_surface = MainSurface::Inbox;
             v.inbox_state.active_split = InboxSplit::All;
             v.inbox_state.filter_focused = true;
@@ -778,7 +779,7 @@ fn real_tab_and_shift_tab_in_inbox_cycle_splits_and_keep_inbox_focus(cx: &mut Te
                 ..Default::default()
             };
             let k1 = v.session_key_for(&s1);
-            v.sessions = vec![s1, s2];
+            v.connection.sessions = vec![s1, s2];
             // Favorites gains a session, the Backend workspace stays empty and is hidden
             v.sidebar_state.workspace_store.toggle_favorite(&k1);
             empty_ws_id = v
@@ -945,7 +946,7 @@ fn inbox_split_bar_hides_zero_count_splits_and_tab_skips_them(cx: &mut TestAppCo
             let k1 = v.session_key_for(&s1);
             let k2 = v.session_key_for(&s2);
             let k3 = v.session_key_for(&s3);
-            v.sessions = vec![s1, s2, s3];
+            v.connection.sessions = vec![s1, s2, s3];
             let store = &mut v.sidebar_state.workspace_store;
             store.toggle_favorite(&k1);
             store.record_session_input(&k2, now);

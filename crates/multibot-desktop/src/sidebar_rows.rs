@@ -136,7 +136,7 @@ impl MultibotView {
                                     .text_color(theme::text_secondary()),
                             )
                             .child(
-                                Label::new(self.connection_status.clone())
+                                Label::new(self.connection.connection_status.clone())
                                     .id("dev-stats-connection")
                                     .text_color(theme::text_secondary()),
                             )
@@ -179,7 +179,7 @@ impl MultibotView {
                         cx.listener(|this, _, window, cx| {
                             cx.stop_propagation();
                             this.shell_host.focus_parent();
-                            this.root_focus_handle.focus(window, cx);
+                            this.focus.root_focus_handle.focus(window, cx);
                             this.sidebar_state.dev_stats_expanded =
                                 !this.sidebar_state.dev_stats_expanded;
                             cx.notify();
@@ -369,6 +369,7 @@ impl MultibotView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active_key = self
+            .selection
             .selected_session
             .as_ref()
             .map(|s| self.session_key_for(s));

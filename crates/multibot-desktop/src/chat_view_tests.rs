@@ -687,7 +687,7 @@ fn chat_scroll_late_history_follow_send_and_jump(cx: &mut TestAppContext) {
     let (handle, view) = open_test_chat_window(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.selected_session = Some(SessionSummary {
+            v.selection.selected_session = Some(SessionSummary {
                 id: "scroll".into(),
                 ..Default::default()
             });
@@ -793,7 +793,7 @@ fn chat_info_palette_title_copy_and_escape(cx: &mut TestAppContext) {
     let (handle, view) = open_test_chat_window(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.selected_session = Some(SessionSummary {
+            v.selection.selected_session = Some(SessionSummary {
                 id: "info-session".into(),
                 title: "Daily work".into(),
                 cwd: Some("/srv/multibot".into()),
@@ -804,7 +804,7 @@ fn chat_info_palette_title_copy_and_escape(cx: &mut TestAppContext) {
                 context_limit: Some(200_000),
                 ..Default::default()
             });
-            v.connected_host = Some("work-vps".into());
+            v.connection.connected_host = Some("work-vps".into());
             cx.notify();
         });
         window.render_frame(cx);
@@ -854,7 +854,7 @@ fn chat_info_palette_title_copy_and_escape(cx: &mut TestAppContext) {
         assert!(window.try_find("chat-info-panel").is_none());
 
         view.update(cx, |v, cx| {
-            v.selected_session.as_mut().unwrap().agent = AgentKind::Shell;
+            v.selection.selected_session.as_mut().unwrap().agent = AgentKind::Shell;
             cx.notify();
         });
         window.render_frame(cx);
@@ -878,7 +878,7 @@ fn dictation_reference_controls_toggle_and_render(cx: &mut TestAppContext) {
     let (handle, view) = open_test_chat_window(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.selected_session = Some(SessionSummary {
+            v.selection.selected_session = Some(SessionSummary {
                 id: "voice-ui".into(),
                 ..Default::default()
             });
@@ -934,7 +934,7 @@ fn dictation_reference_controls_toggle_and_render(cx: &mut TestAppContext) {
         window.render_frame(cx);
         assert!(window.try_find("dictation-status").is_none());
         view.update(cx, |v, cx| {
-            v.selected_session.as_mut().unwrap().working = true;
+            v.selection.selected_session.as_mut().unwrap().working = true;
             cx.notify();
         });
         window.render_frame(cx);
@@ -950,12 +950,12 @@ fn pasted_and_dictated_text_follow_bottom_but_reading_history_does_not(cx: &mut 
     for paste in [true, false] {
         cx.update_window(handle, |_, window, cx| {
             view.update(cx, |v, cx| {
-                v.selected_session = Some(SessionSummary {
+                v.selection.selected_session = Some(SessionSummary {
                     id: "paste-scroll".into(),
                     ..Default::default()
                 });
-                v.messages = chat_scroll_messages();
-                v.prompt_input.update(cx, |input, cx| {
+                v.history.messages = chat_scroll_messages();
+                v.inputs.prompt_input.update(cx, |input, cx| {
                     input.set_value("", window, cx);
                     input.focus(window, cx);
                 });
@@ -977,7 +977,7 @@ fn pasted_and_dictated_text_follow_bottom_but_reading_history_does_not(cx: &mut 
                 window.press("ctrl-v", cx);
             } else {
                 view.update(cx, |v, cx| {
-                    v.prompt_input.update(cx, |input, cx| {
+                    v.inputs.prompt_input.update(cx, |input, cx| {
                         input.replace_all("Dictated text", window, cx)
                     })
                 });
@@ -990,7 +990,15 @@ fn pasted_and_dictated_text_follow_bottom_but_reading_history_does_not(cx: &mut 
             let scroll = view.read(cx).chat_state.scroll_handle.clone();
             assert_eq!(scroll.offset().y, -scroll.max_offset().y);
             assert!(window.try_find("chat-jump-to-bottom-btn").is_none());
-            assert!(!view.read(cx).prompt_input.read(cx).value().is_empty());
+            assert!(
+                !view
+                    .read(cx)
+                    .inputs
+                    .prompt_input
+                    .read(cx)
+                    .value()
+                    .is_empty()
+            );
             view.update(cx, |v, cx| {
                 scroll.set_offset(gpui_kit::point(px(0.0), px(-100.0)));
                 v.chat_state.scroll.sync_position(200.0);
@@ -1011,11 +1019,11 @@ fn composer_entry_and_send_follow_bottom_without_new_message_pill(cx: &mut TestA
     let (handle, view) = open_test_chat_window(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.selected_session = Some(SessionSummary {
+            v.selection.selected_session = Some(SessionSummary {
                 id: "entry-scroll".into(),
                 ..Default::default()
             });
-            v.messages = chat_scroll_messages();
+            v.history.messages = chat_scroll_messages();
             cx.notify();
         });
         window.render_frame(cx);
@@ -1025,7 +1033,8 @@ fn composer_entry_and_send_follow_bottom_without_new_message_pill(cx: &mut TestA
             v.chat_state.scroll.sync_position(200.0);
             v.chat_state.scroll.appended(2);
             v.chat_state.scroll.unread_divider_msg_idx = Some(10);
-            v.prompt_input
+            v.inputs
+                .prompt_input
                 .update(cx, |input, cx| input.focus(window, cx));
             cx.notify();
         });
@@ -1116,7 +1125,7 @@ fn chat_scroll_first_visit_unread_tall_reply_aligns_new_divider_at_top(cx: &mut 
             ]);
             view.update(cx, |v, cx| {
                 if cached {
-                    v.chat_cache.put(
+                    v.history.chat_cache.put(
                         CacheKey::new("local", session.agent, &session.id),
                         CachedSession {
                             messages: messages.clone(),
@@ -1221,7 +1230,7 @@ fn chat_scroll_unread_cache_and_older_page_keep_the_cutoff(cx: &mut TestAppConte
             let mut messages = chat_scroll_messages();
             messages[10].role = MessageRole::Assistant;
             messages[10].text = "Start of the returning unread reply.\n\n".repeat(100);
-            v.chat_cache.put(
+            v.history.chat_cache.put(
                 CacheKey::new("local", session.agent, &session.id),
                 CachedSession {
                     messages,
@@ -1303,8 +1312,8 @@ fn chat_scroll_shift_gg_capture_preserves_typing_and_drafts(cx: &mut TestAppCont
     let (handle, view) = open_test_chat_window(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.messages = chat_scroll_messages();
-            v.prompt_input.update(cx, |input, cx| {
+            v.history.messages = chat_scroll_messages();
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
                 input.focus(window, cx);
             });
@@ -1320,7 +1329,10 @@ fn chat_scroll_shift_gg_capture_preserves_typing_and_drafts(cx: &mut TestAppCont
         });
         window.render_frame(cx);
         window.press("shift-g", cx);
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "G");
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            "G"
+        );
         window.press("shift-g", cx);
         window.render_frame(cx);
         assert_eq!(scroll.offset().y, -scroll.max_offset().y);
@@ -1328,13 +1340,19 @@ fn chat_scroll_shift_gg_capture_preserves_typing_and_drafts(cx: &mut TestAppCont
             view.read(cx).chat_state.scroll.pending_scroll,
             PendingScrollTarget::None
         );
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "");
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            ""
+        );
         assert_eq!(view.read(cx).chat_state.focused_message_idx, None);
         window.press("shift-g", cx);
         window.press("o", cx);
         window.press("o", cx);
         window.press("d", cx);
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "Good");
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            "Good"
+        );
         view.update(cx, |v, cx| {
             v.focus_chat_panel(window, cx);
             v.chat_state.focused_message_idx = Some(0);
@@ -1344,7 +1362,10 @@ fn chat_scroll_shift_gg_capture_preserves_typing_and_drafts(cx: &mut TestAppCont
         window.press("shift-g", cx);
         window.press("shift-g", cx);
         assert_eq!(view.read(cx).chat_state.focused_message_idx, None);
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "Good");
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            "Good"
+        );
     })
     .unwrap();
 }
@@ -1367,10 +1388,10 @@ fn composer_options_clicks_preserve_draft_and_forward_send_queue_and_spawn(
     };
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.daemon_tx = Some(tx.clone());
-            v.sessions = vec![session.clone()];
-            v.selected_session = Some(session.clone());
-            v.prompt_input.update(cx, |input, cx| input.set_value("my draft", window, cx));
+            v.connection.daemon_tx = Some(tx.clone());
+            v.connection.sessions = vec![session.clone()];
+            v.selection.selected_session = Some(session.clone());
+            v.inputs.prompt_input.update(cx, |input, cx| input.set_value("my draft", window, cx));
             cx.notify();
         });
         window.render_frame(cx);
@@ -1394,7 +1415,7 @@ fn composer_options_clicks_preserve_draft_and_forward_send_queue_and_spawn(
         assert!(window.try_find("composer-options-summary").is_some());
         view.update(cx, |v, cx| {
             assert_eq!(v.active_composer_options(), expected);
-            assert_eq!(v.prompt_input.read(cx).value().as_ref(), "my draft");
+            assert_eq!(v.inputs.prompt_input.read(cx).value().as_ref(), "my draft");
             assert!(!v.slash_picker_state.open);
         });
         window.click("attach-file-btn", cx);
@@ -1406,7 +1427,7 @@ fn composer_options_clicks_preserve_draft_and_forward_send_queue_and_spawn(
             v.settings.queue_while_working = true;
             v.send_or_queue_prompt(&working, "q1".into(), "queued".into());
             assert!(rx.try_recv().is_err());
-            assert_eq!(v.chat_outbox.entries.last().unwrap().options.as_ref(), Some(&expected));
+            assert_eq!(v.outbox.chat_outbox.entries.last().unwrap().options.as_ref(), Some(&expected));
             assert!(v.spawn_new_session(AgentKind::Claude, ".".into(), None, Some("new chat".into()), cx));
             assert!(matches!(rx.try_recv(), Ok(ClientRequest::SpawnSession { options: Some(ref o), .. }) if o == &expected));
             let spawned = SessionSummary { id: "new-composer-session".into(), agent: AgentKind::Claude, ..Default::default() };
@@ -1427,8 +1448,8 @@ fn composer_options_are_session_and_host_scoped_and_reset_to_defaults(cx: &mut T
     };
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.selected_session = Some(session.clone());
-            v.connected_host = Some("host-a".into());
+            v.selection.selected_session = Some(session.clone());
+            v.connection.connected_host = Some("host-a".into());
             cx.notify();
         });
         window.render_frame(cx);
@@ -1447,13 +1468,13 @@ fn composer_options_are_session_and_host_scoped_and_reset_to_defaults(cx: &mut T
         };
         view.update(cx, |v, cx| {
             assert_eq!(v.active_composer_options(), selected);
-            assert!(v.prompt_input.read(cx).value().is_empty());
-            v.selected_session.as_mut().unwrap().id = "another-session".into();
+            assert!(v.inputs.prompt_input.read(cx).value().is_empty());
+            v.selection.selected_session.as_mut().unwrap().id = "another-session".into();
             assert!(v.active_composer_options().is_default());
-            v.selected_session = Some(session.clone());
-            v.connected_host = Some("host-b".into());
+            v.selection.selected_session = Some(session.clone());
+            v.connection.connected_host = Some("host-b".into());
             assert!(v.active_composer_options().is_default());
-            v.connected_host = Some("host-a".into());
+            v.connection.connected_host = Some("host-a".into());
             assert_eq!(v.active_composer_options(), selected);
             cx.notify();
         });
@@ -1469,7 +1490,7 @@ fn composer_options_are_session_and_host_scoped_and_reset_to_defaults(cx: &mut T
         assert!(window.try_find("composer-options-summary").is_none());
         view.update(cx, |v, cx| {
             assert_eq!(v.composer_options_for(&session), None);
-            assert!(v.prompt_input.read(cx).value().is_empty());
+            assert!(v.inputs.prompt_input.read(cx).value().is_empty());
         });
     })
     .unwrap();
@@ -1493,7 +1514,7 @@ fn composer_options_without_a_session_apply_to_new_claude_chats(cx: &mut TestApp
             assert_eq!(v.spawn_composer_options(AgentKind::Claude), Some(expected));
             assert_eq!(v.spawn_composer_options(AgentKind::Codex), None);
             assert_eq!(v.spawn_composer_options(AgentKind::Antigravity), None);
-            assert!(v.prompt_input.read(cx).value().is_empty());
+            assert!(v.inputs.prompt_input.read(cx).value().is_empty());
         });
     })
     .unwrap();
@@ -1509,19 +1530,19 @@ fn composer_options_offline_snapshot_and_unsupported_provider(cx: &mut TestAppCo
     };
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.selected_session = Some(session.clone());
-            v.sessions = vec![session.clone()];
-            v.daemon_tx = None;
-            v.persist_outbox_to_disk = false;
-            v.shared_chat_outbox.lock().unwrap().persist_to_disk = false;
+            v.selection.selected_session = Some(session.clone());
+            v.connection.sessions = vec![session.clone()];
+            v.connection.daemon_tx = None;
+            v.outbox.persist_outbox_to_disk = false;
+            v.outbox.shared_chat_outbox.lock().unwrap().persist_to_disk = false;
             v.update_composer_options(|o| o.model = Some("sonnet".into()), cx);
             v.send_or_queue_prompt(&session, "offline-message".into(), "offline draft".into());
             v.update_composer_options(|o| o.model = Some("opus".into()), cx);
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            v.daemon_tx = Some(tx);
+            v.connection.daemon_tx = Some(tx);
             assert_eq!(v.flush_outbox_for_current_host(), 1);
             assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { options: Some(SessionOptions { model: Some(ref m), .. }), .. }) if m == "sonnet"));
-            v.selected_session = Some(SessionSummary { id: "agy-controls".into(), agent: AgentKind::Antigravity, ..Default::default() });
+            v.selection.selected_session = Some(SessionSummary { id: "agy-controls".into(), agent: AgentKind::Antigravity, ..Default::default() });
             cx.notify();
         });
         window.render_frame(cx);
@@ -1539,7 +1560,7 @@ fn tool_calls_are_absent_until_ctrl_k_reveals_expandable_clusters(cx: &mut TestA
     let (handle, view) = open_test_chat_window(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.selected_session = Some(SessionSummary {
+            v.selection.selected_session = Some(SessionSummary {
                 id: "cluster-chat".into(),
                 agent: AgentKind::Claude,
                 ..Default::default()
@@ -1553,7 +1574,7 @@ fn tool_calls_are_absent_until_ctrl_k_reveals_expandable_clusters(cx: &mut TestA
                 diff: None,
                 output: None,
             };
-            v.messages = vec![
+            v.history.messages = vec![
                 ChatMessage {
                     id: "mixed".into(),
                     role: MessageRole::Assistant,
@@ -1585,7 +1606,8 @@ fn tool_calls_are_absent_until_ctrl_k_reveals_expandable_clusters(cx: &mut TestA
             window.press("ctrl-k", cx);
             window.render_frame(cx);
             view.update(cx, |v, cx| {
-                v.palette_input
+                v.inputs
+                    .palette_input
                     .update(cx, |input, cx| input.set_value("tool calls", window, cx));
             });
             window.render_frame(cx);
@@ -1606,7 +1628,7 @@ fn tool_calls_are_absent_until_ctrl_k_reveals_expandable_clusters(cx: &mut TestA
             }
         }
         view.update(cx, |v, cx| {
-            v.selected_session.as_mut().unwrap().id = "other-chat".into();
+            v.selection.selected_session.as_mut().unwrap().id = "other-chat".into();
             cx.notify();
         });
         window.render_frame(cx);
@@ -1637,7 +1659,7 @@ fn chat_urls_open_on_regular_click_and_reject_unsafe_schemes(cx: &mut TestAppCon
                     ("[Local](file:///etc/passwd)", None),
                 ] {
                     view.update(cx, |v, cx| {
-                        v.messages = vec![ChatMessage {
+                        v.history.messages = vec![ChatMessage {
                             id: format!("url-{role:?}-{with_blocks}-{text}"),
                             role,
                             text: text.into(),
@@ -1686,7 +1708,7 @@ fn renders_rich_chat_blocks_and_toggles_tools_diff_and_todo_drawer(cx: &mut Test
     let (handle, view) = open_test_chat_window(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.selected_session = Some(SessionSummary {
+            v.selection.selected_session = Some(SessionSummary {
                 id: "sess-rich".into(),
                 agent: AgentKind::Claude,
                 title: "Rich Chat Test".into(),
@@ -1698,7 +1720,7 @@ fn renders_rich_chat_blocks_and_toggles_tools_diff_and_todo_drawer(cx: &mut Test
             let react_wire =
                 format_reaction_message(ReactionEmoji::Heart, "a1", "Implementing rich chat")
                     .unwrap();
-            v.messages = vec![
+            v.history.messages = vec![
                 ChatMessage {
                     id: "a1".into(),
                     role: MessageRole::Assistant,
@@ -1801,13 +1823,13 @@ fn interactive_option_cards_and_copy_latest_code(cx: &mut TestAppContext) {
     let (handle, view) = open_test_chat_window(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.selected_session = Some(SessionSummary {
+            v.selection.selected_session = Some(SessionSummary {
                 id: "sess-opt".into(),
                 agent: AgentKind::Claude,
                 title: "Options Test".into(),
                 ..Default::default()
             });
-            v.messages = vec![ChatMessage {
+            v.history.messages = vec![ChatMessage {
                 id: "a-opt".into(),
                 role: MessageRole::Assistant,
                 text: "Pick an option".into(),
@@ -2180,13 +2202,13 @@ fn multiple_question_prompts_have_unique_ids_and_multi_question_stays_interactiv
     let (handle, view) = open_test_chat_window(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.selected_session = Some(SessionSummary {
+            v.selection.selected_session = Some(SessionSummary {
                 id: "sess-multi-q".into(),
                 agent: AgentKind::Claude,
                 title: "Multi Question Test".into(),
                 ..Default::default()
             });
-            v.messages = vec![
+            v.history.messages = vec![
                 // Historical QuestionPrompt message
                 ChatMessage {
                     id: "a-old".into(),
@@ -2303,13 +2325,13 @@ fn mid_sentence_slash_and_codex_dollar_triggers_open_slash_picker(cx: &mut TestA
     cx.update_window(handle, |_, window, cx| {
         // 1. Codex mid-sentence `$` trigger: "run $ve" + 'r' -> picker opens
         view.update(cx, |v, cx| {
-            v.selected_session = Some(SessionSummary {
+            v.selection.selected_session = Some(SessionSummary {
                 id: "sess-codex".into(),
                 agent: AgentKind::Codex,
                 title: "Codex".into(),
                 ..Default::default()
             });
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("run $ve", window, cx);
                 input.focus(window, cx);
             });
@@ -2326,13 +2348,13 @@ fn mid_sentence_slash_and_codex_dollar_triggers_open_slash_picker(cx: &mut TestA
         // 2. Claude mid-sentence `/` trigger: "please /p" + 'l' -> picker opens
         view.update(cx, |v, cx| {
             v.slash_picker_state.close();
-            v.selected_session = Some(SessionSummary {
+            v.selection.selected_session = Some(SessionSummary {
                 id: "sess-claude".into(),
                 agent: AgentKind::Claude,
                 title: "Claude".into(),
                 ..Default::default()
             });
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("please /p", window, cx);
                 input.focus(window, cx);
             });
@@ -2465,7 +2487,7 @@ fn session_mentions_picker_binds_duplicate_names_and_sends_exact_id(cx: &mut Tes
                 title: "Sender".into(),
                 ..Default::default()
             };
-            v.sessions = vec![
+            v.connection.sessions = vec![
                 sender.clone(),
                 SessionSummary {
                     id: "dup-a".into(),
@@ -2478,9 +2500,10 @@ fn session_mentions_picker_binds_duplicate_names_and_sends_exact_id(cx: &mut Tes
                     ..Default::default()
                 },
             ];
-            v.selected_session = Some(sender);
-            v.daemon_tx = Some(tx);
-            v.prompt_input
+            v.selection.selected_session = Some(sender);
+            v.connection.daemon_tx = Some(tx);
+            v.inputs
+                .prompt_input
                 .update(cx, |input, cx| input.focus(window, cx));
             cx.notify();
         });
@@ -2497,10 +2520,10 @@ fn session_mentions_picker_binds_duplicate_names_and_sends_exact_id(cx: &mut Tes
         window.press("tab", cx);
         window.render_frame(cx);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "@Same Name "
         );
-        assert_eq!(view.read(cx).prompt_input.read(cx).tokens().len(), 1);
+        assert_eq!(view.read(cx).inputs.prompt_input.read(cx).tokens().len(), 1);
         assert_eq!(
             view.read(cx).bound_mention_prompt(cx).trim(),
             "@Same Name{dup-b}"
@@ -2569,14 +2592,14 @@ fn session_mentions_escape_keeps_text_and_click_jumps_exact_host_session(cx: &mu
             ..Default::default()
         };
         view.update(cx, |v, cx| {
-            v.host_sessions = vec![
+            v.connection.host_sessions = vec![
                 ("host-a".into(), source.clone()),
                 ("host-a".into(), first.clone()),
                 ("host-b".into(), second.clone()),
             ];
-            v.selected_session = Some(source.clone());
-            v.selected_session_host = Some("host-a".into());
-            v.prompt_input.update(cx, |input, cx| {
+            v.selection.selected_session = Some(source.clone());
+            v.selection.selected_session_host = Some("host-a".into());
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("@", window, cx);
                 input.focus(window, cx);
             });
@@ -2585,15 +2608,18 @@ fn session_mentions_escape_keeps_text_and_click_jumps_exact_host_session(cx: &mu
         window.render_frame(cx);
         window.press("escape", cx);
         window.render_frame(cx);
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "@");
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            "@"
+        );
         assert!(!view.read(cx).mention_picker_state.is_open());
         for role in [MessageRole::User, MessageRole::Assistant] {
             for with_blocks in [false, true] {
                 view.update(cx, |v, cx| {
-                    v.selected_session = Some(source.clone());
-                    v.selected_session_host = Some("host-a".into());
+                    v.selection.selected_session = Some(source.clone());
+                    v.selection.selected_session_host = Some("host-a".into());
                     let text = "@Same{second}";
-                    v.messages = vec![ChatMessage {
+                    v.history.messages = vec![ChatMessage {
                         id: "mention-link".into(),
                         role,
                         text: text.into(),
@@ -2609,7 +2635,12 @@ fn session_mentions_escape_keeps_text_and_click_jumps_exact_host_session(cx: &mu
                 window.render_frame(cx);
                 window.click_at("msg-bubble-0", gpui_kit::point(px(24.0), px(20.0)), cx);
                 assert_eq!(
-                    view.read(cx).selected_session.as_ref().unwrap().id,
+                    view.read(cx)
+                        .selection
+                        .selected_session
+                        .as_ref()
+                        .unwrap()
+                        .id,
                     "second",
                     "{role:?}, blocks={with_blocks}"
                 );
@@ -2625,13 +2656,13 @@ fn live_slash_picker_zero_lag_sync_tab_enter_replace_and_browse_mode(cx: &mut Te
     let (handle, view) = open_test_chat_window(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.selected_session = Some(SessionSummary {
+            v.selection.selected_session = Some(SessionSummary {
                 id: "sess-slash-live".into(),
                 agent: AgentKind::Claude,
                 title: "Claude".into(),
                 ..Default::default()
             });
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
                 input.focus(window, cx);
             });
@@ -2642,7 +2673,10 @@ fn live_slash_picker_zero_lag_sync_tab_enter_replace_and_browse_mode(cx: &mut Te
         // 1. Typing "/" immediately opens picker on frame 0 (zero 1-keystroke lag)
         window.press("/", cx);
         window.render_frame(cx);
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "/");
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            "/"
+        );
         assert!(
             view.read(cx).slash_picker_state.is_open(),
             "typing '/' must open slash picker immediately"
@@ -2661,7 +2695,10 @@ fn live_slash_picker_zero_lag_sync_tab_enter_replace_and_browse_mode(cx: &mut Te
         window.render_frame(cx);
         window.press("l", cx);
         window.render_frame(cx);
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "/pl");
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            "/pl"
+        );
         assert_eq!(
             view.read(cx).slash_picker_state.trigger.as_ref().map(|t| (
                 t.start_byte,
@@ -2683,15 +2720,15 @@ fn live_slash_picker_zero_lag_sync_tab_enter_replace_and_browse_mode(cx: &mut Te
         window.press("enter", cx);
         window.render_frame(cx);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "/plan "
         );
         assert!(!view.read(cx).slash_picker_state.is_open());
-        assert!(view.read(cx).messages.is_empty());
+        assert!(view.read(cx).history.messages.is_empty());
 
         // 4. Typing "/pl" then pressing Tab replaces "/pl" with "/plan "
         view.update(cx, |v, cx| {
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
                 input.focus(window, cx);
             });
@@ -2706,14 +2743,14 @@ fn live_slash_picker_zero_lag_sync_tab_enter_replace_and_browse_mode(cx: &mut Te
         window.press("tab", cx);
         window.render_frame(cx);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "/plan "
         );
         assert!(!view.read(cx).slash_picker_state.is_open());
 
         // 5. Pressing Escape closes picker and stays closed (KeyUp must NOT reopen it!)
         view.update(cx, |v, cx| {
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
                 input.focus(window, cx);
             });
@@ -2728,11 +2765,14 @@ fn live_slash_picker_zero_lag_sync_tab_enter_replace_and_browse_mode(cx: &mut Te
         window.press("escape", cx);
         window.render_frame(cx);
         assert!(!view.read(cx).slash_picker_state.is_open());
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "/pl");
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            "/pl"
+        );
 
         // 6. Mid-sentence Claude "please /pl" + Enter -> "please /plan "
         view.update(cx, |v, cx| {
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.select_all(window, cx);
                 input.replace("please ", window, cx);
                 input.focus(window, cx);
@@ -2746,13 +2786,13 @@ fn live_slash_picker_zero_lag_sync_tab_enter_replace_and_browse_mode(cx: &mut Te
         window.press("enter", cx);
         window.render_frame(cx);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "please /plan "
         );
 
         // 7. Codex "run $ver" + Tab -> "run $verify-multibot "
         view.update(cx, |v, cx| {
-            v.selected_session = Some(SessionSummary {
+            v.selection.selected_session = Some(SessionSummary {
                 id: "sess-codex-live".into(),
                 agent: AgentKind::Codex,
                 title: "Codex".into(),
@@ -2768,7 +2808,7 @@ fn live_slash_picker_zero_lag_sync_tab_enter_replace_and_browse_mode(cx: &mut Te
                     opens_in_terminal: false,
                 }],
             );
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.select_all(window, cx);
                 input.replace("run ", window, cx);
                 input.focus(window, cx);
@@ -2785,20 +2825,20 @@ fn live_slash_picker_zero_lag_sync_tab_enter_replace_and_browse_mode(cx: &mut Te
         window.press("tab", cx);
         window.render_frame(cx);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "run $verify-multibot "
         );
         assert!(!view.read(cx).slash_picker_state.is_open());
 
         // 8. Ctrl+/ browse mode: "hello " -> Ctrl+/ -> "pl" -> Enter -> "hello /plan "
         view.update(cx, |v, cx| {
-            v.selected_session = Some(SessionSummary {
+            v.selection.selected_session = Some(SessionSummary {
                 id: "sess-claude-browse".into(),
                 agent: AgentKind::Claude,
                 title: "Claude".into(),
                 ..Default::default()
             });
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.select_all(window, cx);
                 input.replace("hello ", window, cx);
                 input.focus(window, cx);
@@ -2824,14 +2864,14 @@ fn live_slash_picker_zero_lag_sync_tab_enter_replace_and_browse_mode(cx: &mut Te
         window.press("enter", cx);
         window.render_frame(cx);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "hello /plan "
         );
         assert!(!view.read(cx).slash_picker_state.is_open());
 
         // 9. Ctrl+/ browse mode: "hello " -> Ctrl+/ -> Backspace past anchor immediately closes picker
         view.update(cx, |v, cx| {
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.select_all(window, cx);
                 input.replace("hello ", window, cx);
                 input.focus(window, cx);
@@ -2845,7 +2885,7 @@ fn live_slash_picker_zero_lag_sync_tab_enter_replace_and_browse_mode(cx: &mut Te
         window.press("backspace", cx);
         window.render_frame(cx);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "hello"
         );
         assert!(
@@ -2863,13 +2903,13 @@ fn live_escape_closes_find_action_menu_focused_nav_and_reply_quote_with_composer
     let (handle, view) = open_test_chat_window(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.selected_session = Some(SessionSummary {
+            v.selection.selected_session = Some(SessionSummary {
                 id: "sess-esc".into(),
                 agent: AgentKind::Claude,
                 title: "Escape Test".into(),
                 ..Default::default()
             });
-            v.messages = vec![
+            v.history.messages = vec![
                 ChatMessage {
                     id: "m0".into(),
                     role: MessageRole::User,
@@ -2883,7 +2923,7 @@ fn live_escape_closes_find_action_menu_focused_nav_and_reply_quote_with_composer
                     ..Default::default()
                 },
             ];
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
                 input.focus(window, cx);
             });
@@ -2944,7 +2984,7 @@ fn live_dislike_and_heart_reaction_full_add_echo_remove_echo_lifecycle(cx: &mut 
             view.update(cx, |v, cx| {
                 v.chat_state.local_reactions.clear();
                 v.chat_state.local_reaction_removals.clear();
-                v.messages = vec![ChatMessage {
+                v.history.messages = vec![ChatMessage {
                     id: "m1".into(),
                     role: MessageRole::Assistant,
                     text: "Great answer".into(),
@@ -2956,7 +2996,7 @@ fn live_dislike_and_heart_reaction_full_add_echo_remove_echo_lifecycle(cx: &mut 
 
             // Optimistic badge visible
             let vis_opt = project_visible_messages_with_overrides(
-                &view.read(cx).messages,
+                &view.read(cx).history.messages,
                 &view.read(cx).chat_state.local_reactions,
                 &view.read(cx).chat_state.local_reaction_removals,
                 true,
@@ -2966,13 +3006,13 @@ fn live_dislike_and_heart_reaction_full_add_echo_remove_echo_lifecycle(cx: &mut 
             // Daemon echoes add -> reconcile clears local_reactions, server badge intact
             let wire = format_reaction_message(emoji, "m1", "Great answer").unwrap();
             view.update(cx, |v, cx| {
-                v.messages.push(ChatMessage {
+                v.history.messages.push(ChatMessage {
                     id: "u_add".into(),
                     role: MessageRole::User,
                     text: wire.clone(),
                     ..Default::default()
                 });
-                let msgs = v.messages.clone();
+                let msgs = v.history.messages.clone();
                 v.chat_state.reconcile_local_reactions(&msgs);
                 cx.notify();
             });
@@ -2980,7 +3020,8 @@ fn live_dislike_and_heart_reaction_full_add_echo_remove_echo_lifecycle(cx: &mut 
             assert!(view.read(cx).chat_state.local_reactions.is_empty());
             assert!(view.read(cx).chat_state.local_reaction_removals.is_empty());
             assert_eq!(
-                project_visible_messages(&view.read(cx).messages, &HashMap::new())[0].reactions,
+                project_visible_messages(&view.read(cx).history.messages, &HashMap::new())[0]
+                    .reactions,
                 vec![(emoji, 1)]
             );
 
@@ -2991,7 +3032,7 @@ fn live_dislike_and_heart_reaction_full_add_echo_remove_echo_lifecycle(cx: &mut 
             window.render_frame(cx);
             assert!(
                 project_visible_messages_with_overrides(
-                    &view.read(cx).messages,
+                    &view.read(cx).history.messages,
                     &view.read(cx).chat_state.local_reactions,
                     &view.read(cx).chat_state.local_reaction_removals,
                     true
@@ -3002,13 +3043,13 @@ fn live_dislike_and_heart_reaction_full_add_echo_remove_echo_lifecycle(cx: &mut 
 
             // Daemon echoes removal -> reconcile clears local_reaction_removals, zero phantom badges
             view.update(cx, |v, cx| {
-                v.messages.push(ChatMessage {
+                v.history.messages.push(ChatMessage {
                     id: "u_rem".into(),
                     role: MessageRole::User,
                     text: wire,
                     ..Default::default()
                 });
-                let msgs = v.messages.clone();
+                let msgs = v.history.messages.clone();
                 v.chat_state.reconcile_local_reactions(&msgs);
                 cx.notify();
             });
@@ -3022,7 +3063,7 @@ fn live_dislike_and_heart_reaction_full_add_echo_remove_echo_lifecycle(cx: &mut 
                 "local_reaction_removals must be empty after {emoji:?} remove echo"
             );
             assert!(
-                project_visible_messages(&view.read(cx).messages, &HashMap::new())[0]
+                project_visible_messages(&view.read(cx).history.messages, &HashMap::new())[0]
                     .reactions
                     .is_empty(),
                 "fresh projection must have zero phantom badges after {emoji:?} toggle-off"
@@ -3042,13 +3083,13 @@ fn trailing_hidden_reaction_keeps_question_prompt_and_prose_options_active_and_d
         let react_wire =
             format_reaction_message(ReactionEmoji::Like, "a-qp", "Please pick an option").unwrap();
         view.update(cx, |v, cx| {
-            v.selected_session = Some(SessionSummary {
+            v.selection.selected_session = Some(SessionSummary {
                 id: "sess-tail-react".into(),
                 agent: AgentKind::Claude,
                 title: "Tail React".into(),
                 ..Default::default()
             });
-            v.messages = vec![
+            v.history.messages = vec![
                 ChatMessage {
                     id: "a-qp".into(),
                     role: MessageRole::Assistant,
@@ -3095,7 +3136,7 @@ fn trailing_hidden_reaction_keeps_question_prompt_and_prose_options_active_and_d
         let prose_react =
             format_reaction_message(ReactionEmoji::Heart, "a-prose", prose_text).unwrap();
         view.update(cx, |v, cx| {
-            v.messages = vec![
+            v.history.messages = vec![
                 ChatMessage {
                     id: "a-prose".into(),
                     role: MessageRole::Assistant,
@@ -3121,7 +3162,7 @@ fn trailing_hidden_reaction_keeps_question_prompt_and_prose_options_active_and_d
         view.update(cx, |v, cx| {
             v.chat_state.answered_prompts.clear();
             v.chat_state.answered_questions.clear();
-            v.messages = vec![ChatMessage {
+            v.history.messages = vec![ChatMessage {
                 id: "a-dual".into(),
                 role: MessageRole::Assistant,
                 text: String::new(),
@@ -3218,7 +3259,7 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
 
     let _sub = cx
         .update_window(handle, |_, window, cx| {
-            let prompt = view.read(cx).prompt_input.clone();
+            let prompt = view.read(cx).inputs.prompt_input.clone();
             let counter = press_enter_count.clone();
             let sub = cx.subscribe(&prompt, move |_input, ev: &InputEvent, _cx| {
                 if matches!(ev, InputEvent::PressEnter { .. }) {
@@ -3227,15 +3268,15 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
             });
 
             view.update(cx, |v, cx| {
-                v.selected_session = Some(SessionSummary {
+                v.selection.selected_session = Some(SessionSummary {
                     id: "sess-r4".into(),
                     agent: AgentKind::Claude,
                     title: "R4 Regression".into(),
                     ..Default::default()
                 });
-                v.daemon_tx = Some(daemon_tx);
-                v.messages.clear();
-                v.prompt_input.update(cx, |input, cx| {
+                v.connection.daemon_tx = Some(daemon_tx);
+                v.history.messages.clear();
+                v.inputs.prompt_input.update(cx, |input, cx| {
                     input.set_value("", window, cx);
                     input.focus(window, cx);
                 });
@@ -3285,7 +3326,7 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
             window.render_frame(cx);
             assert!(!view.read(cx).slash_picker_state.is_open());
             assert_eq!(
-                view.read(cx).prompt_input.read(cx).value().as_ref(),
+                view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
                 "/plan "
             );
             assert_eq!(
@@ -3293,12 +3334,12 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
                 0,
                 "Slash picker Enter must stop propagation and emit 0 InputEvent::PressEnter"
             );
-            assert!(view.read(cx).messages.is_empty());
+            assert!(view.read(cx).history.messages.is_empty());
             assert!(daemon_rx.try_recv().is_err());
 
             // Tab also replaces cleanly with 0 PressEnter
             view.update(cx, |v, cx| {
-                v.prompt_input.update(cx, |input, cx| {
+                v.inputs.prompt_input.update(cx, |input, cx| {
                     input.set_value("", window, cx);
                     input.focus(window, cx);
                 });
@@ -3311,7 +3352,7 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
             window.press("tab", cx);
             window.render_frame(cx);
             assert_eq!(
-                view.read(cx).prompt_input.read(cx).value().as_ref(),
+                view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
                 "/plan "
             );
             assert_eq!(press_enter_count.load(Ordering::SeqCst), 0);
@@ -3320,7 +3361,7 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
             //    Backspace edits find_query while preserving composer "my draft" 100%,
             //    Enter / Shift+Enter advance find_current with 0 PressEnter and 0 sends.
             view.update(cx, |v, cx| {
-                v.messages = vec![
+                v.history.messages = vec![
                     ChatMessage {
                         id: "f0".into(),
                         role: MessageRole::Assistant,
@@ -3334,7 +3375,7 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
                         ..Default::default()
                     },
                 ];
-                v.prompt_input.update(cx, |input, cx| {
+                v.inputs.prompt_input.update(cx, |input, cx| {
                     input.set_value("my draft", window, cx);
                     input.focus(window, cx);
                 });
@@ -3354,7 +3395,7 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
             window.render_frame(cx);
             assert_eq!(view.read(cx).chat_state.find_query, "n");
             assert_eq!(
-                view.read(cx).prompt_input.read(cx).value().as_ref(),
+                view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
                 "my draft",
                 "Chat Find Backspace must stop propagation and never delete composer draft"
             );
@@ -3369,7 +3410,7 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
                 "Chat Find Enter must stop propagation and emit 0 PressEnter"
             );
             assert_eq!(
-                view.read(cx).prompt_input.read(cx).value().as_ref(),
+                view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
                 "my draft",
                 "Chat Find Enter must never send unsent composer draft"
             );
@@ -3387,7 +3428,7 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
 
             // 4. Empty-composer nav Enter opens action menu with 0 PressEnter
             view.update(cx, |v, cx| {
-                v.prompt_input.update(cx, |input, cx| {
+                v.inputs.prompt_input.update(cx, |input, cx| {
                     input.set_value("", window, cx);
                     input.focus(window, cx);
                 });
@@ -3411,8 +3452,8 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
 
             // 5. Ctrl+Enter with slash picker closed sends prompt cleanly ONCE
             view.update(cx, |v, cx| {
-                v.messages.clear();
-                v.prompt_input.update(cx, |input, cx| {
+                v.history.messages.clear();
+                v.inputs.prompt_input.update(cx, |input, cx| {
                     input.set_value("hello world", window, cx);
                     input.focus(window, cx);
                 });
@@ -3421,9 +3462,12 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
             window.render_frame(cx);
             window.press("ctrl-enter", cx);
             window.render_frame(cx);
-            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "");
-            assert_eq!(view.read(cx).messages.len(), 1);
-            assert_eq!(view.read(cx).messages[0].text, "hello world");
+            assert_eq!(
+                view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+                ""
+            );
+            assert_eq!(view.read(cx).history.messages.len(), 1);
+            assert_eq!(view.read(cx).history.messages[0].text, "hello world");
             match daemon_rx.try_recv() {
                 Ok(ClientRequest::SendPrompt { text, .. }) => {
                     assert_eq!(text, "hello world");
@@ -3467,7 +3511,7 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
                     "key {key} must not mutate hidden slash picker selection behind table modal"
                 );
                 assert_eq!(
-                    view.read(cx).prompt_input.read(cx).value().as_ref(),
+                    view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
                     "/pl",
                     "key {key} must not mutate composer behind table modal"
                 );
@@ -3485,7 +3529,10 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
                 view.read(cx).slash_picker_state.is_open(),
                 "Closing table modal via Escape must preserve underlying slash picker"
             );
-            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "/pl");
+            assert_eq!(
+                view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+                "/pl"
+            );
 
             // Shortcuts modal also blocks Find Backspace/Enter behind the modal
             window.press("escape", cx);
@@ -3508,7 +3555,7 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
                 "ActiveModal::Shortcuts must prevent Find Backspace behind modal"
             );
             assert_eq!(
-                view.read(cx).prompt_input.read(cx).value().as_ref(),
+                view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
                 "/pl",
                 "ActiveModal::Shortcuts must prevent composer mutation behind modal"
             );
@@ -3524,13 +3571,13 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.selected_session = Some(SessionSummary {
+            v.selection.selected_session = Some(SessionSummary {
                 id: "sess-r5".into(),
                 agent: AgentKind::Claude,
                 title: "R5 Regression".into(),
                 ..Default::default()
             });
-            v.messages = vec![
+            v.history.messages = vec![
                 ChatMessage {
                     id: "m0".into(),
                     role: MessageRole::Assistant,
@@ -3544,7 +3591,7 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
                     ..Default::default()
                 },
             ];
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
                 input.focus(window, cx);
             });
@@ -3558,7 +3605,10 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
         window.press("p", cx);
         window.press("l", cx);
         window.render_frame(cx);
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "/pl");
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            "/pl"
+        );
         assert!(view.read(cx).slash_picker_state.is_open());
 
         let table = crate::table_modal::parse_table("| Op | Desc |\n|---|---|\n| `|` | OR |")
@@ -3572,7 +3622,7 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
         window.press("a", cx);
         window.render_frame(cx);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "/pl",
             "Typing 'a' behind open table modal must not mutate prompt_input"
         );
@@ -3585,7 +3635,7 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
         // Shortcuts modal also blocks printable 'z' behind modal
         view.update(cx, |v, cx| {
             v.slash_picker_state.close();
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("draft", window, cx);
                 input.focus(window, cx);
             });
@@ -3596,7 +3646,7 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
         window.press("z", cx);
         window.render_frame(cx);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "draft",
             "Typing 'z' behind ActiveModal::Shortcuts must not mutate prompt_input"
         );
@@ -3607,7 +3657,7 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
         // 2. Shift+Enter, Ctrl+Enter, and Alt+Enter while slash picker is open must NOT
         //    accept "/plan " and must keep slash_picker_state.is_open() == true.
         view.update(cx, |v, cx| {
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
                 input.focus(window, cx);
             });
@@ -3619,7 +3669,10 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
         window.press("l", cx);
         window.render_frame(cx);
         assert!(view.read(cx).slash_picker_state.is_open());
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "/pl");
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            "/pl"
+        );
 
         for chord in ["shift-enter", "alt-enter"] {
             window.press(chord, cx);
@@ -3629,7 +3682,7 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
                 "{chord} must keep slash_picker_state open"
             );
             assert_ne!(
-                view.read(cx).prompt_input.read(cx).value().as_ref(),
+                view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
                 "/plan ",
                 "{chord} must NOT accept '/plan ' from slash picker"
             );
@@ -3637,7 +3690,7 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
 
         // Reset composer cleanly to "/pl" with slash picker open
         view.update(cx, |v, cx| {
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
                 input.focus(window, cx);
             });
@@ -3649,7 +3702,10 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
         window.press("l", cx);
         window.render_frame(cx);
         assert!(view.read(cx).slash_picker_state.is_open());
-        assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "/pl");
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            "/pl"
+        );
 
         // 3. Ctrl+F while slash picker is open closes slash_picker_state so Find Enter
         //    advances find_current and leaves composer "/pl" untouched; Ctrl+/ while Find
@@ -3677,7 +3733,7 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
             "Find Enter must advance find_current when opened over slash picker"
         );
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "/pl",
             "Find Enter must leave composer '/pl' untouched"
         );
@@ -3698,7 +3754,7 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
         // 4. Ctrl+Backspace (DeleteToPreviousWordStart) and Home+Delete (Delete) while
         //    Chat Find is open must leave composer drafts 100% untouched.
         view.update(cx, |v, cx| {
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("hello world", window, cx);
                 input.focus(window, cx);
             });
@@ -3713,7 +3769,7 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
         window.press("ctrl-backspace", cx);
         window.render_frame(cx);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "hello world",
             "Ctrl+Backspace while Find is open must NOT delete words from composer draft"
         );
@@ -3721,7 +3777,7 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
         window.press("escape", cx);
         window.render_frame(cx);
         view.update(cx, |v, cx| {
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("hello draft", window, cx);
                 input.focus(window, cx);
             });
@@ -3736,7 +3792,7 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
         window.press("delete", cx);
         window.render_frame(cx);
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "hello draft",
             "Home+Delete while Find is open must NOT delete characters from composer draft"
         );
@@ -3746,7 +3802,7 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
         window.press("escape", cx);
         window.render_frame(cx);
         view.update(cx, |v, cx| {
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("my draft", window, cx);
                 input.focus(window, cx);
             });
@@ -3772,7 +3828,7 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
             "Multi-word Chat Find query 'first needle' must match message 0"
         );
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "my draft",
             "Spacebar inside Chat Find must NOT leak ' ' into composer draft"
         );
@@ -3783,7 +3839,7 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
         window.render_frame(cx);
         view.update(cx, |v, cx| {
             v.chat_state.focused_message_idx = None;
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
                 input.focus(window, cx);
             });
@@ -3898,9 +3954,9 @@ fn quoted_reply_with_text_blocks_renders_body_once_without_duplicate_blockquote(
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![sess.clone()];
-            v.selected_session = Some(sess.clone());
-            v.messages = vec![
+            v.connection.sessions = vec![sess.clone()];
+            v.selection.selected_session = Some(sess.clone());
+            v.history.messages = vec![
                 ChatMessage {
                     id: "a1".into(),
                     role: MessageRole::Assistant,
@@ -3969,13 +4025,13 @@ fn exercise_provider_switch(cx: &mut TestAppContext, composer: bool) {
                 ..Default::default()
             }];
             let workspace_id = view.update(cx, |v, cx| {
-                v.daemon_tx = Some(tx.clone());
+                v.connection.daemon_tx = Some(tx.clone());
                 v.chat_state
                     .harness_choices
                     .insert("local".into(), choices.clone());
-                v.sessions = vec![previous.clone()];
-                v.selected_session = Some(previous.clone());
-                v.messages = history.clone();
+                v.connection.sessions = vec![previous.clone()];
+                v.selection.selected_session = Some(previous.clone());
+                v.history.messages = history.clone();
                 let ws = v
                     .sidebar_state
                     .workspace_store
@@ -3988,7 +4044,7 @@ fn exercise_provider_switch(cx: &mut TestAppContext, composer: bool) {
                 v.sidebar_state.workspace_store.favorites.insert(key);
                 v.sync_sessions_to_shared(cx);
                 v.sync_workspace_to_shared(cx);
-                v.prompt_input.update(cx, |input, cx| {
+                v.inputs.prompt_input.update(cx, |input, cx| {
                     input.set_value("my draft", window, cx);
                     input.focus(window, cx);
                 });
@@ -4051,16 +4107,16 @@ fn exercise_provider_switch(cx: &mut TestAppContext, composer: bool) {
             });
             window.render_frame(cx);
             let v = view.read(cx);
-            assert_eq!(v.selected_session.as_ref(), Some(&next));
-            assert_eq!(v.messages, history);
-            assert_eq!(v.prompt_input.read(cx).value().as_ref(), "my draft");
+            assert_eq!(v.selection.selected_session.as_ref(), Some(&next));
+            assert_eq!(v.history.messages, history);
+            assert_eq!(v.inputs.prompt_input.read(cx).value().as_ref(), "my draft");
             let key = v.session_key_for(&next);
             assert_eq!(
                 v.sidebar_state.workspace_store.effective_workspace_id(&key),
                 workspace_id
             );
             assert!(v.sidebar_state.workspace_store.favorites.contains(&key));
-            assert!(!v.sessions.iter().any(|s| s.id == previous.id));
+            assert!(!v.connection.sessions.iter().any(|s| s.id == previous.id));
             view.update(cx, |v, cx| v.send_current_prompt(window, cx));
             let mut sent = false;
             while let Ok(request) = rx.try_recv() {
@@ -4098,7 +4154,7 @@ fn message_navigation_scroll_menu_copy_reply_quote_and_focus(cx: &mut TestAppCon
     let (handle, view) = open_test_chat_window(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.messages = (0..30)
+            v.history.messages = (0..30)
                 .map(|i| ChatMessage {
                     id: format!("nav-{i}"),
                     role: if i % 2 == 0 {
@@ -4110,7 +4166,7 @@ fn message_navigation_scroll_menu_copy_reply_quote_and_focus(cx: &mut TestAppCon
                     ..Default::default()
                 })
                 .collect();
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
                 input.focus(window, cx);
             });
@@ -4134,6 +4190,7 @@ fn message_navigation_scroll_menu_copy_reply_quote_and_focus(cx: &mut TestAppCon
         window.render_frame(cx);
         assert!(
             view.read(cx)
+                .inputs
                 .prompt_input
                 .read(cx)
                 .focus_handle(cx)
@@ -4167,6 +4224,7 @@ fn message_navigation_scroll_menu_copy_reply_quote_and_focus(cx: &mut TestAppCon
         );
         assert!(
             view.read(cx)
+                .inputs
                 .prompt_input
                 .read(cx)
                 .focus_handle(cx)
@@ -4179,12 +4237,12 @@ fn message_navigation_scroll_menu_copy_reply_quote_and_focus(cx: &mut TestAppCon
         window.press("down", cx);
         window.press("enter", cx);
         window.render_frame(cx);
-        let input = view.read(cx).prompt_input.read(cx);
+        let input = view.read(cx).inputs.prompt_input.read(cx);
         assert_eq!(input.value().as_ref(), "> Element 29\n> Second line\n\n");
         assert_eq!(input.cursor(), input.value().len());
         assert!(input.focus_handle(cx).is_focused(window));
         view.update(cx, |v, cx| {
-            v.prompt_input.update(cx, |input, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("draft", window, cx);
                 input.set_selected_range(0..0, cx);
             });
@@ -4199,13 +4257,14 @@ fn message_navigation_scroll_menu_copy_reply_quote_and_focus(cx: &mut TestAppCon
         window.render_frame(cx);
         assert!(
             view.read(cx)
+                .inputs
                 .prompt_input
                 .read(cx)
                 .focus_handle(cx)
                 .is_focused(window)
         );
         assert_eq!(
-            view.read(cx).prompt_input.read(cx).value().as_ref(),
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "draft"
         );
     })
@@ -4229,9 +4288,9 @@ fn focused_composer_capture_actions_nav_paste_end_and_normal_editing(cx: &mut Te
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![sess.clone()];
-            v.selected_session = Some(sess.clone());
-            v.messages = vec![
+            v.connection.sessions = vec![sess.clone()];
+            v.selection.selected_session = Some(sess.clone());
+            v.history.messages = vec![
                 ChatMessage {
                     id: "m0".into(),
                     role: MessageRole::Assistant,
@@ -4253,7 +4312,7 @@ fn focused_composer_capture_actions_nav_paste_end_and_normal_editing(cx: &mut Te
                     reason: "offline".into(),
                 },
             );
-            v.prompt_input.update(cx, |inp, cx| {
+            v.inputs.prompt_input.update(cx, |inp, cx| {
                 inp.set_value("", window, cx);
                 inp.focus(window, cx);
             });
@@ -4281,7 +4340,7 @@ fn focused_composer_capture_actions_nav_paste_end_and_normal_editing(cx: &mut Te
         window.press("delete", cx);
         window.render_frame(cx);
         assert_eq!(
-            view.read(cx).messages.len(),
+            view.read(cx).history.messages.len(),
             1,
             "Delete on focused waiting message while prompt-input is focused must cancel it"
         );
@@ -4313,6 +4372,7 @@ fn focused_composer_capture_actions_nav_paste_end_and_normal_editing(cx: &mut Te
         );
         assert!(
             view.read(cx)
+                .inputs
                 .prompt_input
                 .read(cx)
                 .value()
@@ -4325,6 +4385,7 @@ fn focused_composer_capture_actions_nav_paste_end_and_normal_editing(cx: &mut Te
         window.render_frame(cx);
         assert!(
             view.read(cx)
+                .inputs
                 .prompt_input
                 .read(cx)
                 .value()
@@ -4371,8 +4432,8 @@ fn cumulative_attachment_caps_enforce_max_10_images_and_10_files_across_batches(
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![sess.clone()];
-            v.selected_session = Some(sess.clone());
+            v.connection.sessions = vec![sess.clone()];
+            v.selection.selected_session = Some(sess.clone());
             v.stage_dropped_paths(&pngs[0..6], window, cx);
             assert_eq!(v.chat_state.pending_attachments.len(), 6);
             assert!(v.notice.is_none());
@@ -4511,13 +4572,13 @@ fn stage_dropped_paths_rejects_directories_and_missing_paths_with_notice(cx: &mu
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![sess.clone()];
-            v.selected_session = Some(sess.clone());
+            v.connection.sessions = vec![sess.clone()];
+            v.selection.selected_session = Some(sess.clone());
 
             // Directory + missing path must be rejected with a clear notice and 0 staged.
             v.stage_dropped_paths(&[sub_dir.clone(), missing_path.clone()], window, cx);
             assert!(v.chat_state.pending_attachments.is_empty());
-            assert!(v.prompt_input.read(cx).value().is_empty());
+            assert!(v.inputs.prompt_input.read(cx).value().is_empty());
             assert!(
                 v.notice
                     .as_deref()
@@ -4531,7 +4592,7 @@ fn stage_dropped_paths_rejects_directories_and_missing_paths_with_notice(cx: &mu
             v.stage_dropped_paths(&[sub_dir.clone(), valid_file.clone()], window, cx);
             assert_eq!(v.chat_state.pending_attachments.len(), 1);
             assert_eq!(v.chat_state.pending_attachments[0].path, valid_file);
-            assert_eq!(v.prompt_input.read(cx).value().as_ref(), "real.txt ");
+            assert_eq!(v.inputs.prompt_input.read(cx).value().as_ref(), "real.txt ");
             assert!(
                 v.notice
                     .as_deref()
@@ -4634,8 +4695,8 @@ fn failed_upload_restores_prompt_quote_and_attachments_safely(cx: &mut TestAppCo
 
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = vec![sess_a.clone(), sess_b.clone()];
-            v.selected_session = Some(sess_a.clone());
+            v.connection.sessions = vec![sess_a.clone(), sess_b.clone()];
+            v.selection.selected_session = Some(sess_a.clone());
 
             // 1. Same session, empty draft -> restores prompt, quote, and attachments.
             v.restore_failed_upload_draft(
@@ -4648,7 +4709,7 @@ fn failed_upload_restores_prompt_quote_and_attachments_safely(cx: &mut TestAppCo
                 cx,
             );
             assert_eq!(
-                v.prompt_input.read(cx).value().as_ref(),
+                v.inputs.prompt_input.read(cx).value().as_ref(),
                 "please check shot.png"
             );
             assert_eq!(
@@ -4668,7 +4729,8 @@ fn failed_upload_restores_prompt_quote_and_attachments_safely(cx: &mut TestAppCo
             // 2. Same session, user already typed a new draft -> must NOT clobber new draft.
             v.chat_state.pending_attachments.clear();
             v.chat_state.reply_quote = None;
-            v.prompt_input
+            v.inputs
+                .prompt_input
                 .update(cx, |inp, cx| inp.set_value("new draft", window, cx));
             v.restore_failed_upload_draft(
                 &sess_a,
@@ -4679,14 +4741,15 @@ fn failed_upload_restores_prompt_quote_and_attachments_safely(cx: &mut TestAppCo
                 window,
                 cx,
             );
-            assert_eq!(v.prompt_input.read(cx).value().as_ref(), "new draft");
+            assert_eq!(v.inputs.prompt_input.read(cx).value().as_ref(), "new draft");
             assert!(v.chat_state.pending_attachments.is_empty());
             assert!(v.chat_state.reply_quote.is_none());
             assert!(v.notice.as_deref().is_some_and(|n| n.contains("timeout")));
 
             // 3. Switched to Session B -> must NOT leak Session A's draft/attachments into Session B.
-            v.selected_session = Some(sess_b.clone());
-            v.prompt_input
+            v.selection.selected_session = Some(sess_b.clone());
+            v.inputs
+                .prompt_input
                 .update(cx, |inp, cx| inp.set_value("", window, cx));
             v.restore_failed_upload_draft(
                 &sess_a,
@@ -4697,7 +4760,7 @@ fn failed_upload_restores_prompt_quote_and_attachments_safely(cx: &mut TestAppCo
                 window,
                 cx,
             );
-            assert!(v.prompt_input.read(cx).value().is_empty());
+            assert!(v.inputs.prompt_input.read(cx).value().is_empty());
             assert!(v.chat_state.pending_attachments.is_empty());
             assert!(v.chat_state.reply_quote.is_none());
             assert!(

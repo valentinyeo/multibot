@@ -360,10 +360,15 @@ impl MultibotView {
         emoji: ReactionEmoji,
         cx: &mut Context<Self>,
     ) {
-        if self.selected_session.as_ref().is_some_and(|s| s.archived) {
+        if self
+            .selection
+            .selected_session
+            .as_ref()
+            .is_some_and(|s| s.archived)
+        {
             return;
         }
-        let server_masks = compute_server_reaction_masks(&self.messages);
+        let server_masks = compute_server_reaction_masks(&self.history.messages);
         let server_has = (server_masks.get(target_id).copied().unwrap_or(0) & emoji.bit()) != 0;
         let local_add_has = self
             .chat_state
@@ -418,8 +423,10 @@ impl MultibotView {
         }
 
         if let Some(wire_text) = format_reaction_message(emoji, target_id, target_text)
-            && let (Some(session), Some(tx)) =
-                (self.selected_session.clone(), self.active_session_tx())
+            && let (Some(session), Some(tx)) = (
+                self.selection.selected_session.clone(),
+                self.active_session_tx(),
+            )
         {
             let _ = tx.send(ClientRequest::SendPrompt {
                 options: self.composer_options_for(&session),

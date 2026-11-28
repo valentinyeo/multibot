@@ -26,7 +26,7 @@ impl MultibotView {
         self.palette_state.selected_index = 0;
         self.palette_state.scroll_handle.scroll_to_item(0);
         if let Some(window) = window {
-            self.palette_input.update(cx, |state, cx| {
+            self.inputs.palette_input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
                 state.focus(window, cx);
             });
@@ -44,7 +44,12 @@ impl MultibotView {
         self.execute_palette_row_inner(row, now_ms, window.as_deref_mut(), cx);
         if let Some(win) = window {
             let palette_still_focused = self.active_modal != ActiveModal::Palette
-                && self.palette_input.read(cx).focus_handle(cx).is_focused(win);
+                && self
+                    .inputs
+                    .palette_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(win);
             if palette_still_focused {
                 self.focus_active_surface_default(win, cx);
             }
@@ -80,7 +85,8 @@ impl MultibotView {
             }
             self.palette_state.selected_index = 0;
             if let Some(window) = window {
-                self.palette_input
+                self.inputs
+                    .palette_input
                     .update(cx, |input, cx| input.set_value("", window, cx));
             }
             cx.notify();
@@ -94,7 +100,7 @@ impl MultibotView {
                 .session_inputs()
                 .iter()
                 .map(|input| input.host.to_string())
-                .chain(self.host_txs.keys().cloned())
+                .chain(self.connection.host_txs.keys().cloned())
                 .chain(std::iter::once(self.current_host_label().to_string()))
                 .collect();
             for host in hosts {
@@ -106,7 +112,7 @@ impl MultibotView {
                 }
             }
             if let Some(window) = window {
-                self.palette_input.update(cx, |input, cx| {
+                self.inputs.palette_input.update(cx, |input, cx| {
                     input.set_value("", window, cx);
                     input.focus(window, cx);
                 });
@@ -178,7 +184,7 @@ impl MultibotView {
             };
             match target {
                 ReminderTarget::Session(key) => {
-                    let note = self.palette_input.read(cx).value().to_string();
+                    let note = self.inputs.palette_input.read(cx).value().to_string();
                     if let Some(session) = self.find_session_by_key(&key) {
                         if session.archived {
                             self.reactivate_session_key(&key, cx);
@@ -718,7 +724,7 @@ impl MultibotView {
                             "Multibot v{} · {} · {}",
                             multibot_proto::build_version(),
                             self.footprint_label,
-                            self.connection_status
+                            self.connection.connection_status
                         ));
                     }
                     "pal-cmd-copy-code" => {

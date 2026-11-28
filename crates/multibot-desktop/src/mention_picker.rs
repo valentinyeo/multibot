@@ -312,7 +312,7 @@ impl MultibotView {
             self.mention_picker_state.close();
             return;
         }
-        let input = self.prompt_input.read(cx);
+        let input = self.inputs.prompt_input.read(cx);
         let text = input.value().to_string();
         let caret = input.cursor();
         // Completed atomic mentions must not reopen autocomplete on a caret move.
@@ -342,7 +342,7 @@ impl MultibotView {
             return;
         };
         let token = InlineToken::new(target.session_key, format!("@{}", target.name));
-        self.prompt_input.update(cx, |input, cx| {
+        self.inputs.prompt_input.update(cx, |input, cx| {
             if input
                 .replace_range_with_token(range, token, window, cx)
                 .is_ok()
@@ -368,7 +368,7 @@ impl MultibotView {
         let state = &mut self.mention_picker_state;
         match key.to_ascii_lowercase().as_str() {
             "escape" => {
-                let input = self.prompt_input.read(cx);
+                let input = self.inputs.prompt_input.read(cx);
                 state.dismiss(input.value().as_ref(), input.cursor());
             }
             "up" => {
@@ -390,7 +390,7 @@ impl MultibotView {
     }
 
     pub(crate) fn bound_mention_prompt(&self, cx: &gpui_kit::App) -> String {
-        let input = self.prompt_input.read(cx);
+        let input = self.inputs.prompt_input.read(cx);
         let mut text = input.value().to_string();
         for span in input.tokens().iter().rev() {
             if let Some((_, _, sid)) = parse_session_key(span.token().id()) {

@@ -162,9 +162,9 @@ fn renders_pinned_groups_recents_and_cycles_three_modes(cx: &mut TestAppContext)
     let (handle, view) = open_view(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = sample_sessions();
-            let k1 = v.session_key_for(&v.sessions[0]);
-            let k2 = v.session_key_for(&v.sessions[1]);
+            v.connection.sessions = sample_sessions();
+            let k1 = v.session_key_for(&v.connection.sessions[0]);
+            let k2 = v.session_key_for(&v.connection.sessions[1]);
             v.sidebar_state.workspace_store.toggle_pin(&k1, false);
             v.sidebar_state.workspace_store.toggle_favorite(&k1);
             v.sidebar_state.workspace_store.toggle_group_for_session(
@@ -225,9 +225,9 @@ fn section_headers_show_names_and_clicks_keep_sessions_visible(cx: &mut TestAppC
         for name in ["app.hypertask.ai", "Marketing / Help / Docs", "  "] {
             view.update(cx, |v, cx| {
                 v.sidebar_state.workspace_store = WorkspaceStore::new();
-                v.sessions = sample_sessions();
-                let pin = v.session_key_for(&v.sessions[0]);
-                let grouped = v.session_key_for(&v.sessions[1]);
+                v.connection.sessions = sample_sessions();
+                let pin = v.session_key_for(&v.connection.sessions[0]);
+                let grouped = v.session_key_for(&v.connection.sessions[1]);
                 v.sidebar_state.workspace_store.toggle_pin(&pin, false);
                 let group =
                     v.sidebar_state
@@ -289,11 +289,11 @@ fn right_click_scopes_shared_commands_to_pinned_grouped_recent_and_rail_sessions
     let (handle, view) = open_view(cx);
     cx.update_window(handle, |_, window, cx| {
         let keys = view.update(cx, |v, cx| {
-            v.sessions = sample_sessions();
-            let keys: Vec<_> = v.sessions.iter().map(|s| v.session_key_for(s)).collect();
+            v.connection.sessions = sample_sessions();
+            let keys: Vec<_> = v.connection.sessions.iter().map(|s| v.session_key_for(s)).collect();
             v.sidebar_state.workspace_store.toggle_pin(&keys[0], false);
             v.sidebar_state.workspace_store.toggle_group_for_session(&keys[1], DEFAULT_WORKSPACE_ID, None, "Backend");
-            v.select_session(v.sessions[0].clone(), cx);
+            v.select_session(v.connection.sessions[0].clone(), cx);
             cx.notify();
             keys
         });
@@ -311,7 +311,7 @@ fn right_click_scopes_shared_commands_to_pinned_grouped_recent_and_rail_sessions
                 view.read_with(cx, |v, _| {
                     assert_eq!(v.active_modal, ActiveModal::Palette);
                     assert_eq!(v.palette_state.mode.target_session_key(), Some(key.as_str()));
-                    assert_eq!(v.selected_session.as_ref().unwrap().id, "s1");
+                    assert_eq!(v.selection.selected_session.as_ref().unwrap().id, "s1");
                     let commands = v.build_palette_command_catalog(10000);
                     let rows = v.build_palette_rows("", 10000);
                     for command in commands.iter().filter(|c| c.tab_context) {
@@ -341,13 +341,18 @@ fn sidebar_group_activity_order_survives_selection_and_palette_pin_round_trip(
             let keys = view.update(cx, |v, cx| {
                 v.sidebar_state.workspace_store = WorkspaceStore::new();
                 v.sidebar_state.active_workspace_id = workspace_id.into();
-                v.sessions = sample_sessions();
-                v.sessions[0].title = "Chief of Staff".into();
-                v.sessions[0].updated_at_ms = 100;
-                v.sessions[0].last_assistant_ms = Some(100);
-                v.sessions[1].title = "Supervisor".into();
-                v.sessions[2].last_assistant_ms = Some(6000);
-                let keys: Vec<_> = v.sessions.iter().map(|s| v.session_key_for(s)).collect();
+                v.connection.sessions = sample_sessions();
+                v.connection.sessions[0].title = "Chief of Staff".into();
+                v.connection.sessions[0].updated_at_ms = 100;
+                v.connection.sessions[0].last_assistant_ms = Some(100);
+                v.connection.sessions[1].title = "Supervisor".into();
+                v.connection.sessions[2].last_assistant_ms = Some(6000);
+                let keys: Vec<_> = v
+                    .connection
+                    .sessions
+                    .iter()
+                    .map(|s| v.session_key_for(s))
+                    .collect();
                 let group = v.sidebar_state.workspace_store.create_group(
                     workspace_id,
                     "app.hypertask.ai",
@@ -386,7 +391,7 @@ fn sidebar_group_activity_order_survives_selection_and_palette_pin_round_trip(
             window.press("ctrl-3", cx);
             window.render_frame(cx);
             view.read_with(cx, |v, _| {
-                assert_eq!(v.selected_session.as_ref().unwrap().id, "s1")
+                assert_eq!(v.selection.selected_session.as_ref().unwrap().id, "s1")
             });
             window.right_click("sidebar-group-0-item-2", cx);
             window.render_frame(cx);
@@ -439,7 +444,7 @@ fn sidebar_clicks_and_ctrl_digits_select_in_place(cx: &mut TestAppContext) {
                     v.sidebar_state.workspace_store = WorkspaceStore::new();
                     v.sidebar_state.workspace_store.auto_sort = auto_sort;
                     v.sidebar_state.active_workspace_id = workspace_id.to_string();
-                    v.sessions = (0..9)
+                    v.connection.sessions = (0..9)
                         .map(|i| SessionSummary {
                             id: format!("select-{i}"),
                             title: format!("Session {i}"),
@@ -449,8 +454,13 @@ fn sidebar_clicks_and_ctrl_digits_select_in_place(cx: &mut TestAppContext) {
                             ..Default::default()
                         })
                         .collect();
-                    let keys: Vec<_> = v.sessions.iter().map(|s| v.session_key_for(s)).collect();
-                    v.select_session(v.sessions[0].clone(), cx);
+                    let keys: Vec<_> = v
+                        .connection
+                        .sessions
+                        .iter()
+                        .map(|s| v.session_key_for(s))
+                        .collect();
+                    v.select_session(v.connection.sessions[0].clone(), cx);
                     keys
                 });
                 window.render_frame(cx);
@@ -464,7 +474,7 @@ fn sidebar_clicks_and_ctrl_digits_select_in_place(cx: &mut TestAppContext) {
                         }
                         window.render_frame(cx);
                         view.read_with(cx, |v, _| {
-                            let session = v.selected_session.as_ref().unwrap();
+                            let session = v.selection.selected_session.as_ref().unwrap();
                             let active = v.session_key_for(session);
                             assert_eq!(active, keys[index]);
                             let store = &v.sidebar_state.workspace_store;
@@ -493,7 +503,7 @@ fn done_steps_down_visible_sidebar_without_reordering(cx: &mut TestAppContext) {
     let (handle, view) = open_view(cx);
     cx.update_window(handle, |_, window, cx| {
         let keys = view.update(cx, |v, cx| {
-            v.sessions = (0..5)
+            v.connection.sessions = (0..5)
                 .map(|i| SessionSummary {
                     id: format!("done-{i}"),
                     agent: AgentKind::Claude,
@@ -502,8 +512,13 @@ fn done_steps_down_visible_sidebar_without_reordering(cx: &mut TestAppContext) {
                     ..Default::default()
                 })
                 .collect();
-            let keys: Vec<_> = v.sessions.iter().map(|s| v.session_key_for(s)).collect();
-            v.select_session(v.sessions[2].clone(), cx);
+            let keys: Vec<_> = v
+                .connection
+                .sessions
+                .iter()
+                .map(|s| v.session_key_for(s))
+                .collect();
+            v.select_session(v.connection.sessions[2].clone(), cx);
             v.focus_sidebar(window, cx);
             keys
         });
@@ -518,6 +533,7 @@ fn done_steps_down_visible_sidebar_without_reordering(cx: &mut TestAppContext) {
             window.render_frame(cx);
             assert!(
                 view.read(cx)
+                    .inputs
                     .prompt_input
                     .read(cx)
                     .focus_handle(cx)
@@ -525,7 +541,7 @@ fn done_steps_down_visible_sidebar_without_reordering(cx: &mut TestAppContext) {
             );
             view.read_with(cx, |v, _| {
                 assert_eq!(
-                    v.session_key_for(v.selected_session.as_ref().unwrap()),
+                    v.session_key_for(v.selection.selected_session.as_ref().unwrap()),
                     keys[selected]
                 );
                 assert!(
@@ -545,7 +561,7 @@ fn done_steps_down_visible_sidebar_without_reordering(cx: &mut TestAppContext) {
         }
         window.press("alt-e", cx);
         window.render_frame(cx);
-        assert!(view.read(cx).selected_session.is_none());
+        assert!(view.read(cx).selection.selected_session.is_none());
         assert!(view.read(cx).active_ctrl_digit_order().is_empty());
     })
     .unwrap();
@@ -557,9 +573,9 @@ fn dissolve_steps_up_visible_sidebar_and_top_falls_down(cx: &mut TestAppContext)
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     cx.update_window(handle, |_, window, cx| {
         let keys = view.update(cx, |v, cx| {
-            v.daemon_tx = Some(tx);
+            v.connection.daemon_tx = Some(tx);
             // Backing storage differs from the displayed order.
-            v.sessions = (0..5)
+            v.connection.sessions = (0..5)
                 .rev()
                 .map(|i| SessionSummary {
                     id: format!("dissolve-{i}"),
@@ -569,7 +585,7 @@ fn dissolve_steps_up_visible_sidebar_and_top_falls_down(cx: &mut TestAppContext)
                     ..Default::default()
                 })
                 .collect();
-            v.select_session(v.sessions[1].clone(), cx);
+            v.select_session(v.connection.sessions[1].clone(), cx);
             v.focus_sidebar(window, cx);
             v.active_ctrl_digit_order()
         });
@@ -584,6 +600,7 @@ fn dissolve_steps_up_visible_sidebar_and_top_falls_down(cx: &mut TestAppContext)
             window.render_frame(cx);
             assert!(
                 view.read(cx)
+                    .inputs
                     .prompt_input
                     .read(cx)
                     .focus_handle(cx)
@@ -591,7 +608,7 @@ fn dissolve_steps_up_visible_sidebar_and_top_falls_down(cx: &mut TestAppContext)
             );
             view.read_with(cx, |v, _| {
                 assert_eq!(
-                    v.session_key_for(v.selected_session.as_ref().unwrap()),
+                    v.session_key_for(v.selection.selected_session.as_ref().unwrap()),
                     keys[selected]
                 );
                 assert_eq!(
@@ -613,7 +630,7 @@ fn dissolve_steps_up_visible_sidebar_and_top_falls_down(cx: &mut TestAppContext)
         }
         window.press("ctrl-shift-w", cx);
         window.render_frame(cx);
-        assert!(view.read(cx).selected_session.is_none());
+        assert!(view.read(cx).selection.selected_session.is_none());
         let mut archived = Vec::new();
         while let Ok(request) = rx.try_recv() {
             if let ClientRequest::ArchiveSession {
@@ -648,8 +665,8 @@ fn shell_dissolve_requires_one_confirmation_for_exact_session_within_eight_secon
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.daemon_tx = Some(tx);
-            v.sessions = (0..2)
+            v.connection.daemon_tx = Some(tx);
+            v.connection.sessions = (0..2)
                 .map(|i| SessionSummary {
                     id: format!("shell-{i}"),
                     agent: AgentKind::Shell,
@@ -659,7 +676,7 @@ fn shell_dissolve_requires_one_confirmation_for_exact_session_within_eight_secon
                     ..Default::default()
                 })
                 .collect();
-            v.select_session(v.sessions[1].clone(), cx);
+            v.select_session(v.connection.sessions[1].clone(), cx);
             v.focus_sidebar(window, cx);
         });
         window.render_frame(cx);
@@ -671,7 +688,12 @@ fn shell_dissolve_requires_one_confirmation_for_exact_session_within_eight_secon
             Some("Press Ctrl+Shift+W again to kill live server shell \"Server 1\".")
         );
         assert_eq!(
-            view.read(cx).selected_session.as_ref().unwrap().id,
+            view.read(cx)
+                .selection
+                .selected_session
+                .as_ref()
+                .unwrap()
+                .id,
             "shell-1"
         );
         assert!(window.find("shell-kill-confirmation").visible());
@@ -691,7 +713,12 @@ fn shell_dissolve_requires_one_confirmation_for_exact_session_within_eight_secon
             session_id, agent: AgentKind::Shell, source_path, kill_process: true,
         }) if session_id == "shell-1" && source_path == "tmux:shell-1"));
         assert_eq!(
-            view.read(cx).selected_session.as_ref().unwrap().id,
+            view.read(cx)
+                .selection
+                .selected_session
+                .as_ref()
+                .unwrap()
+                .id,
             "shell-0"
         );
         assert!(view.read(cx).notice.is_none());
@@ -718,7 +745,7 @@ fn shell_dissolve_requires_one_confirmation_for_exact_session_within_eight_secon
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::ArchiveSession {
             session_id, agent: AgentKind::Shell, kill_process: true, ..
         }) if session_id == "shell-0"));
-        assert!(view.read(cx).selected_session.is_none());
+        assert!(view.read(cx).selection.selected_session.is_none());
     })
     .unwrap();
 }
@@ -728,10 +755,10 @@ fn archive_acknowledgements_do_not_leak_into_live_chats(cx: &mut TestAppContext)
     let (handle, view) = open_view(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = sample_sessions();
-            v.select_session(v.sessions[0].clone(), cx);
+            v.connection.sessions = sample_sessions();
+            v.select_session(v.connection.sessions[0].clone(), cx);
             v.notice = Some("A session-specific notice".into());
-            v.select_session(v.sessions[1].clone(), cx);
+            v.select_session(v.connection.sessions[1].clone(), cx);
             assert!(v.notice.is_none());
             for archived in [true, false] {
                 v.handle_bridge_event(
@@ -744,8 +771,8 @@ fn archive_acknowledgements_do_not_leak_into_live_chats(cx: &mut TestAppContext)
                     cx,
                 );
                 assert!(v.notice.is_none());
-                assert_eq!(v.selected_session.as_ref().unwrap().id, "s2");
-                assert!(!v.selected_session.as_ref().unwrap().archived);
+                assert_eq!(v.selection.selected_session.as_ref().unwrap().id, "s2");
+                assert!(!v.selection.selected_session.as_ref().unwrap().archived);
             }
         });
         window.render_frame(cx);
@@ -767,13 +794,13 @@ fn codex_exit_commands_dissolve_without_sending_a_prompt(cx: &mut TestAppContext
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             view.update(cx, |v, cx| {
                 v.sidebar_state.workspace_store = WorkspaceStore::new();
-                v.daemon_tx = Some(tx);
-                v.sessions = vec![SessionSummary { id: "codex-close".into(), agent: AgentKind::Codex,
+                v.connection.daemon_tx = Some(tx);
+                v.connection.sessions = vec![SessionSummary { id: "codex-close".into(), agent: AgentKind::Codex,
                     source_path: "/tmp/rollout-codex-close.jsonl".into(), ..Default::default() }];
-                v.select_session(v.sessions[0].clone(), cx);
+                v.select_session(v.connection.sessions[0].clone(), cx);
                 while rx.try_recv().is_ok() {}
                 if command != "ctrl-shift-w" {
-                    v.prompt_input.update(cx, |input, cx| input.set_value(command, window, cx));
+                    v.inputs.prompt_input.update(cx, |input, cx| input.set_value(command, window, cx));
                     v.send_current_prompt(window, cx);
                 }
             });
@@ -781,7 +808,7 @@ fn codex_exit_commands_dissolve_without_sending_a_prompt(cx: &mut TestAppContext
                 window.render_frame(cx);
                 window.press(command, cx);
             }
-            assert!(view.read(cx).selected_session.is_none());
+            assert!(view.read(cx).selection.selected_session.is_none());
             let requests: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
             assert!(requests.iter().any(|request| matches!(request, ClientRequest::ArchiveSession {
                 session_id, agent: AgentKind::Codex, kill_process: true, .. } if session_id == "codex-close")));
@@ -803,7 +830,7 @@ fn frequent_ctrl_tab_keeps_order_and_workspace_scope(cx: &mut TestAppContext) {
                     .workspace_store
                     .create_workspace("Other project", None)
                     .unwrap();
-                v.sessions = (0..6)
+                v.connection.sessions = (0..6)
                     .map(|i| SessionSummary {
                         id: format!("frequent-{i}"),
                         agent: AgentKind::Claude,
@@ -812,7 +839,12 @@ fn frequent_ctrl_tab_keeps_order_and_workspace_scope(cx: &mut TestAppContext) {
                         ..Default::default()
                     })
                     .collect();
-                let keys: Vec<_> = v.sessions.iter().map(|s| v.session_key_for(s)).collect();
+                let keys: Vec<_> = v
+                    .connection
+                    .sessions
+                    .iter()
+                    .map(|s| v.session_key_for(s))
+                    .collect();
                 let now = now_unix_ms();
                 for (i, key) in keys.iter().enumerate() {
                     if i >= 4 {
@@ -826,7 +858,7 @@ fn frequent_ctrl_tab_keeps_order_and_workspace_scope(cx: &mut TestAppContext) {
                             .record_frequent_visit(key, now - 100 - visit as i64);
                     }
                 }
-                v.select_session(v.sessions[0].clone(), cx);
+                v.select_session(v.connection.sessions[0].clone(), cx);
                 v.set_workspace_view(WorkspaceView::Frequent, cx);
                 assert_eq!(v.sidebar_state.active_workspace_id, workspace_id);
                 keys
@@ -848,7 +880,7 @@ fn frequent_ctrl_tab_keeps_order_and_workspace_scope(cx: &mut TestAppContext) {
                         window.render_frame(cx);
                         view.read_with(cx, |v, _| {
                             assert_eq!(
-                                v.session_key_for(v.selected_session.as_ref().unwrap()),
+                                v.session_key_for(v.selection.selected_session.as_ref().unwrap()),
                                 keys[index]
                             );
                             assert_eq!(v.active_ctrl_digit_order(), keys[..count]);
@@ -906,7 +938,7 @@ fn every_sidebar_agent_paints_cli_and_directory_on_line_two(cx: &mut TestAppCont
             ] {
                 let key = view.update(cx, |v, cx| {
                     v.sidebar_state.workspace_store = WorkspaceStore::new();
-                    v.sessions = vec![SessionSummary {
+                    v.connection.sessions = vec![SessionSummary {
                         id: "subtitle".into(),
                         agent,
                         title: "Session title".into(),
@@ -921,7 +953,7 @@ fn every_sidebar_agent_paints_cli_and_directory_on_line_two(cx: &mut TestAppCont
                         ),
                         ..Default::default()
                     }];
-                    let key = v.session_key_for(&v.sessions[0]);
+                    let key = v.session_key_for(&v.connection.sessions[0]);
                     if pinned {
                         v.sidebar_state.workspace_store.toggle_pin(&key, false);
                     }
@@ -957,7 +989,7 @@ fn ctrl_tab_cycles_every_visible_session_without_reordering(cx: &mut TestAppCont
                         v.sidebar_state.workspace_store = WorkspaceStore::new();
                         v.sidebar_state.active_workspace_id = workspace_id.to_string();
                         v.sidebar_state.unread_only = unread_only;
-                        v.sessions = (0..count)
+                        v.connection.sessions = (0..count)
                             .map(|i| SessionSummary {
                                 id: format!("cycle-{i}"),
                                 title: format!("Session {i}"),
@@ -967,14 +999,18 @@ fn ctrl_tab_cycles_every_visible_session_without_reordering(cx: &mut TestAppCont
                                 ..Default::default()
                             })
                             .collect();
-                        let keys: Vec<_> =
-                            v.sessions.iter().map(|s| v.session_key_for(s)).collect();
+                        let keys: Vec<_> = v
+                            .connection
+                            .sessions
+                            .iter()
+                            .map(|s| v.session_key_for(s))
+                            .collect();
                         for (i, key) in keys.iter().enumerate() {
                             v.sidebar_state
                                 .workspace_store
                                 .record_session_view(key, 20_000 - i as i64);
                         }
-                        v.select_session(v.sessions[0].clone(), cx);
+                        v.select_session(v.connection.sessions[0].clone(), cx);
                         (keys, v.sidebar_state.workspace_store.clone())
                     });
                     window.render_frame(cx);
@@ -987,8 +1023,9 @@ fn ctrl_tab_cycles_every_visible_session_without_reordering(cx: &mut TestAppCont
                             window.press(chord, cx);
                             window.render_frame(cx);
                             view.read_with(cx, |v, _| {
-                                let active =
-                                    v.session_key_for(v.selected_session.as_ref().unwrap());
+                                let active = v.session_key_for(
+                                    v.selection.selected_session.as_ref().unwrap(),
+                                );
                                 assert_eq!(active, keys[index], "{chord}, {workspace_id}");
                                 let layout = v
                                     .sidebar_state
@@ -1029,13 +1066,13 @@ fn ctrl_tab_does_not_open_sessions_in_collapsed_sections(cx: &mut TestAppContext
     let (handle, view) = open_view(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = sample_sessions();
+            v.connection.sessions = sample_sessions();
             let group = v.sidebar_state.workspace_store.create_group(
                 DEFAULT_WORKSPACE_ID,
                 "Hidden with Ctrl+G",
                 None,
             );
-            for session in &v.sessions {
+            for session in &v.connection.sessions {
                 let key = v.session_key_for(session);
                 v.sidebar_state.workspace_store.toggle_group_for_session(
                     &key,
@@ -1047,14 +1084,14 @@ fn ctrl_tab_does_not_open_sessions_in_collapsed_sections(cx: &mut TestAppContext
             v.sidebar_state
                 .workspace_store
                 .toggle_group_collapsed(&group.id);
-            v.select_session(v.sessions[0].clone(), cx);
+            v.select_session(v.connection.sessions[0].clone(), cx);
         });
         window.render_frame(cx);
         for chord in ["ctrl-tab", "ctrl-shift-tab"] {
             window.press(chord, cx);
             window.render_frame(cx);
             view.read_with(cx, |v, _| {
-                assert_eq!(v.selected_session.as_ref().unwrap().id, "s1");
+                assert_eq!(v.selection.selected_session.as_ref().unwrap().id, "s1");
                 assert!(v.sidebar_state.workspace_store.recent_views.is_empty());
             });
         }
@@ -1126,11 +1163,11 @@ fn ctrl_g_collapses_group_without_ungrouping_and_collapsed_rail_matches_ctrl_dig
     let (handle, view) = open_view(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = sample_sessions();
-            let k1 = v.session_key_for(&v.sessions[0]);
-            let k2 = v.session_key_for(&v.sessions[1]);
-            let k3 = v.session_key_for(&v.sessions[2]);
-            v.selected_session = Some(v.sessions[2].clone());
+            v.connection.sessions = sample_sessions();
+            let k1 = v.session_key_for(&v.connection.sessions[0]);
+            let k2 = v.session_key_for(&v.connection.sessions[1]);
+            let k3 = v.session_key_for(&v.connection.sessions[2]);
+            v.selection.selected_session = Some(v.connection.sessions[2].clone());
 
             // Ungrouped session: toggle_active_group is a no-op
             v.toggle_active_group(cx);
@@ -1148,7 +1185,7 @@ fn ctrl_g_collapses_group_without_ungrouping_and_collapsed_rail_matches_ctrl_dig
                 Some(&gid),
                 "Team",
             );
-            v.selected_session = Some(v.sessions[0].clone());
+            v.selection.selected_session = Some(v.connection.sessions[0].clone());
             v.toggle_active_group(cx);
             assert!(
                 v.sidebar_state
@@ -1187,9 +1224,9 @@ fn sidebar_rename_focus_and_close_overlay_cancels_rename_without_closing_inbox(
     let (handle, view) = open_view(cx);
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
-            v.sessions = sample_sessions();
+            v.connection.sessions = sample_sessions();
             v.main_surface = MainSurface::Inbox;
-            let k1 = v.session_key_for(&v.sessions[0]);
+            let k1 = v.session_key_for(&v.connection.sessions[0]);
             v.start_sidebar_rename_with_window(k1, window, cx);
             v.focus_inbox(window, cx);
         });
@@ -1214,8 +1251,8 @@ fn sidebar_recents_sync_pinned_collapse_and_modal_precedence(cx: &mut TestAppCon
     cx.update_window(handle, |_, window, cx| {
         // Old fixed-section collapse flags must not strand sessions after header toggles disappear.
         view.update(cx, |v, cx| {
-            v.sessions = sample_sessions();
-            let k1 = v.session_key_for(&v.sessions[0]);
+            v.connection.sessions = sample_sessions();
+            let k1 = v.session_key_for(&v.connection.sessions[0]);
             v.sidebar_state.workspace_store.toggle_pin(&k1, false);
             v.sidebar_state.workspace_store.recents_section_collapsed = true;
             v.sidebar_state.recents_collapsed = false;
@@ -1247,7 +1284,7 @@ fn sidebar_recents_sync_pinned_collapse_and_modal_precedence(cx: &mut TestAppCon
         // (c) Focused sidebar with active rename + ActiveModal::Shortcuts on top:
         // raw keydown must not mutate rename, and 1st CloseOverlay closes Shortcuts FIRST.
         view.update(cx, |v, cx| {
-            let k2 = v.session_key_for(&v.sessions[1]);
+            let k2 = v.session_key_for(&v.connection.sessions[1]);
             v.start_sidebar_rename_with_window(k2, window, cx);
             v.active_modal = ActiveModal::Shortcuts;
             cx.notify();

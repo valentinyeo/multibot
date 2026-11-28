@@ -244,17 +244,17 @@ fn parse_hex_color(hex: &str) -> Option<Hsla> {
 
 impl MultibotView {
     pub(crate) fn current_host_label(&self) -> &str {
-        self.connected_host.as_deref().unwrap_or("local")
+        self.connection.connected_host.as_deref().unwrap_or("local")
     }
 
     pub(crate) fn tx_for_host(
         &self,
         host: &str,
     ) -> Option<&tokio::sync::mpsc::UnboundedSender<ClientRequest>> {
-        self.host_txs.get(host).or_else(|| {
+        self.connection.host_txs.get(host).or_else(|| {
             // Never send a disconnected host's requests to another server.
-            if self.host_statuses.is_empty() {
-                self.daemon_tx.as_ref()
+            if self.connection.host_statuses.is_empty() {
+                self.connection.daemon_tx.as_ref()
             } else {
                 None
             }
@@ -262,7 +262,8 @@ impl MultibotView {
     }
 
     pub(crate) fn active_session_host(&self) -> &str {
-        self.selected_session_host
+        self.selection
+            .selected_session_host
             .as_deref()
             .unwrap_or_else(|| self.current_host_label())
     }
@@ -274,7 +275,8 @@ impl MultibotView {
     }
 
     pub(crate) fn host_for_summary(&self, session: &SessionSummary) -> String {
-        self.host_sessions
+        self.connection
+            .host_sessions
             .iter()
             .find(|(_, s)| s == session)
             .map(|(host, _)| host.clone())
@@ -282,7 +284,12 @@ impl MultibotView {
     }
 
     pub(crate) fn session_key_for(&self, session: &SessionSummary) -> String {
-        let host = if self.selected_session.as_ref().is_some_and(|s| s == session) {
+        let host = if self
+            .selection
+            .selected_session
+            .as_ref()
+            .is_some_and(|s| s == session)
+        {
             self.active_session_host().to_string()
         } else {
             self.host_for_summary(session)
@@ -291,8 +298,9 @@ impl MultibotView {
     }
 
     pub(crate) fn session_inputs(&self) -> Vec<SessionInput<'_>> {
-        if !self.host_sessions.is_empty() {
+        if !self.connection.host_sessions.is_empty() {
             return self
+                .connection
                 .host_sessions
                 .iter()
                 .map(|(host, summary)| SessionInput {
@@ -303,7 +311,8 @@ impl MultibotView {
                 .collect();
         }
         let host = self.current_host_label();
-        self.sessions
+        self.connection
+            .sessions
             .iter()
             .map(|summary| SessionInput {
                 key: canonical_session_key(host, summary.agent, &summary.id),
@@ -362,13 +371,13 @@ impl MultibotView {
                     title: clean,
                 });
             }
-            for (h, s) in &mut self.host_sessions {
+            for (h, s) in &mut self.connection.host_sessions {
                 if h == &host && s.id == session.id && s.agent == session.agent {
                     *s = session.clone();
                 }
             }
-            if self.host_statuses.is_empty() {
-                for s in &mut self.sessions {
+            if self.connection.host_statuses.is_empty() {
+                for s in &mut self.connection.sessions {
                     if s.id == session.id && s.agent == session.agent {
                         *s = session.clone();
                     }
@@ -376,11 +385,12 @@ impl MultibotView {
             }
             if self.active_session_host() == host
                 && self
+                    .selection
                     .selected_session
                     .as_ref()
                     .is_some_and(|s| s.id == session.id && s.agent == session.agent)
             {
-                self.selected_session = Some(session);
+                self.selection.selected_session = Some(session);
             }
         }
 
@@ -443,7 +453,7 @@ impl MultibotView {
             if self.sidebar_state.mode == SidebarMode::Open {
                 self.focus_sidebar(window, cx);
             } else {
-                window.focus(&self.root_focus_handle, cx);
+                window.focus(&self.focus.root_focus_handle, cx);
             }
         }
     }
@@ -542,6 +552,7 @@ impl MultibotView {
         let now = now_unix_ms();
         let inputs = self.session_inputs();
         let active_key = self
+            .selection
             .selected_session
             .as_ref()
             .map(|s| self.session_key_for(s));
@@ -862,7 +873,7 @@ impl MultibotView {
             },
         );
 
-        if self.sessions.is_empty() {
+        if self.connection.sessions.is_empty() {
             recents_section = recents_section.child(
                     div()
                         .px_3()

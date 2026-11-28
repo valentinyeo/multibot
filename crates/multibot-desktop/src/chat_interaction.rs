@@ -23,7 +23,7 @@ impl MultibotView {
     }
 
     pub(super) fn sync_slash_picker_from_composer(&mut self, cx: &mut Context<Self>) {
-        let composer_val = self.prompt_input.read(cx).value().to_string();
+        let composer_val = self.inputs.prompt_input.read(cx).value().to_string();
         if composer_val.contains('/')
             || composer_val.contains('$')
             || self.slash_picker_state.is_open()
@@ -31,6 +31,7 @@ impl MultibotView {
             let was_open = self.slash_picker_state.is_open();
             let prev_trigger = self.slash_picker_state.trigger.clone();
             let agent = self
+                .selection
                 .selected_session
                 .as_ref()
                 .map(|s| s.agent)
@@ -133,7 +134,8 @@ impl MultibotView {
             self.chat_state.newest_chord.reset();
             self.chat_state.slash_sync_pending = false;
             self.chat_state.focused_message_idx = None;
-            self.prompt_input
+            self.inputs
+                .prompt_input
                 .update(cx, |input, cx| input.focus(window, cx));
             cx.notify();
             return true;
@@ -196,13 +198,14 @@ impl MultibotView {
             self.chat_state.newest_chord.reset();
         } else if self.main_surface == MainSurface::Chat {
             let composer_focused = self
+                .inputs
                 .prompt_input
                 .read(cx)
                 .focus_handle(cx)
                 .is_focused(window);
             let now_ms = self.chat_state.chord_epoch.elapsed().as_millis() as u64;
             let jump = if composer_focused {
-                let text = self.prompt_input.read(cx).value().to_string();
+                let text = self.inputs.prompt_input.read(cx).value().to_string();
                 self.chat_state
                     .newest_chord
                     .on_char('G', &text, now_ms, true, ev.is_held)
@@ -213,7 +216,8 @@ impl MultibotView {
             };
             if jump {
                 if composer_focused {
-                    self.prompt_input
+                    self.inputs
+                        .prompt_input
                         .update(cx, |state, cx| state.set_value("", window, cx));
                 }
                 self.chat_state.slash_sync_pending = false;
@@ -341,7 +345,7 @@ impl MultibotView {
                 next.pop();
                 self.chat_state.update_find_query(
                     next.clone(),
-                    &self.messages,
+                    &self.history.messages,
                     self.show_tool_calls(),
                 );
                 self.scroll_to_active_find_match();
@@ -373,7 +377,7 @@ impl MultibotView {
                     next_q.push_str(ch);
                     self.chat_state.update_find_query(
                         next_q.clone(),
-                        &self.messages,
+                        &self.history.messages,
                         self.show_tool_calls(),
                     );
                     self.scroll_to_active_find_match();
@@ -424,7 +428,7 @@ impl MultibotView {
             self.chat_state.slash_sync_pending = false;
             self.slash_picker_state.close();
             self.mention_picker_state.close();
-            let msgs = self.messages.clone();
+            let msgs = self.history.messages.clone();
             self.chat_state.open_find(&msgs, self.show_tool_calls());
             self.focus_chat_panel(window, cx);
             cx.stop_propagation();
@@ -439,7 +443,7 @@ impl MultibotView {
             self.chat_state.slash_sync_pending = false;
             self.chat_state.close_find();
             self.open_slash_browser(cx);
-            self.prompt_input.update(cx, |state, cx| {
+            self.inputs.prompt_input.update(cx, |state, cx| {
                 state.focus(window, cx);
             });
             cx.stop_propagation();
@@ -516,11 +520,12 @@ impl MultibotView {
 
         // End -> jump to newest
         if !ks.modifiers.control && !ks.modifiers.alt && ks.key.eq_ignore_ascii_case("end") {
-            let composer_val = self.prompt_input.read(cx).value().to_string();
+            let composer_val = self.inputs.prompt_input.read(cx).value().to_string();
             if composer_val.is_empty() {
                 self.chat_state.slash_sync_pending = false;
                 self.jump_to_newest(cx);
-                self.prompt_input
+                self.inputs
+                    .prompt_input
                     .update(cx, |input, cx| input.focus(window, cx));
                 cx.stop_propagation();
                 return;
@@ -554,11 +559,11 @@ impl MultibotView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let input = self.prompt_input.read(cx);
+        let input = self.inputs.prompt_input.read(cx);
         let composer_empty = input.value().is_empty()
             || (input.focus_handle(cx).is_focused(window) && input.selected_range() == (0..0));
         let visible = project_visible_messages_with_overrides(
-            &self.messages,
+            &self.history.messages,
             &self.chat_state.local_reactions,
             &self.chat_state.local_reaction_removals,
             self.show_tool_calls(),
@@ -604,7 +609,7 @@ impl MultibotView {
                 true
             }
             MessageNavOutcome::ReturnedToComposer => {
-                self.prompt_input.update(cx, |input, cx| {
+                self.inputs.prompt_input.update(cx, |input, cx| {
                     input.focus(window, cx);
                     if key.chars().count() == 1 || key == "space" {
                         input.replace(if key == "space" { " " } else { key }, window, cx);
@@ -624,8 +629,8 @@ impl MultibotView {
                 if let Some((orig_idx, msg_id, _, _, _)) = focused_meta {
                     self.chat_state.failed_sends.remove(&msg_id);
                     self.cancel_outbox_message(&msg_id);
-                    if orig_idx < self.messages.len() {
-                        self.messages.remove(orig_idx);
+                    if orig_idx < self.history.messages.len() {
+                        self.history.messages.remove(orig_idx);
                     }
                 }
                 cx.notify();
@@ -637,7 +642,8 @@ impl MultibotView {
                         MessageMenuAction::Reply => {
                             self.set_reply_quote(msg_id, msg_text, cx);
                             self.chat_state.focused_message_idx = None;
-                            self.prompt_input
+                            self.inputs
+                                .prompt_input
                                 .update(cx, |input, cx| input.focus(window, cx));
                         }
                         MessageMenuAction::Copy => {
@@ -651,7 +657,7 @@ impl MultibotView {
                                 .map(|line| format!("> {line}"))
                                 .collect::<Vec<_>>()
                                 .join("\n");
-                            self.prompt_input.update(cx, |input, cx| {
+                            self.inputs.prompt_input.update(cx, |input, cx| {
                                 let draft = input.value().to_string();
                                 let next = if draft.is_empty() {
                                     format!("{quote}\n\n")
@@ -672,8 +678,8 @@ impl MultibotView {
                         MessageMenuAction::CancelWaiting => {
                             self.chat_state.failed_sends.remove(&msg_id);
                             self.cancel_outbox_message(&msg_id);
-                            if orig_idx < self.messages.len() {
-                                self.messages.remove(orig_idx);
+                            if orig_idx < self.history.messages.len() {
+                                self.history.messages.remove(orig_idx);
                             }
                             cx.notify();
                         }
@@ -699,7 +705,7 @@ impl MultibotView {
             .border_1()
             .border_color(theme::border_subtle());
         let visible = project_visible_messages_with_overrides(
-            &self.messages,
+            &self.history.messages,
             &self.chat_state.local_reactions,
             &self.chat_state.local_reaction_removals,
             self.show_tool_calls(),

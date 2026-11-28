@@ -100,7 +100,12 @@ impl MultibotView {
     }
 
     pub(crate) fn render_shortcuts_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let query = self.shortcuts_search_input.read(cx).value().to_string();
+        let query = self
+            .inputs
+            .shortcuts_search_input
+            .read(cx)
+            .value()
+            .to_string();
         let tokens: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
         let mut rows = v_flex().gap_1().p_3();
         let mut match_count = 0;
@@ -244,13 +249,9 @@ impl MultibotView {
                                     })),
                             ),
                     )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_2()
-                            .flex_shrink_0()
-                            .child(Input::new(&self.shortcuts_search_input).id("shortcuts-search")),
-                    )
+                    .child(div().px_4().py_2().flex_shrink_0().child(
+                        Input::new(&self.inputs.shortcuts_search_input).id("shortcuts-search"),
+                    ))
                     .child(
                         div()
                             .id("shortcuts-scroll")

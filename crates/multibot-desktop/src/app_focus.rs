@@ -38,7 +38,11 @@ impl MultibotView {
             table_modal_open: self.table_modal_state.is_open(),
             find_open: self.main_surface == MainSurface::Chat && self.chat_state.find_open,
             update_card_kind,
-            selected_session_id: self.selected_session.as_ref().map(|s| s.id.clone()),
+            selected_session_id: self
+                .selection
+                .selected_session
+                .as_ref()
+                .map(|s| s.id.clone()),
             slash_picker_open: self.main_surface == MainSurface::Chat
                 && (self.slash_picker_state.is_open() || self.mention_picker_state.is_open()),
             rename_active: self.is_sidebar_rename_mounted() || self.is_inbox_rename_mounted(),
@@ -54,7 +58,7 @@ impl MultibotView {
             } else {
                 None
             },
-            message_count: self.messages.len(),
+            message_count: self.history.messages.len(),
             answered_question_count,
             gpu_adapter_count: self.gpu_report.discovered.len(),
             terminal_open: self.terminal.is_open(),
@@ -64,15 +68,17 @@ impl MultibotView {
     /// Returns `true` when focus is currently on one of the known view-owned `FocusHandle`s
     /// whose subtree is mounted in the current render state.
     pub(crate) fn is_focused_on_mounted_known_handle(&self, window: &Window, cx: &App) -> bool {
-        self.root_focus_handle.is_focused(window)
+        self.focus.root_focus_handle.is_focused(window)
             || (self.active_modal == ActiveModal::Palette
                 && self
+                    .inputs
                     .palette_input
                     .read(cx)
                     .focus_handle(cx)
                     .is_focused(window))
             || (self.active_modal == ActiveModal::Shortcuts
                 && self
+                    .inputs
                     .shortcuts_search_input
                     .read(cx)
                     .focus_handle(cx)
@@ -96,15 +102,21 @@ impl MultibotView {
                     .as_ref()
                     .is_some_and(|fh| fh.is_focused(window))
                     || self
+                        .inputs
                         .prompt_input
                         .read(cx)
                         .focus_handle(cx)
                         .is_focused(window)))
             || (self.main_surface == MainSurface::Settings
-                && self.settings_focus_handle.is_focused(window))
+                && self.focus.settings_focus_handle.is_focused(window))
             || (self.main_surface == MainSurface::Settings
                 && self.settings_tab == crate::settings::SettingsTab::Hosts
-                && self.host_input.read(cx).focus_handle(cx).is_focused(window))
+                && self
+                    .inputs
+                    .host_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window))
             || (self.is_sidebar_inline_edit_mounted()
                 && !self.has_mounted_chat_overlay()
                 && self
@@ -133,22 +145,23 @@ impl MultibotView {
         if self.table_modal_state.is_open() {
             self.focus_table_modal(window, cx);
         } else if self.active_modal == ActiveModal::Palette {
-            self.palette_input.update(cx, |state, cx| {
+            self.inputs.palette_input.update(cx, |state, cx| {
                 state.focus(window, cx);
             });
         } else if self.active_modal == ActiveModal::Shortcuts {
             self.shell_host.focus_parent();
-            self.shortcuts_search_input
+            self.inputs
+                .shortcuts_search_input
                 .update(cx, |state, cx| state.focus(window, cx));
         } else if self.active_modal == ActiveModal::None
             && self.main_surface == MainSurface::Settings
         {
-            window.focus(&self.settings_focus_handle, cx);
+            window.focus(&self.focus.settings_focus_handle, cx);
         } else if self.active_modal == ActiveModal::None
             && self.main_surface == MainSurface::Chat
             && (self.slash_picker_state.is_open() || self.mention_picker_state.is_open())
         {
-            self.prompt_input.update(cx, |state, cx| {
+            self.inputs.prompt_input.update(cx, |state, cx| {
                 state.focus(window, cx);
             });
         } else if self.active_modal == ActiveModal::None
@@ -171,21 +184,22 @@ impl MultibotView {
                 self.shell_host.focus_parent();
                 open.url_input
                     .update(cx, |state, cx| state.focus(window, cx));
-            } else if let Some(session) = &self.selected_session {
+            } else if let Some(session) = &self.selection.selected_session {
                 if session.agent == AgentKind::Shell {
                     let host = self.active_session_host().to_string();
                     self.focus_chat_panel(window, cx);
                     self.shell_host.focus_session(&host);
                 } else {
                     self.shell_host.focus_parent();
-                    self.prompt_input
+                    self.inputs
+                        .prompt_input
                         .update(cx, |state, cx| state.focus(window, cx));
                 }
             } else {
-                window.focus(&self.root_focus_handle, cx);
+                window.focus(&self.focus.root_focus_handle, cx);
             }
         } else {
-            window.focus(&self.root_focus_handle, cx);
+            window.focus(&self.focus.root_focus_handle, cx);
         }
     }
 
@@ -195,12 +209,14 @@ impl MultibotView {
     pub(super) fn has_focused_unmounted_child(&self, window: &Window, cx: &Context<Self>) -> bool {
         (self.active_modal != ActiveModal::Shortcuts
             && self
+                .inputs
                 .shortcuts_search_input
                 .read(cx)
                 .focus_handle(cx)
                 .is_focused(window))
             || (self.active_modal != ActiveModal::Palette
                 && self
+                    .inputs
                     .palette_input
                     .read(cx)
                     .focus_handle(cx)
@@ -224,15 +240,21 @@ impl MultibotView {
                     .as_ref()
                     .is_some_and(|fh| fh.is_focused(window))
                     || self
+                        .inputs
                         .prompt_input
                         .read(cx)
                         .focus_handle(cx)
                         .is_focused(window)))
             || (self.main_surface != MainSurface::Settings
-                && self.settings_focus_handle.is_focused(window))
+                && self.focus.settings_focus_handle.is_focused(window))
             || ((self.main_surface != MainSurface::Settings
                 || self.settings_tab != crate::settings::SettingsTab::Hosts)
-                && self.host_input.read(cx).focus_handle(cx).is_focused(window))
+                && self
+                    .inputs
+                    .host_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window))
             || ((self.sidebar_state.mode != SidebarMode::Open || !self.sidebar_rendered())
                 && self
                     .sidebar_state

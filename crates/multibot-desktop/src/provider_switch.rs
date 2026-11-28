@@ -18,6 +18,7 @@ impl MultibotView {
 
     pub(crate) fn open_provider_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self
+            .selection
             .selected_session
             .as_ref()
             .is_none_or(|s| s.agent == AgentKind::Shell)
@@ -54,7 +55,7 @@ impl MultibotView {
     }
 
     pub(crate) fn request_harness_switch(&mut self, target: HarnessChoice, cx: &mut Context<Self>) {
-        let Some(mut session) = self.selected_session.clone() else {
+        let Some(mut session) = self.selection.selected_session.clone() else {
             return;
         };
         if session.working || self.chat_state.pending_harness_switch.is_some() {
@@ -84,7 +85,7 @@ impl MultibotView {
         let request = ClientRequest::SwitchHarness {
             session: session.clone(),
             target,
-            context: HandoverContext::from_messages(&self.messages),
+            context: HandoverContext::from_messages(&self.history.messages),
         };
         if self
             .active_session_tx()
@@ -115,31 +116,35 @@ impl MultibotView {
                 .apply_harness_switch(host, &previous, &session);
             self.sync_from_shared_store(cx);
         } else {
-            self.sessions
+            self.connection
+                .sessions
                 .retain(|s| s.id != previous.id || s.agent != previous.agent);
-            self.sessions.insert(0, session.clone());
+            self.connection.sessions.insert(0, session.clone());
         }
         if self.chat_state.pending_harness_switch.as_deref() == Some(&previous.id) {
             self.chat_state.pending_harness_switch = None;
         }
         if self.active_session_host() == host
             && self
+                .selection
                 .selected_session
                 .as_ref()
                 .is_some_and(|s| s.id == previous.id && s.agent == previous.agent)
         {
             let old_cache = CacheKey::new(host, previous.agent, &previous.id);
-            let mut cached =
-                self.chat_cache
-                    .get(&old_cache)
-                    .cloned()
-                    .unwrap_or_else(|| CachedSession {
-                        messages: self.messages.clone(),
-                        ..Default::default()
-                    });
+            let mut cached = self
+                .history
+                .chat_cache
+                .get(&old_cache)
+                .cloned()
+                .unwrap_or_else(|| CachedSession {
+                    messages: self.history.messages.clone(),
+                    ..Default::default()
+                });
             cached.source_path = session.source_path.clone();
             cached.probe_sha256 = None;
-            self.chat_cache
+            self.history
+                .chat_cache
                 .put(CacheKey::new(host, session.agent, &session.id), cached);
             if let Some(tx) = self.active_session_tx() {
                 let _ = tx.send(ClientRequest::UnwatchSession {

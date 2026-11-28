@@ -12,7 +12,7 @@ impl MultibotView {
             let tx = &cx.global::<SharedAppStore>().daemon_event_tx;
             if tx.receiver_count() > 1 {
                 let _ = tx.send(DaemonBroadcastEvent {
-                    origin_view_id: self.view_id,
+                    origin_view_id: self.sync.view_id,
                     host_label: self.current_host_label().to_string(),
                     is_older_page_hint,
                     event: server_ev.clone(),
@@ -22,20 +22,20 @@ impl MultibotView {
 
         if let UiBridgeEvent::Server(ref server_event) = event {
             let host = self.current_host_label().to_string();
-            if let Ok(mut shared) = self.shared_chat_outbox.lock() {
+            if let Ok(mut shared) = self.outbox.shared_chat_outbox.lock() {
                 shared.outbox.observe_server_event(&host, server_event);
             }
             self.handle_outbox_event(&host, server_event);
         }
         match event {
             UiBridgeEvent::Connected { host_label, req_tx } => {
-                self.daemon_tx = Some(req_tx);
-                self.connection_status = format!("Connected: {host_label}");
+                self.connection.daemon_tx = Some(req_tx);
+                self.connection.connection_status = format!("Connected: {host_label}");
                 self.sync_sessions_to_shared(cx);
             }
             UiBridgeEvent::Disconnected(reason) => {
-                self.daemon_tx = None;
-                self.connection_status = reason;
+                self.connection.daemon_tx = None;
+                self.connection.connection_status = reason;
                 self.sync_sessions_to_shared(cx);
             }
             UiBridgeEvent::Server(server_ev) => match server_ev {
@@ -63,9 +63,10 @@ impl MultibotView {
                     binary_hash,
                     ..
                 } => {
-                    self.daemon_version = Some(daemon_version.clone());
-                    self.daemon_binary_hash = Some(binary_hash.clone());
-                    self.connection_status = format!("{hostname} · multibotd v{daemon_version}");
+                    self.connection.daemon_version = Some(daemon_version.clone());
+                    self.connection.daemon_binary_hash = Some(binary_hash.clone());
+                    self.connection.connection_status =
+                        format!("{hostname} · multibotd v{daemon_version}");
 
                     // Check remote daemon version/hash drift against desktop build + bundled linux binary
                     let expected_ver = multibot_proto::build_version();
@@ -183,14 +184,14 @@ impl MultibotView {
                     self.flush_outbox_for_current_host();
 
                     // Refresh slash commands for active session if one is selected
-                    if let Some(ref sel) = self.selected_session {
+                    if let Some(ref sel) = self.selection.selected_session {
                         self.request_daemon_commands(sel.agent, sel.cwd.clone());
                     }
                     self.sync_sessions_to_shared(cx);
                 }
                 ServerEvent::Sessions { sessions } => {
-                    self.sessions = sessions;
-                    for session in self.sessions.clone() {
+                    self.connection.sessions = sessions;
+                    for session in self.connection.sessions.clone() {
                         let key = self.session_key_for(&session);
                         if self
                             .sidebar_state
@@ -203,6 +204,7 @@ impl MultibotView {
                         }
                     }
                     let live: Vec<(String, multibot_proto::SessionSummary)> = self
+                        .connection
                         .sessions
                         .iter()
                         .map(|s| (self.host_for_summary(s), s.clone()))
@@ -212,18 +214,20 @@ impl MultibotView {
                         .reconcile_live_sessions(live.iter().map(|(host, s)| (host.as_str(), s)));
                     self.persist_workspace_store_if_enabled();
                     self.sync_workspace_to_shared(cx);
-                    if let Some(ref sel) = self.selected_session.clone()
+                    if let Some(ref sel) = self.selection.selected_session.clone()
                         && let Some(fresh) = self
+                            .connection
                             .sessions
                             .iter()
                             .find(|s| s.id == sel.id && s.agent == sel.agent)
                             .cloned()
                     {
-                        self.selected_session = Some(fresh);
+                        self.selection.selected_session = Some(fresh);
                     }
                     self.sync_sessions_to_shared(cx);
-                    if self.selected_session.is_none()
+                    if self.selection.selected_session.is_none()
                         && let Some(first) = self
+                            .connection
                             .sessions
                             .iter()
                             .find(|s| {
@@ -241,13 +245,14 @@ impl MultibotView {
                 }
                 ServerEvent::SessionUpdated { session } => {
                     if let Some(existing) = self
+                        .connection
                         .sessions
                         .iter_mut()
                         .find(|s| s.id == session.id && s.agent == session.agent)
                     {
                         *existing = session.clone();
                     } else {
-                        self.sessions.insert(0, session.clone());
+                        self.connection.sessions.insert(0, session.clone());
                     }
                     let key = self.session_key_for(&session);
                     if self
@@ -260,11 +265,12 @@ impl MultibotView {
                         self.unarchive_session_on_host(&host, session.id.clone(), cx);
                     }
                     if self
+                        .selection
                         .selected_session
                         .as_ref()
                         .is_some_and(|s| s.id == session.id && s.agent == session.agent)
                     {
-                        self.selected_session = Some(session.clone());
+                        self.selection.selected_session = Some(session.clone());
                         if self.main_surface == MainSurface::Chat {
                             self.sidebar_state
                                 .workspace_store
@@ -286,13 +292,14 @@ impl MultibotView {
                 }
                 ServerEvent::SessionSpawned { session } => {
                     if let Some(existing) = self
+                        .connection
                         .sessions
                         .iter_mut()
                         .find(|s| s.id == session.id && s.agent == session.agent)
                     {
                         *existing = session.clone();
                     } else {
-                        self.sessions.insert(0, session.clone());
+                        self.connection.sessions.insert(0, session.clone());
                     }
                     self.sync_sessions_to_shared(cx);
                     let title = session.title.clone();
@@ -301,7 +308,7 @@ impl MultibotView {
                         let key = self.session_key_for(&session);
                         self.chat_state.composer_options.insert(key, options);
                     }
-                    self.pending_spawn_open = false;
+                    self.selection.pending_spawn_open = false;
                     self.open_session_with_tracking(session, false, cx);
                     self.notice = Some(format!("Started {agent_label} session: {title}"));
                 }
@@ -309,13 +316,13 @@ impl MultibotView {
                     session_id,
                     archived,
                 } => {
-                    for s in &mut self.sessions {
+                    for s in &mut self.connection.sessions {
                         if s.id == session_id {
                             s.archived = archived;
                             s.archive_kill_process = archived;
                         }
                     }
-                    if let Some(ref mut sel) = self.selected_session
+                    if let Some(ref mut sel) = self.selection.selected_session
                         && sel.id == session_id
                     {
                         sel.archived = archived;
@@ -329,12 +336,12 @@ impl MultibotView {
                     detail,
                 } => {
                     if ok {
-                        for s in &mut self.sessions {
+                        for s in &mut self.connection.sessions {
                             if s.id == session_id {
                                 s.working = false;
                             }
                         }
-                        if let Some(ref mut sel) = self.selected_session
+                        if let Some(ref mut sel) = self.selection.selected_session
                             && sel.id == session_id
                         {
                             sel.working = false;
@@ -361,7 +368,7 @@ impl MultibotView {
                     }
                 }
                 ServerEvent::SendAccepted { .. } => {
-                    self.last_dispatched_prompt = None;
+                    self.selection.last_dispatched_prompt = None;
                 }
                 ServerEvent::PromptStatus {
                     session_id,
@@ -374,12 +381,14 @@ impl MultibotView {
                         "failed" => {
                             let (msg_id, text) = if !message_id.is_empty() {
                                 let matched_text = self
+                                    .selection
                                     .last_dispatched_prompt
                                     .as_ref()
                                     .filter(|(id, _)| id == &message_id)
                                     .map(|(_, t)| t.clone())
                                     .or_else(|| {
-                                        self.messages
+                                        self.history
+                                            .messages
                                             .iter()
                                             .rev()
                                             .find(|m| m.id == message_id)
@@ -387,10 +396,15 @@ impl MultibotView {
                                     })
                                     .unwrap_or_default();
                                 (message_id, matched_text)
-                            } else if let Some((id, t)) = self.last_dispatched_prompt.take() {
+                            } else if let Some((id, t)) =
+                                self.selection.last_dispatched_prompt.take()
+                            {
                                 (id, t)
                             } else {
-                                (format!("failed-{}", self.messages.len()), String::new())
+                                (
+                                    format!("failed-{}", self.history.messages.len()),
+                                    String::new(),
+                                )
                             };
                             let reason = if detail.is_empty() {
                                 "Message delivery failed".to_string()
@@ -403,7 +417,7 @@ impl MultibotView {
                             self.notice = Some("Cancelled prompt.".to_string());
                         }
                         "sent" => {
-                            self.last_dispatched_prompt = None;
+                            self.selection.last_dispatched_prompt = None;
                         }
                         "queued" => {
                             self.chat_state.advance_busy_tick();
@@ -422,24 +436,28 @@ impl MultibotView {
                     hits,
                     truncated,
                 } => {
-                    if self.remote_search_request_id.as_deref() != Some(request_id.as_str()) {
+                    if self.history.remote_search_request_id.as_deref() != Some(request_id.as_str())
+                    {
                         return;
                     }
                     if self
+                        .selection
                         .selected_session
                         .as_ref()
                         .is_some_and(|s| s.id == session_id)
                     {
-                        self.remote_search_hits = hits;
-                        self.remote_search_truncated = truncated;
+                        self.history.remote_search_hits = hits;
+                        self.history.remote_search_truncated = truncated;
                         let current_oldest = self
+                            .history
                             .active_switch_token
                             .as_ref()
-                            .and_then(|t| self.chat_cache.get(&t.key))
+                            .and_then(|t| self.history.chat_cache.get(&t.key))
                             .map(|c| c.oldest_offset)
                             .unwrap_or(0);
                         if self.chat_state.find_matches.is_empty()
                             && self
+                                .history
                                 .remote_search_hits
                                 .iter()
                                 .any(|h| h.byte_offset < current_oldest)
@@ -464,12 +482,15 @@ impl MultibotView {
                         unreachable!();
                     };
                     if (code == "read_history_failed" || code == "watch_failed")
-                        && let Some(token) = self.active_switch_token.clone()
+                        && let Some(token) = self.history.active_switch_token.clone()
                     {
-                        let _ = self.chat_cache.reconcile_server_event(&token, "", &ev);
+                        let _ = self
+                            .history
+                            .chat_cache
+                            .reconcile_server_event(&token, "", &ev);
                     }
                     if code == "send_failed"
-                        && let Some((msg_id, text)) = self.last_dispatched_prompt.take()
+                        && let Some((msg_id, text)) = self.selection.last_dispatched_prompt.take()
                     {
                         self.record_send_failure(msg_id, text, message.clone(), cx);
                     }
@@ -518,6 +539,7 @@ impl MultibotView {
             return;
         }
         let matches_active_host = self
+            .selection
             .selected_session_host
             .as_deref()
             .is_none_or(|h| h == host_label);
@@ -555,13 +577,14 @@ impl MultibotView {
             ServerEvent::HelloAck { .. } => {
                 self.rebind_browsers(host_label);
                 self.flush_outbox_for_host(host_label);
-                if matches_active_host && let Some(ref sel) = self.selected_session {
+                if matches_active_host && let Some(ref sel) = self.selection.selected_session {
                     self.request_daemon_commands(sel.agent, sel.cwd.clone());
                 }
             }
             ServerEvent::Sessions { .. } => {
-                if self.selected_session.is_none()
+                if self.selection.selected_session.is_none()
                     && let Some(first) = self
+                        .connection
                         .sessions
                         .iter()
                         .find(|s| {
@@ -581,6 +604,7 @@ impl MultibotView {
             ServerEvent::SessionUpdated { session } => {
                 if matches_active_host
                     && self
+                        .selection
                         .selected_session
                         .as_ref()
                         .is_some_and(|s| s.id == session.id && s.agent == session.agent)
@@ -621,15 +645,16 @@ impl MultibotView {
                 changed = true;
             }
             ServerEvent::SessionSpawned { session } => {
-                if (self.pending_spawn_open
+                if (self.selection.pending_spawn_open
                     && self
+                        .selection
                         .pending_spawn_host
                         .as_deref()
                         .is_none_or(|h| h == host_label))
-                    || self.selected_session.is_none()
+                    || self.selection.selected_session.is_none()
                 {
-                    self.pending_spawn_open = false;
-                    self.pending_spawn_host = None;
+                    self.selection.pending_spawn_open = false;
+                    self.selection.pending_spawn_host = None;
                     if let Some(options) = self.chat_state.pending_spawn_options.take() {
                         let key = canonical_session_key(host_label, session.agent, &session.id);
                         self.chat_state.composer_options.insert(key, options);
@@ -658,22 +683,25 @@ impl MultibotView {
                 hits,
                 truncated,
             } => {
-                if self.remote_search_request_id.as_deref() == Some(request_id.as_str())
+                if self.history.remote_search_request_id.as_deref() == Some(request_id.as_str())
                     && self
+                        .selection
                         .selected_session
                         .as_ref()
                         .is_some_and(|s| s.id == session_id)
                 {
-                    self.remote_search_hits = hits;
-                    self.remote_search_truncated = truncated;
+                    self.history.remote_search_hits = hits;
+                    self.history.remote_search_truncated = truncated;
                     let current_oldest = self
+                        .history
                         .active_switch_token
                         .as_ref()
-                        .and_then(|t| self.chat_cache.get(&t.key))
+                        .and_then(|t| self.history.chat_cache.get(&t.key))
                         .map(|c| c.oldest_offset)
                         .unwrap_or(0);
                     if self.chat_state.find_matches.is_empty()
                         && self
+                            .history
                             .remote_search_hits
                             .iter()
                             .any(|h| h.byte_offset < current_oldest)
@@ -684,8 +712,8 @@ impl MultibotView {
                 }
             }
             ServerEvent::SendAccepted { .. } => {
-                if self.last_dispatched_prompt.is_some() {
-                    self.last_dispatched_prompt = None;
+                if self.selection.last_dispatched_prompt.is_some() {
+                    self.selection.last_dispatched_prompt = None;
                     changed = true;
                 }
             }
@@ -698,24 +726,31 @@ impl MultibotView {
                 self.track_queued_prompt(&session_id, &message_id, &status);
                 if matches_active_host
                     && self
+                        .selection
                         .selected_session
                         .as_ref()
                         .is_some_and(|s| s.id == session_id)
                 {
                     match status.as_str() {
                         "failed"
-                            if self.last_dispatched_prompt.is_some()
+                            if self.selection.last_dispatched_prompt.is_some()
                                 || (!message_id.is_empty()
-                                    && self.messages.iter().any(|m| m.id == message_id)) =>
+                                    && self
+                                        .history
+                                        .messages
+                                        .iter()
+                                        .any(|m| m.id == message_id)) =>
                         {
                             let (msg_id, text) = if !message_id.is_empty() {
                                 let matched_text = self
+                                    .selection
                                     .last_dispatched_prompt
                                     .as_ref()
                                     .filter(|(id, _)| id == &message_id)
                                     .map(|(_, t)| t.clone())
                                     .or_else(|| {
-                                        self.messages
+                                        self.history
+                                            .messages
                                             .iter()
                                             .rev()
                                             .find(|m| m.id == message_id)
@@ -723,16 +758,17 @@ impl MultibotView {
                                     })
                                     .unwrap_or_default();
                                 if self
+                                    .selection
                                     .last_dispatched_prompt
                                     .as_ref()
                                     .is_some_and(|(id, _)| id == &message_id)
                                 {
-                                    self.last_dispatched_prompt = None;
+                                    self.selection.last_dispatched_prompt = None;
                                 }
                                 (message_id, matched_text)
                             } else {
-                                self.last_dispatched_prompt.take().unwrap_or((
-                                    format!("failed-{}", self.messages.len()),
+                                self.selection.last_dispatched_prompt.take().unwrap_or((
+                                    format!("failed-{}", self.history.messages.len()),
                                     String::new(),
                                 ))
                             };
@@ -749,7 +785,7 @@ impl MultibotView {
                             changed = true;
                         }
                         "sent" => {
-                            self.last_dispatched_prompt = None;
+                            self.selection.last_dispatched_prompt = None;
                         }
                         "queued" => {
                             self.chat_state.advance_busy_tick();
@@ -774,12 +810,15 @@ impl MultibotView {
                     unreachable!();
                 };
                 if (code == "read_history_failed" || code == "watch_failed")
-                    && let Some(token) = self.active_switch_token.clone()
+                    && let Some(token) = self.history.active_switch_token.clone()
                 {
-                    let _ = self.chat_cache.reconcile_server_event(&token, "", &ev);
+                    let _ = self
+                        .history
+                        .chat_cache
+                        .reconcile_server_event(&token, "", &ev);
                 }
                 if code == "send_failed"
-                    && let Some((msg_id, text)) = self.last_dispatched_prompt.take()
+                    && let Some((msg_id, text)) = self.selection.last_dispatched_prompt.take()
                 {
                     self.record_send_failure(msg_id, text, message.clone(), cx);
                 }

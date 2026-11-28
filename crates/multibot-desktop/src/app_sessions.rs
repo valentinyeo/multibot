@@ -4,11 +4,11 @@ impl MultibotView {
     pub(crate) fn clear_active_session_view(&mut self) {
         self.chat_state.pending_harness_switch = None;
         self.voice.cancel();
-        self.selected_session = None;
-        self.selected_session_host = None;
+        self.selection.selected_session = None;
+        self.selection.selected_session_host = None;
         self.sidebar_state.rename = None;
-        self.active_switch_token = None;
-        self.messages.clear();
+        self.history.active_switch_token = None;
+        self.history.messages.clear();
         self.chat_state.close_find();
         self.slash_picker_state.close();
         self.mention_picker_state.close();
@@ -17,8 +17,8 @@ impl MultibotView {
         self.chat_state.focused_message_idx = None;
         self.chat_state.message_action_menu_open = false;
         self.chat_state.message_action_index = 0;
-        self.remote_search_hits.clear();
-        self.remote_search_truncated = false;
+        self.history.remote_search_hits.clear();
+        self.history.remote_search_truncated = false;
         self.cleanup_unmounted_surface_state();
     }
 
@@ -34,8 +34,9 @@ impl MultibotView {
         cx: &mut Context<Self>,
     ) {
         self.sidebar_state.pending_shell_dissolve = None;
-        if self.selected_session_host.as_deref() != Some(host.as_str())
+        if self.selection.selected_session_host.as_deref() != Some(host.as_str())
             || self
+                .selection
                 .selected_session
                 .as_ref()
                 .is_none_or(|selected| selected.id != session.id || selected.agent != session.agent)
@@ -44,15 +45,16 @@ impl MultibotView {
         }
         self.voice.cancel();
         if self
+            .selection
             .selected_session_host
             .as_deref()
             .is_some_and(|h| h != host)
         {
-            self.pending_switch_tokens.clear();
-            self.pending_older_page_before.clear();
+            self.history.pending_switch_tokens.clear();
+            self.history.pending_older_page_before.clear();
             self.chat_state.session_todos.clear();
         }
-        self.selected_session_host = Some(host.clone());
+        self.selection.selected_session_host = Some(host.clone());
         self.chat_state.scroll.open_visit(UnreadVisit::Read);
         self.chat_state.scroll_handle = gpui_kit::ScrollHandle::default();
         self.chat_state.prepend_scroll_anchor = None;
@@ -64,7 +66,7 @@ impl MultibotView {
         self.chat_state.composer_menu_open = false;
         // Reset per-session transient Chat View overlays, active inline rename & stale pagination
         self.sidebar_state.rename = None;
-        self.pending_older_page_before.remove(&session.id);
+        self.history.pending_older_page_before.remove(&session.id);
         self.chat_state.close_find();
         self.slash_picker_state.close();
         self.mention_picker_state.close();
@@ -77,28 +79,31 @@ impl MultibotView {
         let key = CacheKey::new(&host, session.agent, &session.id);
 
         // Frame-0 synchronous switch: Tier 1 memory (<1ms) -> Tier 2 bounded disk (<5ms)
-        let (token, mem_hit) = self.chat_cache.switch_memory(key.clone());
+        let (token, mem_hit) = self.history.chat_cache.switch_memory(key.clone());
         let cached = match mem_hit {
             Some(s) => Some(s.clone()),
-            None => self.chat_cache.get_or_load(&key).cloned(),
+            None => self.history.chat_cache.get_or_load(&key).cloned(),
         };
         let known_probe = cached.as_ref().and_then(|s| s.probe_sha256.clone());
 
         if let Some(snapshot) = cached {
-            self.messages = snapshot.messages;
+            self.history.messages = snapshot.messages;
             if !snapshot.todos.is_empty() {
                 self.chat_state
                     .session_todos
                     .insert(session.id.clone(), snapshot.todos);
             }
         } else {
-            self.messages.clear();
+            self.history.messages.clear();
         }
-        self.chat_state.reconcile_local_reactions(&self.messages);
+        self.chat_state
+            .reconcile_local_reactions(&self.history.messages);
 
-        self.active_switch_token = Some(token.clone());
-        self.pending_switch_tokens.insert(session.id.clone(), token);
-        self.selected_session = Some(session.clone());
+        self.history.active_switch_token = Some(token.clone());
+        self.history
+            .pending_switch_tokens
+            .insert(session.id.clone(), token);
+        self.selection.selected_session = Some(session.clone());
         let full_width = self
             .sidebar_state
             .workspace_store
@@ -106,11 +111,11 @@ impl MultibotView {
             .get(&canonical_session_key(&host, session.agent, &session.id))
             .is_some_and(|meta| meta.full_width);
         self.apply_session_full_width(full_width);
-        self.pending_focus_input = true;
+        self.focus.pending_focus_input = true;
         self.set_main_surface(MainSurface::Chat);
         self.active_modal = ActiveModal::None;
-        self.remote_search_hits.clear();
-        self.remote_search_truncated = false;
+        self.history.remote_search_hits.clear();
+        self.history.remote_search_truncated = false;
 
         if let Some(tx) = self.active_session_tx() {
             let _ = tx.send(ClientRequest::ReadHistory {
@@ -143,7 +148,8 @@ impl MultibotView {
     }
 
     pub(crate) fn default_spawn_cwd(&self) -> String {
-        self.selected_session
+        self.selection
+            .selected_session
             .as_ref()
             .and_then(|s| s.cwd.clone())
             .filter(|c| !c.trim().is_empty())
@@ -151,7 +157,7 @@ impl MultibotView {
     }
 
     pub(crate) fn interrupt_active_session(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(ref sess) = self.selected_session else {
+        let Some(ref sess) = self.selection.selected_session else {
             return false;
         };
         let Some(tx) = self.active_session_tx().cloned() else {
@@ -174,7 +180,7 @@ impl MultibotView {
 
     #[allow(dead_code)]
     pub(crate) fn steer_active_session(&mut self, text: String, cx: &mut Context<Self>) -> bool {
-        let Some(ref sess) = self.selected_session else {
+        let Some(ref sess) = self.selection.selected_session else {
             return false;
         };
         let Some(tx) = self.active_session_tx().cloned() else {
@@ -217,9 +223,9 @@ impl MultibotView {
             })
             .is_ok();
         if ok {
-            self.pending_spawn_open = true;
+            self.selection.pending_spawn_open = true;
             self.chat_state.pending_spawn_options = options;
-            self.pending_spawn_host = Some(self.active_session_host().to_string());
+            self.selection.pending_spawn_host = Some(self.active_session_host().to_string());
             self.notice = Some(format!("Starting new {} session...", agent.label()));
         }
         cx.notify();
@@ -255,6 +261,7 @@ impl MultibotView {
     pub(crate) fn active_ctrl_digit_order(&self) -> Vec<String> {
         let inputs = self.session_inputs();
         let active_key = self
+            .selection
             .selected_session
             .as_ref()
             .map(|s| self.session_key_for(s));
@@ -278,7 +285,7 @@ impl MultibotView {
             self.open_session_key_with_tracking(key, false, cx);
             self.sync_workspace_to_shared(cx);
         } else if order.is_empty()
-            && let Some(session) = self.sessions.get(index).cloned()
+            && let Some(session) = self.connection.sessions.get(index).cloned()
         {
             self.open_session_with_tracking(session, false, cx);
             self.sync_workspace_to_shared(cx);
@@ -291,6 +298,7 @@ impl MultibotView {
             return;
         }
         let active_key = self
+            .selection
             .selected_session
             .as_ref()
             .map(|s| self.session_key_for(s));
@@ -366,7 +374,8 @@ impl MultibotView {
         if self.main_surface == MainSurface::Inbox {
             self.selected_inbox_session_key()
         } else {
-            self.selected_session
+            self.selection
+                .selected_session
                 .as_ref()
                 .map(|s| self.session_key_for(s))
         }

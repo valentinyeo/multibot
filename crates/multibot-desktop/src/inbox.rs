@@ -426,6 +426,7 @@ impl MultibotView {
         if let Some(session) = self.find_session_by_key(key) {
             let advance = self.main_surface == MainSurface::Chat
                 && self
+                    .selection
                     .selected_session
                     .as_ref()
                     .is_some_and(|s| self.session_key_for(s) == key);
@@ -581,8 +582,9 @@ impl MultibotView {
             return;
         };
         if session.agent == multibot_proto::AgentKind::Shell {
-            let next_shell = if self.host_sessions.is_empty() {
-                self.sessions
+            let next_shell = if self.connection.host_sessions.is_empty() {
+                self.connection
+                    .sessions
                     .iter()
                     .find(|s| {
                         s.agent == multibot_proto::AgentKind::Shell
@@ -591,7 +593,8 @@ impl MultibotView {
                     })
                     .map(|s| s.id.clone())
             } else {
-                self.host_sessions
+                self.connection
+                    .host_sessions
                     .iter()
                     .find(|(h, s)| {
                         h == &host
@@ -622,12 +625,15 @@ impl MultibotView {
         }
         let next = self.sidebar_neighbor_after_removal(key, ReorderDirection::Up);
         self.notice = None;
-        self.closed_sessions.push((host.clone(), session.clone()));
+        self.selection
+            .closed_sessions
+            .push((host.clone(), session.clone()));
         self.sidebar_state
             .workspace_store
             .dissolve_session(key, now_unix_ms());
         self.set_session_archived_local(&host, &session, true);
         if self
+            .selection
             .selected_session
             .as_ref()
             .is_some_and(|s| self.session_key_for(s) == key)
@@ -651,7 +657,7 @@ impl MultibotView {
         session: &multibot_proto::SessionSummary,
         archived: bool,
     ) {
-        for (h, s) in &mut self.host_sessions {
+        for (h, s) in &mut self.connection.host_sessions {
             if h == host && s.id == session.id && s.agent == session.agent {
                 s.archived = archived;
                 s.archive_kill_process = archived;
@@ -661,8 +667,8 @@ impl MultibotView {
                 s.working = false;
             }
         }
-        if self.host_statuses.is_empty() {
-            for s in &mut self.sessions {
+        if self.connection.host_statuses.is_empty() {
+            for s in &mut self.connection.sessions {
                 if s.id == session.id && s.agent == session.agent {
                     s.archived = archived;
                     s.archive_kill_process = archived;
@@ -673,15 +679,21 @@ impl MultibotView {
                 }
             }
         } else {
-            self.sessions = self.host_sessions.iter().map(|(_, s)| s.clone()).collect();
+            self.connection.sessions = self
+                .connection
+                .host_sessions
+                .iter()
+                .map(|(_, s)| s.clone())
+                .collect();
         }
         if self
+            .selection
             .selected_session
             .as_ref()
             .is_some_and(|s| s.id == session.id && s.agent == session.agent)
             && self.active_session_host() == host
         {
-            if let Some(s) = &mut self.selected_session {
+            if let Some(s) = &mut self.selection.selected_session {
                 s.archived = archived;
                 s.archive_kill_process = archived;
                 if archived && s.agent == multibot_proto::AgentKind::Shell {
@@ -720,7 +732,8 @@ impl MultibotView {
             .workspace_store
             .wake_workspace(&workspace_id);
         self.sidebar_state.workspace_store.move_to_inbox(key);
-        self.closed_sessions
+        self.selection
+            .closed_sessions
             .retain(|(h, s)| h != &host || s.id != session.id || s.agent != session.agent);
         self.persist_workspace_store_if_enabled();
         self.sync_sessions_to_shared(cx);
@@ -731,6 +744,7 @@ impl MultibotView {
 
     pub(crate) fn reactivate_last_dissolved(&mut self, cx: &mut Context<Self>) {
         let key = self
+            .selection
             .closed_sessions
             .iter()
             .rev()
@@ -1323,7 +1337,7 @@ impl MultibotView {
                                 this.inbox_state.step_index = Some(idx);
                                 if let Some((host, sess)) = this.host_for_session_key(&key_click) {
                                     this.open_session_on_host(host, sess, true, cx);
-                                    window.focus(&this.root_focus_handle, cx);
+                                    window.focus(&this.focus.root_focus_handle, cx);
                                 }
                             }),
                         )

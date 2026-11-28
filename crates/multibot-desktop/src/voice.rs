@@ -53,8 +53,8 @@ impl MultibotView {
         if text.is_empty() {
             return;
         }
-        let next = append_transcript(self.prompt_input.read(cx).value().as_str(), text);
-        self.prompt_input.update(cx, |input, cx| {
+        let next = append_transcript(self.inputs.prompt_input.read(cx).value().as_str(), text);
+        self.inputs.prompt_input.update(cx, |input, cx| {
             input.select_all(window, cx);
             input.replace(next, window, cx);
         });
@@ -101,7 +101,10 @@ impl MultibotView {
             return;
         }
         let (config, _) = self.settings.voice.resolved(
-            cx.global::<crate::state::SharedAppStore>().account.deepgram_key.as_deref(),
+            cx.global::<crate::state::SharedAppStore>()
+                .account
+                .deepgram_key
+                .as_deref(),
         );
         if let Err(err) = config.validate() {
             self.voice.error = Some(err.to_string());

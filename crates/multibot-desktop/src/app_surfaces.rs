@@ -14,7 +14,7 @@ impl MultibotView {
 
     /// Returns `true` if `session_key` is currently rendered as a visible row or pinned tile
     /// inside `#sidebar-open` (accounting for active workspace/view, `unread_only`, collapsed
-    /// pinned/group/recents sections, and existence as a non-archived session in `self.sessions`).
+    /// pinned/group/recents sections, and existence as a non-archived session in `self.connection.sessions`).
     pub(crate) fn is_session_rendered_in_open_sidebar(&self, session_key: &str) -> bool {
         if !self
             .find_session_by_key(session_key)
@@ -25,6 +25,7 @@ impl MultibotView {
         let now = now_unix_ms();
         let inputs = self.session_inputs();
         let active_key = self
+            .selection
             .selected_session
             .as_ref()
             .map(|s| self.session_key_for(s));
@@ -76,6 +77,7 @@ impl MultibotView {
             SidebarMode::Collapsed | SidebarMode::Hidden => {
                 self.main_surface == MainSurface::Chat
                     && self
+                        .selection
                         .selected_session
                         .as_ref()
                         .is_some_and(|s| self.session_key_for(s) == session_key)
@@ -213,7 +215,7 @@ impl MultibotView {
         if self.main_surface != MainSurface::Chat {
             return;
         }
-        let Some(session) = self.selected_session.as_ref() else {
+        let Some(session) = self.selection.selected_session.as_ref() else {
             return;
         };
         let key = self.session_key_for(session);

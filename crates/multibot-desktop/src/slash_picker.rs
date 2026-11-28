@@ -130,12 +130,7 @@ impl SlashPickerState {
     }
 
     /// Opens the full command browser (`Ctrl+/`).
-    pub(crate) fn open_browser(
-        &mut self,
-        agent: AgentKind,
-        current_text: &str,
-        caret_byte: usize,
-    ) {
+    pub(crate) fn open_browser(&mut self, agent: AgentKind, current_text: &str, caret_byte: usize) {
         let clamped = clamp_char_boundary(current_text, caret_byte);
         self.open = true;
         self.browse_mode = true;
@@ -195,8 +190,7 @@ impl SlashPickerState {
             .filter(|item| match mode {
                 TriggerMode::Dollar => item.trigger == "$",
                 TriggerMode::Slash => {
-                    item.trigger == "/"
-                        || (agent == AgentKind::Codex && item.trigger == "$")
+                    item.trigger == "/" || (agent == AgentKind::Codex && item.trigger == "$")
                 }
                 TriggerMode::Browse => true,
             })
@@ -267,7 +261,8 @@ impl SlashPickerState {
     }
 
     fn promote_mru(&mut self, name: &str) {
-        self.mru.retain(|existing| !existing.eq_ignore_ascii_case(name));
+        self.mru
+            .retain(|existing| !existing.eq_ignore_ascii_case(name));
         self.mru.insert(0, name.to_string());
         self.mru.truncate(MAX_MRU);
     }
@@ -399,8 +394,7 @@ pub fn score_command(name: &str, description: &str, query: &str) -> Option<u16> 
     if name_l.starts_with(&query_l) {
         return Some(1);
     }
-    if starts_with_one_swap(&name_l, &query_l)
-        || prefix_at_word_boundary(&name_l, &query_l, ":-_/")
+    if starts_with_one_swap(&name_l, &query_l) || prefix_at_word_boundary(&name_l, &query_l, ":-_/")
     {
         return Some(2);
     }
@@ -408,9 +402,7 @@ pub fn score_command(name: &str, description: &str, query: &str) -> Option<u16> 
         return Some(3);
     }
     let desc_l = description.to_ascii_lowercase();
-    if desc_l.starts_with(&query_l)
-        || prefix_at_word_boundary(&desc_l, &query_l, " \t.,:;()")
-    {
+    if desc_l.starts_with(&query_l) || prefix_at_word_boundary(&desc_l, &query_l, " \t.,:;()") {
         return Some(4);
     }
     let mut q_chars = query_l.chars().peekable();
@@ -603,15 +595,43 @@ pub fn builtin_commands_for(agent: AgentKind) -> Vec<SlashCommandItem> {
         AgentKind::Antigravity => vec![
             make_builtin("rename", "Rename this chat session", false),
             make_builtin("clear", "Clear conversation and start fresh", false),
-            make_builtin("plan", "Plan complex work step by step before executing", false),
+            make_builtin(
+                "plan",
+                "Plan complex work step by step before executing",
+                false,
+            ),
             make_builtin("compact", "Summarize conversation to free context", false),
-            make_builtin("goal", "Run thoroughly until the goal is fully achieved", false),
-            make_builtin("schedule", "Run an instruction on a schedule or timer", false),
+            make_builtin(
+                "goal",
+                "Run thoroughly until the goal is fully achieved",
+                false,
+            ),
+            make_builtin(
+                "schedule",
+                "Run an instruction on a schedule or timer",
+                false,
+            ),
             make_builtin("browser", "Browse the web or interact with web apps", false),
-            make_builtin("grill-me", "Align on a plan through an interactive interview", false),
-            make_builtin("teamwork", "Coordinate a team of agents on a large project", false),
-            make_builtin("learn", "Save a workflow or correction for future tasks", false),
-            make_builtin("boost", "Deep thinking, planning, and rigorous verification", false),
+            make_builtin(
+                "grill-me",
+                "Align on a plan through an interactive interview",
+                false,
+            ),
+            make_builtin(
+                "teamwork",
+                "Coordinate a team of agents on a large project",
+                false,
+            ),
+            make_builtin(
+                "learn",
+                "Save a workflow or correction for future tasks",
+                false,
+            ),
+            make_builtin(
+                "boost",
+                "Deep thinking, planning, and rigorous verification",
+                false,
+            ),
         ],
     }
 }
@@ -621,11 +641,12 @@ impl MultibotView {
     pub(crate) fn open_slash_browser(&mut self, cx: &mut Context<Self>) {
         self.mention_picker_state.close();
         let agent = self
+            .selection
             .selected_session
             .as_ref()
             .map(|s| s.agent)
             .unwrap_or(AgentKind::Claude);
-        let current = self.prompt_input.read(cx).value().to_string();
+        let current = self.inputs.prompt_input.read(cx).value().to_string();
         let caret = current.len();
         self.slash_picker_state.open_browser(agent, &current, caret);
         cx.notify();
@@ -651,7 +672,7 @@ impl MultibotView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let current = self.prompt_input.read(cx).value().to_string();
+        let current = self.inputs.prompt_input.read(cx).value().to_string();
         let trigger = trigger.unwrap_or(SlashTrigger {
             mode: TriggerMode::Browse,
             start_byte: current.len(),
@@ -661,7 +682,7 @@ impl MultibotView {
         let (next_text, _caret) = insert_slash_command(&current, &trigger, &item);
         self.slash_picker_state.promote_mru(&item.name);
         self.slash_picker_state.close();
-        self.prompt_input.update(cx, |state, cx| {
+        self.inputs.prompt_input.update(cx, |state, cx| {
             state.select_all(window, cx);
             state.replace(next_text, window, cx);
             state.focus(window, cx);
@@ -890,22 +911,10 @@ mod tests {
             score_command("verify-multibot", "Verify app", "verfiy"),
             Some(2)
         );
-        assert_eq!(
-            score_command("grill-me", "Interview", "me"),
-            Some(2)
-        );
-        assert_eq!(
-            score_command("compact", "Summarize", "mpa"),
-            Some(3)
-        );
-        assert_eq!(
-            score_command("cost", "Show token usage", "tok"),
-            Some(4)
-        );
-        assert_eq!(
-            score_command("compact", "Summarize", "cpt"),
-            Some(5)
-        );
+        assert_eq!(score_command("grill-me", "Interview", "me"), Some(2));
+        assert_eq!(score_command("compact", "Summarize", "mpa"), Some(3));
+        assert_eq!(score_command("cost", "Show token usage", "tok"), Some(4));
+        assert_eq!(score_command("compact", "Summarize", "cpt"), Some(5));
         assert_eq!(score_command("plan", "Plan mode", "zzz"), None);
 
         // MRU tie-breaker puts recently accepted command first on equal score.
@@ -992,8 +1001,12 @@ mod tests {
         match picker.handle_key("tab") {
             SlashKeyOutcome::Accepted(item, trig) => {
                 assert_eq!(item.name, second_name);
-                let trig = trig.expect("accepted outcome must preserve SlashTrigger before close()");
-                assert_eq!((trig.start_byte, trig.end_byte, trig.query.as_str()), (0, 3, "re"));
+                let trig =
+                    trig.expect("accepted outcome must preserve SlashTrigger before close()");
+                assert_eq!(
+                    (trig.start_byte, trig.end_byte, trig.query.as_str()),
+                    (0, 3, "re")
+                );
             }
             other => panic!("expected Accepted, got {other:?}"),
         }
@@ -1046,10 +1059,7 @@ mod tests {
             score_command("compact", "Summarize conversation to free context", "summ"),
             Some(4)
         );
-        assert_eq!(
-            score_command("model", "Choose model", "cho"),
-            Some(4)
-        );
+        assert_eq!(score_command("model", "Choose model", "cho"), Some(4));
         assert_eq!(
             score_command("permissions", "Manage tool permission rules", "man"),
             Some(4)
@@ -1072,7 +1082,10 @@ mod tests {
         };
         assert_eq!(item.name, "plan");
         let trig = captured_trig.expect("handle_key must return captured trigger before close()");
-        assert_eq!((trig.start_byte, trig.end_byte, trig.query.as_str()), (0, 2, "pl"));
+        assert_eq!(
+            (trig.start_byte, trig.end_byte, trig.query.as_str()),
+            (0, 2, "pl")
+        );
         let (out, caret) = insert_slash_command("pl", &trig, &item);
         assert_eq!(out, "/plan ");
         assert_eq!(caret, 6);

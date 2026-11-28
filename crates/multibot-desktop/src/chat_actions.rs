@@ -97,7 +97,7 @@ impl MultibotView {
                 cx.stop_propagation();
                 return;
             }
-            if this.prompt_input.read(cx).value().is_empty() {
+            if this.inputs.prompt_input.read(cx).value().is_empty() {
                 this.chat_state.slash_sync_pending = false;
                 this.jump_to_newest(cx);
                 cx.stop_propagation();
@@ -132,7 +132,7 @@ impl MultibotView {
                 this.chat_state.slash_sync_pending = false;
                 let mut next = this.chat_state.find_query.clone();
                 next.pop();
-                let msgs = this.messages.clone();
+                let msgs = this.history.messages.clone();
                 this.chat_state
                     .update_find_query(next, &msgs, this.show_tool_calls());
                 cx.notify();

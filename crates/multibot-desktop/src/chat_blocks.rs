@@ -668,7 +668,7 @@ impl MultibotView {
                                 cx.stop_propagation();
                                 this.sidebar_state.rename = None;
                                 this.sidebar_state.new_workspace_draft = None;
-                                this.prompt_input.update(cx, |state, cx| {
+                                this.inputs.prompt_input.update(cx, |state, cx| {
                                     state.focus(window, cx);
                                 });
                                 cx.notify();
@@ -744,7 +744,7 @@ impl MultibotView {
                         cx.stop_propagation();
                         this.sidebar_state.rename = None;
                         this.sidebar_state.new_workspace_draft = None;
-                        this.prompt_input.update(cx, |state, cx| {
+                        this.inputs.prompt_input.update(cx, |state, cx| {
                             state.focus(window, cx);
                         });
                         cx.notify();
@@ -765,8 +765,11 @@ impl MultibotView {
             .session_todos
             .get(&tab_key)
             .map(Vec::as_slice);
-        let (todos, done, total) =
-            effective_todos(&self.messages, self.selected_session.as_ref(), cached_todos);
+        let (todos, done, total) = effective_todos(
+            &self.history.messages,
+            self.selection.selected_session.as_ref(),
+            cached_todos,
+        );
         if total == 0 {
             return None;
         }

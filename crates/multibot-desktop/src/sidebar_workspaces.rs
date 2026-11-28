@@ -53,7 +53,7 @@ impl MultibotView {
         cx: &mut Context<Self>,
     ) {
         let next_key = canonical_session_key(&host, session.agent, &session.id);
-        if let Some(ref current) = self.selected_session {
+        if let Some(ref current) = self.selection.selected_session {
             let cur_key = self.session_key_for(current);
             if cur_key != next_key {
                 self.sidebar_state.previous_session_key = Some(cur_key);
@@ -92,13 +92,15 @@ impl MultibotView {
         self.sync_workspace_to_shared(cx);
         self.select_session_on_host(host, session, cx);
         self.chat_state.scroll.open_visit(unread_visit);
-        if !self.messages.is_empty() {
-            self.chat_state.scroll.history_loaded(&self.messages, true);
+        if !self.history.messages.is_empty() {
+            self.chat_state
+                .scroll
+                .history_loaded(&self.history.messages, true);
         }
     }
 
     pub(crate) fn toggle_active_favorite(&mut self, cx: &mut Context<Self>) {
-        if let Some(sess) = self.selected_session.clone() {
+        if let Some(sess) = self.selection.selected_session.clone() {
             let key = self.session_key_for(&sess);
             self.sidebar_state.workspace_store.toggle_favorite(&key);
             self.cleanup_unmounted_surface_state();
@@ -178,7 +180,7 @@ impl MultibotView {
         direction: ReorderDirection,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(sel) = self.selected_session.clone() else {
+        let Some(sel) = self.selection.selected_session.clone() else {
             return false;
         };
         let key = self.session_key_for(&sel);
@@ -211,7 +213,7 @@ impl MultibotView {
 
     /// `Ctrl+G`: collapses or expands the active session's group (no-op if ungrouped).
     pub(crate) fn toggle_active_group(&mut self, cx: &mut Context<Self>) {
-        let Some(sel) = self.selected_session.clone() else {
+        let Some(sel) = self.selection.selected_session.clone() else {
             return;
         };
         let key = self.session_key_for(&sel);

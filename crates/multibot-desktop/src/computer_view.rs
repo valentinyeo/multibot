@@ -728,7 +728,7 @@ impl crate::app::MultibotView {
     /// process, no thread and no native window.
     pub(crate) fn close_computer_view(&mut self, cx: &mut Context<Self>) {
         self.teardown_computer_view();
-        self.pending_focus_input = true;
+        self.focus.pending_focus_input = true;
         cx.notify();
     }
 

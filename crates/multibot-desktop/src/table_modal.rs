@@ -5,13 +5,7 @@ use gpui_kit::{
     AnyElement, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
     ParentElement, Role, ScrollDelta, ScrollEvent, SharedString, StatefulInteractiveElement,
     Styled, TestSupportExt, Window,
-    component::{
-        Sizable,
-        button::Button,
-        h_flex,
-        text::TableData,
-        v_flex,
-    },
+    component::{Sizable, button::Button, h_flex, text::TableData, v_flex},
     div, hsla,
     prelude::FluentBuilder,
     px,
@@ -400,11 +394,23 @@ fn is_code_span_close_follower(byte: u8) -> bool {
         byte,
         b' ' | b'\t'
             | b'|'
-            | b',' | b'.' | b';' | b':'
-            | b')' | b']' | b'}' | b'>'
-            | b'!' | b'?'
-            | b'*' | b'_' | b'~' | b'"' | b'\''
-            | b'/' | b'-'
+            | b','
+            | b'.'
+            | b';'
+            | b':'
+            | b')'
+            | b']'
+            | b'}'
+            | b'>'
+            | b'!'
+            | b'?'
+            | b'*'
+            | b'_'
+            | b'~'
+            | b'"'
+            | b'\''
+            | b'/'
+            | b'-'
     ) || !byte.is_ascii()
 }
 
@@ -590,9 +596,7 @@ fn parse_delimiter_cell(cell: &str) -> Option<ColumnAlign> {
     let trimmed = trim_cell_ws(cell);
     let left_colon = trimmed.starts_with(':');
     let right_colon = trimmed.ends_with(':');
-    let inner = trimmed
-        .strip_prefix(':')
-        .unwrap_or(trimmed);
+    let inner = trimmed.strip_prefix(':').unwrap_or(trimmed);
     let inner = inner.strip_suffix(':').unwrap_or(inner);
     if inner.len() < 3 || !inner.bytes().all(|b| b == b'-') {
         return None;
@@ -889,7 +893,10 @@ pub fn find_latest_table_in_messages(messages: &[ChatMessage]) -> Option<ParsedT
 }
 
 impl MultibotView {
-    pub(crate) fn ensure_table_modal_focus_handle(&mut self, cx: &mut Context<Self>) -> FocusHandle {
+    pub(crate) fn ensure_table_modal_focus_handle(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> FocusHandle {
         if let Some(ref fh) = self.table_modal_state.focus_handle {
             return fh.clone();
         }
@@ -914,29 +921,17 @@ impl MultibotView {
         cx.notify();
     }
 
-    pub(crate) fn open_table_from_gpui_data(
-        &mut self,
-        data: &TableData,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn open_table_from_gpui_data(&mut self, data: &TableData, cx: &mut Context<Self>) {
         if let Some(table) = ParsedTable::from_gpui_table_data(data) {
-            let title = format!(
-                "Table ({} cols · {} rows)",
-                table.columns,
-                table.rows.len()
-            );
+            let title = format!("Table ({} cols · {} rows)", table.columns, table.rows.len());
             self.open_table_modal(table, title, cx);
         }
     }
 
     /// Expands the best/latest table in the active chat (`Ctrl+K -> Chat View: Expand table`).
     pub(crate) fn expand_best_table(&mut self, cx: &mut Context<Self>) -> bool {
-        if let Some(table) = find_latest_table_in_messages(&self.messages) {
-            let title = format!(
-                "Table ({} cols · {} rows)",
-                table.columns,
-                table.rows.len()
-            );
+        if let Some(table) = find_latest_table_in_messages(&self.history.messages) {
+            let title = format!("Table ({} cols · {} rows)", table.columns, table.rows.len());
             self.open_table_modal(table, title, cx);
             true
         } else {
@@ -955,16 +950,18 @@ impl MultibotView {
     ) -> AnyElement {
         let widths = table.column_widths();
         let table_clone = table.clone();
-        let title = format!(
-            "Table ({} cols · {} rows)",
-            table.columns,
-            table.rows.len()
-        );
+        let title = format!("Table ({} cols · {} rows)", table.columns, table.rows.len());
         let expand_id = SharedString::from(format!("expand-table-{id}"));
         let scroll_id = SharedString::from(format!("inline-table-scroll-{id}"));
 
         let mut grid = v_flex().w_full();
-        grid = grid.child(render_table_row(&table.headers, &table.alignments, &widths, true, false));
+        grid = grid.child(render_table_row(
+            &table.headers,
+            &table.alignments,
+            &widths,
+            true,
+            false,
+        ));
         for (r_idx, row) in table.rows.iter().take(INLINE_PREVIEW_MAX_ROWS).enumerate() {
             grid = grid.child(render_table_row(
                 row,
@@ -997,11 +994,7 @@ impl MultibotView {
                         div()
                             .text_xs()
                             .text_color(theme::text_muted())
-                            .child(format!(
-                                "{} × {} table",
-                                table.columns,
-                                table.rows.len()
-                            )),
+                            .child(format!("{} × {} table", table.columns, table.rows.len())),
                     )
                     .child(
                         Button::new(expand_id)
@@ -1021,7 +1014,9 @@ impl MultibotView {
                         .py_1()
                         .text_xs()
                         .text_color(theme::text_muted())
-                        .child(format!("… {hidden_rows} more rows · Click Expand to view all")),
+                        .child(format!(
+                            "… {hidden_rows} more rows · Click Expand to view all"
+                        )),
                 )
             })
             .into_any_element()
@@ -1046,7 +1041,13 @@ impl MultibotView {
             .w(px(content_w as f32))
             .ml(px(-(scroll.x as f32)))
             .mt(px(-(scroll.y as f32)));
-        grid = grid.child(render_table_row(&table.headers, &table.alignments, &widths, true, false));
+        grid = grid.child(render_table_row(
+            &table.headers,
+            &table.alignments,
+            &widths,
+            true,
+            false,
+        ));
         for (r_idx, row) in table.rows.iter().enumerate() {
             grid = grid.child(render_table_row(
                 row,
@@ -1121,12 +1122,10 @@ impl MultibotView {
                                     (px_x, px_y, 1)
                                 }
                             };
-                            if this.table_modal_state.handle_wheel(
-                                dx,
-                                dy,
-                                ev.modifiers.shift,
-                                step,
-                            ) {
+                            if this
+                                .table_modal_state
+                                .handle_wheel(dx, dy, ev.modifiers.shift, step)
+                            {
                                 cx.stop_propagation();
                                 cx.notify();
                             }
@@ -1304,12 +1303,18 @@ mod tests {
         assert!(parse_table("|---|---|\n| 1 | 2 |").is_none());
 
         // 16 columns accepted, 17 columns rejected
-        let hdr16 = (0..16).map(|i| format!("c{i}")).collect::<Vec<_>>().join("|");
+        let hdr16 = (0..16)
+            .map(|i| format!("c{i}"))
+            .collect::<Vec<_>>()
+            .join("|");
         let sep16 = (0..16).map(|_| "---").collect::<Vec<_>>().join("|");
         let t16 = parse_table(&format!("|{hdr16}|\n|{sep16}|")).expect("16 cols ok");
         assert_eq!(t16.columns, 16);
 
-        let hdr17 = (0..17).map(|i| format!("c{i}")).collect::<Vec<_>>().join("|");
+        let hdr17 = (0..17)
+            .map(|i| format!("c{i}"))
+            .collect::<Vec<_>>()
+            .join("|");
         let sep17 = (0..17).map(|_| "---").collect::<Vec<_>>().join("|");
         assert!(parse_table(&format!("|{hdr17}|\n|{sep17}|")).is_none());
     }
@@ -1445,9 +1450,15 @@ Intro text.
 
     #[test]
     fn modal_state_scroll_clamping_keyboard_and_wheel() {
-        let headers = (0..12).map(|i| format!("Wide_Column_{i}")).collect::<Vec<_>>();
+        let headers = (0..12)
+            .map(|i| format!("Wide_Column_{i}"))
+            .collect::<Vec<_>>();
         let rows = (0..40)
-            .map(|r| (0..12).map(|c| format!("table-cell-value-{r}-{c}")).collect())
+            .map(|r| {
+                (0..12)
+                    .map(|c| format!("table-cell-value-{r}-{c}"))
+                    .collect()
+            })
             .collect();
         let table = ParsedTable {
             source: TableSource::Pipe,
@@ -1624,15 +1635,12 @@ Intro text.
         assert_eq!(t12.rows, vec![vec!["1", "2"]]);
 
         // Bonus edge cases: code spans containing/ending with `|` and unclosed followed by closed
-        let t13 = parse_table("| Key | Value |\n|---|---|\n| `|` | ok |\n| `foo|` | ok |\n| `a | `b` |")
-            .expect("bonus edge cases");
+        let t13 =
+            parse_table("| Key | Value |\n|---|---|\n| `|` | ok |\n| `foo|` | ok |\n| `a | `b` |")
+                .expect("bonus edge cases");
         assert_eq!(
             t13.rows,
-            vec![
-                vec!["`|`", "ok"],
-                vec!["`foo|`", "ok"],
-                vec!["`a", "`b`"],
-            ]
+            vec![vec!["`|`", "ok"], vec!["`foo|`", "ok"], vec!["`a", "`b`"],]
         );
     }
 

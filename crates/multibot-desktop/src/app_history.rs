@@ -82,7 +82,7 @@ impl MultibotView {
         }
         let mut out = server_msgs;
         let existing_ids: HashSet<String> = out.iter().map(|m| m.id.clone()).collect();
-        for msg in &self.messages {
+        for msg in &self.history.messages {
             if self.chat_state.failed_sends.contains_key(&msg.id) && !existing_ids.contains(&msg.id)
             {
                 out.push(msg.clone());
@@ -111,12 +111,14 @@ impl MultibotView {
         };
 
         let cache_key = self
+            .history
             .active_switch_token
             .as_ref()
             .filter(|t| t.key.session_id == *session_id)
             .map(|t| t.key.clone())
             .or_else(|| {
-                self.pending_switch_tokens
+                self.history
+                    .pending_switch_tokens
                     .get(session_id)
                     .map(|t| t.key.clone())
             })
@@ -126,13 +128,16 @@ impl MultibotView {
                     .find(|s| s.host == self.active_session_host() && s.summary.id == *session_id)
                     .map(|s| CacheKey::new(s.host, s.summary.agent, &s.summary.id))
                     .or_else(|| {
-                        self.selected_session
+                        self.selection
+                            .selected_session
                             .as_ref()
                             .filter(|s| s.id == *session_id)
                             .map(|s| CacheKey::new(self.active_session_host(), s.agent, &s.id))
                     })
             });
-        let cached_entry = cache_key.as_ref().and_then(|k| self.chat_cache.get(k));
+        let cached_entry = cache_key
+            .as_ref()
+            .and_then(|k| self.history.chat_cache.get(k));
         let cached_oldest_offset = cached_entry.map(|c| c.oldest_offset);
         let cached_file_size = cached_entry.map(|c| c.file_size);
         let is_truncated_eof_tail =
@@ -145,6 +150,7 @@ impl MultibotView {
         let is_older_page = !is_truncated_eof_tail
             && (is_older_page_hint
                 || self
+                    .history
                     .pending_older_page_before
                     .get(session_id)
                     .copied()
@@ -156,11 +162,11 @@ impl MultibotView {
                     .is_some_and(|co| co > 0 && latest_offset.is_some_and(|lo| lo <= co)));
 
         if is_older_page {
-            self.pending_older_page_before.remove(session_id);
+            self.history.pending_older_page_before.remove(session_id);
             let Some(key) = cache_key else {
                 return false;
             };
-            let Some(mut cached) = self.chat_cache.get(&key).cloned() else {
+            let Some(mut cached) = self.history.chat_cache.get(&key).cloned() else {
                 // This window does not hold the cached tail for this session: ignore cleanly
                 // without overwriting Tier-2 disk cache or touching this window's active view.
                 return false;
@@ -191,9 +197,10 @@ impl MultibotView {
             cached.has_more = has_more;
             // Preserve `consumed_offset`, `file_size`, and `probe_sha256` (EOF probe).
             // `ChatCache::put` updates Tier-1 memory LRU ONLY (never overwrites Tier-2 disk).
-            self.chat_cache.put(key, cached.clone());
+            self.history.chat_cache.put(key, cached.clone());
 
             if self
+                .selection
                 .selected_session
                 .as_ref()
                 .is_some_and(|s| s.id == *session_id)
@@ -206,12 +213,16 @@ impl MultibotView {
                     }
                     self.chat_state.scroll.prepended(added_count);
                 }
-                self.messages = self.preserve_failed_local_messages(cached.messages);
-                self.chat_state.reconcile_local_reactions(&self.messages);
+                self.history.messages = self.preserve_failed_local_messages(cached.messages);
+                self.chat_state
+                    .reconcile_local_reactions(&self.history.messages);
                 if self.chat_state.find_open {
                     let q = self.chat_state.find_query.clone();
-                    self.chat_state
-                        .update_find_query(q, &self.messages, self.show_tool_calls());
+                    self.chat_state.update_find_query(
+                        q,
+                        &self.history.messages,
+                        self.show_tool_calls(),
+                    );
                 }
                 return added_count > 0 || oldest_offset.is_some();
             }
@@ -220,7 +231,7 @@ impl MultibotView {
 
         // Non-older tail History: clear any stale pending older-page marker so a subsequent
         // truncated/rotated tail can never be misclassified as an older page.
-        self.pending_older_page_before.remove(session_id);
+        self.history.pending_older_page_before.remove(session_id);
 
         let source_path = self
             .session_inputs()
@@ -228,18 +239,21 @@ impl MultibotView {
             .find(|s| s.host == self.active_session_host() && s.summary.id == *session_id)
             .map(|s| s.summary.source_path.clone())
             .or_else(|| {
-                self.selected_session
+                self.selection
+                    .selected_session
                     .as_ref()
                     .map(|s| s.source_path.clone())
             })
             .unwrap_or_default();
 
         let token = self
+            .history
             .pending_switch_tokens
             .get(session_id)
             .cloned()
             .or_else(|| {
-                self.active_switch_token
+                self.history
+                    .active_switch_token
                     .as_ref()
                     .filter(|t| t.key.session_id == *session_id)
                     .cloned()
@@ -247,16 +261,20 @@ impl MultibotView {
 
         if let Some(token) = token {
             match self
+                .history
                 .chat_cache
                 .reconcile_server_event(&token, source_path, &ev)
             {
                 Some(ReconcileOutcome::AppliedToActive) => {
-                    if let Some(cached) = self.chat_cache.get(&token.key) {
-                        self.messages =
+                    if let Some(cached) = self.history.chat_cache.get(&token.key) {
+                        self.history.messages =
                             self.preserve_failed_local_messages(cached.messages.clone());
                     }
-                    self.chat_state.scroll.history_loaded(&self.messages, false);
-                    self.chat_state.reconcile_local_reactions(&self.messages);
+                    self.chat_state
+                        .scroll
+                        .history_loaded(&self.history.messages, false);
+                    self.chat_state
+                        .reconcile_local_reactions(&self.history.messages);
                     if !todos.is_empty() || self.chat_state.session_todos.contains_key(session_id) {
                         self.chat_state
                             .session_todos
@@ -266,7 +284,7 @@ impl MultibotView {
                         let q = self.chat_state.find_query.clone();
                         self.chat_state.update_find_query(
                             q,
-                            &self.messages,
+                            &self.history.messages,
                             self.show_tool_calls(),
                         );
                     }
@@ -280,13 +298,17 @@ impl MultibotView {
         }
 
         if self
+            .selection
             .selected_session
             .as_ref()
             .is_some_and(|s| s.id == *session_id)
         {
-            self.messages = self.preserve_failed_local_messages(messages.clone());
-            self.chat_state.scroll.history_loaded(&self.messages, false);
-            self.chat_state.reconcile_local_reactions(&self.messages);
+            self.history.messages = self.preserve_failed_local_messages(messages.clone());
+            self.chat_state
+                .scroll
+                .history_loaded(&self.history.messages, false);
+            self.chat_state
+                .reconcile_local_reactions(&self.history.messages);
             if !todos.is_empty() {
                 self.chat_state
                     .session_todos
@@ -294,8 +316,11 @@ impl MultibotView {
             }
             if self.chat_state.find_open {
                 let q = self.chat_state.find_query.clone();
-                self.chat_state
-                    .update_find_query(q, &self.messages, self.show_tool_calls());
+                self.chat_state.update_find_query(
+                    q,
+                    &self.history.messages,
+                    self.show_tool_calls(),
+                );
             }
             return true;
         }
@@ -316,6 +341,7 @@ impl MultibotView {
         };
 
         let is_active = self
+            .selection
             .selected_session
             .as_ref()
             .is_some_and(|s| s.id == *session_id);
@@ -325,7 +351,12 @@ impl MultibotView {
                 let distance = f32::from(handle.max_offset().y + handle.offset().y);
                 self.chat_state.scroll.sync_position(distance);
             }
-            let existing: HashSet<&str> = self.messages.iter().map(|m| m.id.as_str()).collect();
+            let existing: HashSet<&str> = self
+                .history
+                .messages
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect();
             messages
                 .iter()
                 .filter(|m| !existing.contains(m.id.as_str()))
@@ -342,18 +373,21 @@ impl MultibotView {
             .find(|s| s.host == self.active_session_host() && s.summary.id == *session_id)
             .map(|s| s.summary.source_path.clone())
             .or_else(|| {
-                self.selected_session
+                self.selection
+                    .selected_session
                     .as_ref()
                     .map(|s| s.source_path.clone())
             })
             .unwrap_or_default();
 
         let token = self
+            .history
             .pending_switch_tokens
             .get(session_id)
             .cloned()
             .or_else(|| {
-                self.active_switch_token
+                self.history
+                    .active_switch_token
                     .as_ref()
                     .filter(|t| t.key.session_id == *session_id)
                     .cloned()
@@ -361,14 +395,17 @@ impl MultibotView {
 
         if let Some(token) = token {
             if matches!(
-                self.chat_cache
+                self.history
+                    .chat_cache
                     .reconcile_server_event(&token, source_path, &ev),
                 Some(ReconcileOutcome::AppliedToActive)
             ) {
-                if let Some(cached) = self.chat_cache.get(&token.key) {
-                    self.messages = self.preserve_failed_local_messages(cached.messages.clone());
+                if let Some(cached) = self.history.chat_cache.get(&token.key) {
+                    self.history.messages =
+                        self.preserve_failed_local_messages(cached.messages.clone());
                 }
-                self.chat_state.reconcile_local_reactions(&self.messages);
+                self.chat_state
+                    .reconcile_local_reactions(&self.history.messages);
                 if !todos.is_empty() {
                     self.chat_state
                         .session_todos
@@ -376,25 +413,30 @@ impl MultibotView {
                 }
                 if self.chat_state.find_open {
                     let q = self.chat_state.find_query.clone();
-                    self.chat_state
-                        .update_find_query(q, &self.messages, self.show_tool_calls());
+                    self.chat_state.update_find_query(
+                        q,
+                        &self.history.messages,
+                        self.show_tool_calls(),
+                    );
                 }
                 visible_changed = true;
             }
         } else if self
+            .selection
             .selected_session
             .as_ref()
             .is_some_and(|s| s.id == *session_id)
         {
             let existing_ids: HashSet<String> =
-                self.messages.iter().map(|m| m.id.clone()).collect();
+                self.history.messages.iter().map(|m| m.id.clone()).collect();
             for msg in messages {
                 if !existing_ids.contains(&msg.id) {
-                    self.messages.push(msg.clone());
+                    self.history.messages.push(msg.clone());
                     visible_changed = true;
                 }
             }
-            self.chat_state.reconcile_local_reactions(&self.messages);
+            self.chat_state
+                .reconcile_local_reactions(&self.history.messages);
             if !todos.is_empty() {
                 self.chat_state
                     .session_todos
@@ -406,16 +448,17 @@ impl MultibotView {
         let mut sessions_changed = false;
         if let Some(is_working) = working {
             for s in self
+                .connection
                 .sessions
                 .iter_mut()
-                .filter(|_| self.host_statuses.is_empty())
+                .filter(|_| self.connection.host_statuses.is_empty())
             {
                 if s.id == *session_id {
                     s.working = is_working;
                     sessions_changed = true;
                 }
             }
-            if let Some(ref mut sel) = self.selected_session
+            if let Some(ref mut sel) = self.selection.selected_session
                 && sel.id == *session_id
             {
                 sel.working = is_working;
@@ -434,9 +477,10 @@ impl MultibotView {
         {
             let preview: String = last_asst.text.trim().chars().take(120).collect();
             for s in self
+                .connection
                 .sessions
                 .iter_mut()
-                .filter(|_| self.host_statuses.is_empty())
+                .filter(|_| self.connection.host_statuses.is_empty())
             {
                 if s.id == *session_id {
                     s.last_assistant_id = Some(last_asst.id.clone());
@@ -450,7 +494,7 @@ impl MultibotView {
                     sessions_changed = true;
                 }
             }
-            if let Some(ref mut sel) = self.selected_session
+            if let Some(ref mut sel) = self.selection.selected_session
                 && sel.id == *session_id
             {
                 sel.last_assistant_id = Some(last_asst.id.clone());
@@ -480,15 +524,15 @@ impl MultibotView {
         if trimmed.is_empty() || trimmed.chars().count() > 200 {
             return false;
         }
-        let Some(ref sess) = self.selected_session else {
+        let Some(ref sess) = self.selection.selected_session else {
             return false;
         };
         let Some(tx) = self.active_session_tx().cloned() else {
             return false;
         };
-        self.next_search_request_seq = self.next_search_request_seq.wrapping_add(1);
-        let request_id = format!("search-{}", self.next_search_request_seq);
-        self.remote_search_request_id = Some(request_id.clone());
+        self.history.next_search_request_seq = self.history.next_search_request_seq.wrapping_add(1);
+        let request_id = format!("search-{}", self.history.next_search_request_seq);
+        self.history.remote_search_request_id = Some(request_id.clone());
         let ok = tx
             .send(ClientRequest::SearchHistory {
                 request_id,
@@ -503,23 +547,24 @@ impl MultibotView {
     }
 
     pub(crate) fn has_unloaded_older_history(&self) -> bool {
-        self.active_switch_token
+        self.history
+            .active_switch_token
             .as_ref()
-            .and_then(|t| self.chat_cache.get(&t.key))
+            .and_then(|t| self.history.chat_cache.get(&t.key))
             .is_some_and(|c| c.has_more && c.oldest_offset > 0)
     }
 
     pub(crate) fn load_older_history(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(ref sess) = self.selected_session else {
+        let Some(ref sess) = self.selection.selected_session else {
             return false;
         };
         let Some(tx) = self.active_session_tx().cloned() else {
             return false;
         };
-        let Some(token) = self.active_switch_token.as_ref() else {
+        let Some(token) = self.history.active_switch_token.as_ref() else {
             return false;
         };
-        let Some(cached) = self.chat_cache.get(&token.key) else {
+        let Some(cached) = self.history.chat_cache.get(&token.key) else {
             return false;
         };
         if !cached.has_more || cached.oldest_offset == 0 {
@@ -541,13 +586,14 @@ impl MultibotView {
             })
             .is_ok();
         if ok {
-            self.pending_older_page_before
+            self.history
+                .pending_older_page_before
                 .insert(sess_id.clone(), before);
             if cx.has_global::<SharedAppStore>() {
                 let store = cx.global_mut::<SharedAppStore>();
                 let queue = store
                     .pending_older_page_before
-                    .entry(if self.host_statuses.is_empty() {
+                    .entry(if self.connection.host_statuses.is_empty() {
                         sess_id
                     } else {
                         format!(

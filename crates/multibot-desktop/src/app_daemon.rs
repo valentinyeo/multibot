@@ -77,8 +77,8 @@ impl MultibotView {
     }
 
     pub(crate) fn refresh_all_hosts(&self) -> bool {
-        if self.host_txs.is_empty() && self.host_statuses.is_empty() {
-            return self.daemon_tx.as_ref().is_some_and(|tx| {
+        if self.connection.host_txs.is_empty() && self.connection.host_statuses.is_empty() {
+            return self.connection.daemon_tx.as_ref().is_some_and(|tx| {
                 tx.send(ClientRequest::ListLifecycleSessions {
                     limit: Some(SESSION_LIST_LIMIT),
                 })
@@ -86,7 +86,7 @@ impl MultibotView {
             });
         }
         let mut refreshed = false;
-        for tx in self.host_txs.values() {
+        for tx in self.connection.host_txs.values() {
             refreshed |= tx
                 .send(ClientRequest::ListLifecycleSessions {
                     limit: Some(SESSION_LIST_LIMIT),
@@ -108,12 +108,12 @@ impl MultibotView {
         for (label, target) in targets {
             Self::connect_host_on_app(self.runtime.clone(), label, target, true, cx);
         }
-        if !self.settings.ssh_hosts.is_empty() || self.host_statuses.is_empty() {
+        if !self.settings.ssh_hosts.is_empty() || self.connection.host_statuses.is_empty() {
             self.auto_connect_configured_hosts(cx);
         } else {
             self.sync_from_shared_store(cx);
         }
-        if let Some(s) = &self.selected_session
+        if let Some(s) = &self.selection.selected_session
             && let Some(tx) = self.active_session_tx()
         {
             let _ = tx.send(ClientRequest::WatchSession {

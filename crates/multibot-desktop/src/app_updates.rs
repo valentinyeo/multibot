@@ -112,13 +112,13 @@ impl MultibotView {
         action: UpdateUiAction,
         cx: &mut Context<Self>,
     ) {
-        let tx = self.update_action_tx.clone().or_else(|| {
+        let tx = self.updater.update_action_tx.clone().or_else(|| {
             cx.try_global::<SharedAppStore>()
                 .and_then(|s| s.update_action_tx.clone())
         });
         if let Some(tx) = tx {
-            self.update_action_tx = Some(tx.clone());
-            self.update_in_flight = true;
+            self.updater.update_action_tx = Some(tx.clone());
+            self.updater.update_in_flight = true;
             if cx.has_global::<SharedAppStore>() {
                 cx.global_mut::<SharedAppStore>().update_in_flight = true;
             }
@@ -129,7 +129,7 @@ impl MultibotView {
     pub(crate) fn start_update_runtime(&mut self, cx: &mut Context<Self>) {
         if cx.has_global::<SharedAppStore>() && cx.global::<SharedAppStore>().update_poller_started
         {
-            self.update_action_tx = cx.global::<SharedAppStore>().update_action_tx.clone();
+            self.updater.update_action_tx = cx.global::<SharedAppStore>().update_action_tx.clone();
             return;
         }
         let Ok(config) = UpdateClientConfig::from_env(multibot_proto::build_version()) else {
@@ -137,7 +137,7 @@ impl MultibotView {
         };
         let platform: Arc<dyn UpdaterPlatform> = Arc::new(DesktopUpdaterPlatform {
             updates_dir: MultibotSettings::updates_dir(),
-            preserved_args: self.preserved_cli_args.clone(),
+            preserved_args: self.updater.preserved_cli_args.clone(),
             swapper: DefaultFileSwapper,
             launcher: DefaultProcessLauncher,
         });
@@ -161,7 +161,7 @@ impl MultibotView {
         let (action_tx, mut action_rx) = mpsc::unbounded_channel::<UpdateUiAction>();
         let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<UpdateBridgeEvent>();
 
-        self.update_action_tx = Some(action_tx.clone());
+        self.updater.update_action_tx = Some(action_tx.clone());
         if cx.has_global::<SharedAppStore>() {
             let store = cx.global_mut::<SharedAppStore>();
             store.update_action_tx = Some(action_tx);
@@ -431,7 +431,7 @@ impl MultibotView {
     ) {
         match event {
             UpdateBridgeEvent::CheckCompleted { outcome, manual } => {
-                self.update_in_flight = false;
+                self.updater.update_in_flight = false;
                 self.update_ui.pending_action = None;
                 match outcome {
                     CheckOutcome::NotModified => {
@@ -536,7 +536,7 @@ impl MultibotView {
                 }
             }
             UpdateBridgeEvent::CheckFailed { message, manual } => {
-                self.update_in_flight = false;
+                self.updater.update_in_flight = false;
                 self.update_ui.pending_action = None;
                 if !manual {
                     // Offline or transient background failure stays silent (zero redraw).
@@ -578,12 +578,12 @@ impl MultibotView {
                 cx.notify();
             }
             UpdateBridgeEvent::ApplySucceeded | UpdateBridgeEvent::RestartSucceeded => {
-                self.update_in_flight = false;
+                self.updater.update_in_flight = false;
                 self.update_ui.pending_action = None;
                 cx.quit();
             }
             UpdateBridgeEvent::Failed { message, retryable } => {
-                self.update_in_flight = false;
+                self.updater.update_in_flight = false;
                 self.update_ui.pending_action = None;
                 self.set_update_state(UpdateState::Error { message, retryable }, cx);
                 self.sync_update_state_to_shared(cx);

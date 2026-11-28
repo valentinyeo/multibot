@@ -201,7 +201,8 @@ fn shell_shortcut(key: u32, ctrl: bool, alt: bool, shift: bool) -> Option<ShellS
     if key == 0x56 && ctrl && !alt {
         return Some(ShellShortcut::Paste);
     }
-    registered_native_shortcut(key, ctrl, alt, shift).map(|spec| ShellShortcut::Forward(spec.gpui_key))
+    registered_native_shortcut(key, ctrl, alt, shift)
+        .map(|spec| ShellShortcut::Forward(spec.gpui_key))
 }
 
 #[cfg(any(windows, test))]
@@ -212,9 +213,7 @@ pub(crate) fn registered_native_shortcut(
     shift: bool,
 ) -> Option<&'static multibot_keys::ShortcutSpec> {
     // Keep interrupt, EOF, suspend, and Escape terminal-owned even if the app binds them.
-    if (ctrl && alt)
-        || (ctrl && !alt && !shift && matches!(key, 0x43 | 0x44 | 0x5A))
-        || key == 0x1B
+    if (ctrl && alt) || (ctrl && !alt && !shift && matches!(key, 0x43 | 0x44 | 0x5A)) || key == 0x1B
     {
         return None;
     }
@@ -460,7 +459,7 @@ impl MultibotView {
         should_show_embedded_shell(
             self.main_surface,
             self.active_modal,
-            self.selected_session.as_ref().map(|s| s.agent),
+            self.selection.selected_session.as_ref().map(|s| s.agent),
             self.chat_state.find_open,
             self.sidebar_state.rename.is_some() || self.sidebar_state.new_workspace_draft.is_some(),
         ) && !self.table_modal_state.is_open()
@@ -479,7 +478,7 @@ impl MultibotView {
                 window.is_window_active(),
                 self.main_surface,
                 self.active_modal,
-                self.selected_session.as_ref().map(|s| s.agent),
+                self.selection.selected_session.as_ref().map(|s| s.agent),
                 self.chat_state.find_open,
                 self.sidebar_state.rename.is_some()
                     || self.sidebar_state.new_workspace_draft.is_some(),
@@ -527,14 +526,16 @@ impl MultibotView {
     }
 
     pub(crate) fn sync_embedded_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let hosts: Vec<_> = if self.host_sessions.is_empty() {
-            self.sessions
+        let hosts: Vec<_> = if self.connection.host_sessions.is_empty() {
+            self.connection
+                .sessions
                 .iter()
                 .filter(|s| s.agent == AgentKind::Shell && !s.archived)
                 .map(|_| self.active_session_host().to_string())
                 .collect()
         } else {
-            self.host_sessions
+            self.connection
+                .host_sessions
                 .iter()
                 .filter(|(_, s)| s.agent == AgentKind::Shell && !s.archived)
                 .map(|(h, _)| h.clone())
@@ -544,12 +545,21 @@ impl MultibotView {
         #[cfg(windows)]
         if let Some(host) = &self.shell_host.native {
             let text_input_focused = window.focused(cx).is_some_and(|focus| {
-                focus != self.root_focus_handle
+                focus != self.focus.root_focus_handle
                     && self.chat_state.focus_handle.as_ref() != Some(&focus)
             });
             host.set_text_input_focus(text_input_focused);
-            host.set_kill_confirmation(self.sidebar_state.pending_shell_dissolve.as_ref()
-                .is_some_and(|(key, _)| self.selected_session.as_ref().is_some_and(|session| self.session_key_for(session) == *key)));
+            host.set_kill_confirmation(
+                self.sidebar_state
+                    .pending_shell_dissolve
+                    .as_ref()
+                    .is_some_and(|(key, _)| {
+                        self.selection
+                            .selected_session
+                            .as_ref()
+                            .is_some_and(|session| self.session_key_for(session) == *key)
+                    }),
+            );
         }
         let active = self
             .embedded_shell_visible()
@@ -557,7 +567,7 @@ impl MultibotView {
         self.shell_host
             .reconcile(active.as_deref(), None, !self.computer.is_open());
         let Some(key) = active else { return };
-        let session_id = self.selected_session.as_ref().unwrap().id.clone();
+        let session_id = self.selection.selected_session.as_ref().unwrap().id.clone();
         if !hosts.contains(&key) {
             return;
         }
@@ -631,7 +641,11 @@ impl MultibotView {
                             if cx
                                 .update(|window, cx| {
                                     if let Some(view) = weak.upgrade() {
-                                        view.read(cx).root_focus_handle.clone().focus(window, cx);
+                                        view.read(cx)
+                                            .focus
+                                            .root_focus_handle
+                                            .clone()
+                                            .focus(window, cx);
                                         window.dispatch_keystroke(key, cx);
                                     }
                                 })
@@ -703,9 +717,12 @@ impl MultibotView {
     }
 
     pub(crate) fn render_shell_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let session = self.selected_session.as_ref().unwrap();
+        let session = self.selection.selected_session.as_ref().unwrap();
         let key = self.session_key_for(session);
-        let confirming_kill = self.sidebar_state.pending_shell_dissolve.as_ref()
+        let confirming_kill = self
+            .sidebar_state
+            .pending_shell_dissolve
+            .as_ref()
             .is_some_and(|(pending, _)| pending == &key);
         let title = self
             .sidebar_state
@@ -713,9 +730,10 @@ impl MultibotView {
             .effective_title(&key, &session.title)
             .to_string();
         let host = self
+            .selection
             .selected_session_host
             .as_deref()
-            .or(self.connected_host.as_deref())
+            .or(self.connection.connected_host.as_deref())
             .unwrap_or("server");
         let workspace = self
             .sidebar_state
@@ -767,7 +785,7 @@ impl MultibotView {
                         gpui_kit::MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
                             this.shell_host.focus_parent();
-                            this.root_focus_handle.focus(window, cx);
+                            this.focus.root_focus_handle.focus(window, cx);
                         }),
                     )
                     .child(if let Some(draft) = header_rename {
@@ -800,24 +818,26 @@ impl MultibotView {
                             .truncate()
                             .child(title)
                     })
-                    .when(!confirming_kill, |el| el.child(
-                        div()
-                            .text_xs()
-                            .max_w(px(320.0))
-                            .truncate()
-                            .text_color(theme::text_muted())
-                            .child(format!("{host} · {}", session.id)),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .rounded(theme::RADIUS_CHIP)
-                            .bg(theme::bg_surface())
-                            .px_2()
-                            .py_1()
-                            .text_color(theme::text_secondary())
-                            .child(workspace),
-                    ))
+                    .when(!confirming_kill, |el| {
+                        el.child(
+                            div()
+                                .text_xs()
+                                .max_w(px(320.0))
+                                .truncate()
+                                .text_color(theme::text_muted())
+                                .child(format!("{host} · {}", session.id)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .rounded(theme::RADIUS_CHIP)
+                                .bg(theme::bg_surface())
+                                .px_2()
+                                .py_1()
+                                .text_color(theme::text_secondary())
+                                .child(workspace),
+                        )
+                    })
                     .child(div().flex_1())
                     .when(confirming_kill, |el| {
                         let kill_key = key.clone();
@@ -834,26 +854,33 @@ impl MultibotView {
                                 .text_xs()
                                 .text_color(theme::accent_amber())
                                 .child("Press Ctrl+Shift+W again to kill shell")
-                                .child(Button::new("shell-kill").small().label("Kill")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                .child(Button::new("shell-kill").small().label("Kill").on_click(
+                                    cx.listener(move |this, _, _, cx| {
                                         this.dissolve_session_key_confirmed(&kill_key, cx);
-                                    })))
-                                .child(Button::new("shell-kill-cancel").small().label("Cancel")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.sidebar_state.pending_shell_dissolve = None;
-                                        this.notice = None;
-                                        cx.notify();
-                                    }))),
+                                    }),
+                                ))
+                                .child(
+                                    Button::new("shell-kill-cancel")
+                                        .small()
+                                        .label("Cancel")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.sidebar_state.pending_shell_dissolve = None;
+                                            this.notice = None;
+                                            cx.notify();
+                                        })),
+                                ),
                         )
                     })
-                    .when(!confirming_kill, |el| el.child(
-                        Button::new("shell-reconnect")
-                            .small()
-                            .label("Reconnect")
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.reconnect_embedded_shell(cx)),
-                            ),
-                    )),
+                    .when(!confirming_kill, |el| {
+                        el.child(
+                            Button::new("shell-reconnect")
+                                .small()
+                                .label("Reconnect")
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.reconnect_embedded_shell(cx)),
+                                ),
+                        )
+                    }),
             )
             .when_some(self.render_find_bar(cx), |el, bar| el.child(bar))
             .child(
@@ -864,7 +891,7 @@ impl MultibotView {
                         gpui_kit::MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
                             cx.stop_propagation();
-                            this.root_focus_handle.focus(window, cx);
+                            this.focus.root_focus_handle.focus(window, cx);
                             this.restore_embedded_shell_focus(window, cx);
                         }),
                     )
@@ -1009,11 +1036,11 @@ mod tests {
                     id: "b".into(),
                     ..a.clone()
                 };
-                view.host_sessions =
+                view.connection.host_sessions =
                     vec![("host-a".into(), a.clone()), ("host-a".into(), b.clone())];
-                view.sessions = vec![a.clone(), b.clone()];
-                view.host_txs.insert("host-a".into(), tx_a);
-                view.host_txs.insert("host-b".into(), tx_b);
+                view.connection.sessions = vec![a.clone(), b.clone()];
+                view.connection.host_txs.insert("host-a".into(), tx_a);
+                view.connection.host_txs.insert("host-b".into(), tx_b);
                 view.shell_host.entries.insert(
                     "host-a".into(),
                     ShellState::new("a", ShellConnection::TestConnected),
@@ -1052,8 +1079,10 @@ mod tests {
     #[test]
     fn dissolve_chord_is_forwarded_on_each_distinct_press() {
         for _ in 0..2 {
-            assert_eq!(shell_shortcut(0x57, true, false, true),
-                Some(ShellShortcut::Forward("ctrl-shift-w")));
+            assert_eq!(
+                shell_shortcut(0x57, true, false, true),
+                Some(ShellShortcut::Forward("ctrl-shift-w"))
+            );
         }
         assert!(shell_shortcut(0x57, true, false, false).is_none());
     }
@@ -1116,7 +1145,9 @@ mod tests {
     #[test]
     fn console_url_hit_test_uses_utf16_cells_and_wrapped_rows() {
         let cols = 20;
-        let mut cells: Vec<u16> = "é https://example.com/abc_(def)).,;".encode_utf16().collect();
+        let mut cells: Vec<u16> = "é https://example.com/abc_(def)).,;"
+            .encode_utf16()
+            .collect();
         cells.resize(cols * 2, b' ' as u16);
         for (row, col) in [(0, 6), (1, 2)] {
             let url = console_url_at_cell(&cells, cols, row, col).unwrap();
@@ -1398,9 +1429,18 @@ mod tests {
     }
     #[test]
     fn daily_driver_browser_shortcuts_are_forwarded_without_changing_terminal_keys() {
-        assert_eq!(shell_shortcut(0x41, false, true, false), Some(ShellShortcut::Forward("alt-a")));
-        assert_eq!(shell_shortcut(0x51, false, true, false), Some(ShellShortcut::Forward("alt-q")));
-        assert_eq!(shell_shortcut(0x42, true, false, true), Some(ShellShortcut::Forward("ctrl-shift-b")));
+        assert_eq!(
+            shell_shortcut(0x41, false, true, false),
+            Some(ShellShortcut::Forward("alt-a"))
+        );
+        assert_eq!(
+            shell_shortcut(0x51, false, true, false),
+            Some(ShellShortcut::Forward("alt-q"))
+        );
+        assert_eq!(
+            shell_shortcut(0x42, true, false, true),
+            Some(ShellShortcut::Forward("ctrl-shift-b"))
+        );
         assert!(shell_shortcut(0x57, true, false, false).is_none());
         assert!(shell_shortcut(0x4C, true, false, false).is_none());
     }

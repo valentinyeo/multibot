@@ -369,7 +369,7 @@ impl MultibotView {
             existing_images,
             existing_files,
         );
-        let mut current = self.prompt_input.read(cx).value().to_string();
+        let mut current = self.inputs.prompt_input.read(cx).value().to_string();
         let mut caret = current.len();
         let staged_any = !classified.images.is_empty() || !classified.files.is_empty();
 
@@ -427,7 +427,7 @@ impl MultibotView {
         }
 
         if staged_any {
-            self.prompt_input.update(cx, |state, cx| {
+            self.inputs.prompt_input.update(cx, |state, cx| {
                 state.select_all(window, cx);
                 state.replace(current, window, cx);
             });

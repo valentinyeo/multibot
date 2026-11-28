@@ -1,3 +1,6 @@
+#[path = "app_state.rs"]
+mod view_state;
+use view_state::*;
 #[path = "app_actions.rs"]
 mod actions;
 #[path = "app_daemon.rs"]
@@ -233,17 +236,13 @@ pub(crate) struct FocusLayoutSignature {
 
 pub struct MultibotView {
     pub(crate) runtime: Arc<tokio::runtime::Runtime>,
-    pub(crate) root_focus_handle: FocusHandle,
-    pub(crate) last_focus_layout_sig: Option<FocusLayoutSignature>,
+    pub(crate) focus: ViewFocusState,
     pub(crate) settings: MultibotSettings,
     pub(crate) gpu_report: GpuRuntimeReport,
     pub(crate) footprint: FootprintSnapshot,
     pub(crate) footprint_label: String,
-
-    // Navigation & overlays
     pub(crate) main_surface: MainSurface,
     pub(crate) settings_tab: crate::settings::SettingsTab,
-    pub(crate) settings_focus_handle: FocusHandle,
     pub(crate) active_modal: ActiveModal,
     pub(crate) sidebar_state: SidebarState,
     pub(crate) inbox_state: InboxState,
@@ -263,72 +262,15 @@ pub struct MultibotView {
     /// Last Computer View URL this window connected to, offered again on reopen. A
     /// remembered address never starts a browser on its own.
     pub(crate) last_computer_url: Option<crate::computer_view::SafeUrl>,
-
-    // Daemon & chat state
-    pub(crate) connected_host: Option<String>,
-    pub(crate) connection_status: String,
-    pub(crate) daemon_tx: Option<mpsc::UnboundedSender<ClientRequest>>,
-    pub(crate) sessions: Vec<SessionSummary>,
-    pub(crate) host_sessions: Vec<(String, SessionSummary)>,
-    pub(crate) host_txs: HashMap<String, mpsc::UnboundedSender<ClientRequest>>,
-    pub(crate) host_statuses: Vec<HostStatusSnapshot>,
-    pub(crate) selected_session_host: Option<String>,
-    pub(crate) pending_spawn_host: Option<String>,
-    pub(crate) selected_session: Option<SessionSummary>,
-    pub(crate) messages: Vec<ChatMessage>,
-
-    // Session lifecycle & multi-window SharedAppStore sync
-    pub(crate) view_id: u64,
-    pub(crate) closed_sessions: Vec<(String, SessionSummary)>,
-    pub(crate) last_synced_revision: u64,
-    pub(crate) last_synced_connection_gen: u64,
-    pub(crate) last_daemon_notice_seq: u64,
-    pub(crate) pending_spawn_open: bool,
-    pub(crate) _shared_store_sub: Subscription,
-    pub(crate) _prompt_focus_sub: Subscription,
-    _prompt_change_sub: Subscription,
-    _window_activation_sub: Subscription,
-    pub(crate) _host_focus_sub: Subscription,
-    pub(crate) _daemon_event_task: Task<()>,
-
-    // Updater runtime
-    pub(crate) update_action_tx: Option<mpsc::UnboundedSender<UpdateUiAction>>,
-    pub(crate) preserved_cli_args: Vec<String>,
-    pub(crate) update_in_flight: bool,
-    pub(crate) last_update_notice_seq: u64,
-
-    // Daemon metadata synced from App-scoped SharedAppStore
-    pub(crate) daemon_version: Option<String>,
-    pub(crate) daemon_binary_hash: Option<String>,
-
-    // M5 two-tier cache & offline outbox
-    pub(crate) chat_cache: ChatCache,
-    pub(crate) active_switch_token: Option<SwitchToken>,
-    pub(crate) pending_switch_tokens: HashMap<String, SwitchToken>,
-    pub(crate) pending_older_page_before: HashMap<String, u64>,
-    pub(crate) shared_chat_outbox: Arc<Mutex<SharedChatOutbox>>,
-    pub(crate) chat_outbox: ChatOutbox,
-    pub(crate) persist_outbox_to_disk: bool,
-    pub(crate) outbox_msg_map: HashMap<String, String>,
-    pub(crate) last_dispatched_prompt: Option<(String, String)>,
-
-    // M3 remote whole-history search state
-    pub(crate) next_search_request_seq: u64,
-    pub(crate) remote_search_request_id: Option<String>,
-    pub(crate) remote_search_hits: Vec<SearchHit>,
-    pub(crate) remote_search_truncated: bool,
-
+    pub(crate) connection: ViewConnectionState,
+    pub(crate) selection: SessionSelectionState,
+    pub(crate) history: TranscriptState,
+    pub(crate) sync: ViewSyncState,
+    pub(crate) _subscriptions: ViewSubscriptions,
+    pub(crate) updater: UpdaterRuntimeState,
+    pub(crate) outbox: ViewOutboxState,
     pub(crate) voice: crate::voice::VoiceState,
-    pub(crate) deepgram_key_input: Entity<InputState>,
-    pub(crate) deepgram_language_input: Entity<InputState>,
-
-    // Inputs
-    pub(crate) prompt_input: Entity<TextareaState>,
-    pub(crate) pending_focus_input: bool,
-    pub(crate) shortcuts_search_input: Entity<InputState>,
-    pub(crate) _shortcuts_search_sub: Subscription,
-    pub(crate) host_input: Entity<InputState>,
-    pub(crate) palette_input: Entity<InputState>,
+    pub(crate) inputs: ViewInputs,
     pub(crate) notice: Option<String>,
 }
 
@@ -640,15 +582,18 @@ impl MultibotView {
 
         let mut view = Self {
             runtime,
-            root_focus_handle,
-            last_focus_layout_sig: None,
+            focus: ViewFocusState {
+                root_focus_handle,
+                last_focus_layout_sig: None,
+                settings_focus_handle: cx.focus_handle(),
+                pending_focus_input: false,
+            },
             settings,
             gpu_report,
             footprint,
             footprint_label,
             main_surface: MainSurface::Chat,
             settings_tab: crate::settings::SettingsTab::default(),
-            settings_focus_handle: cx.focus_handle(),
             active_modal: ActiveModal::None,
             sidebar_state,
             inbox_state: InboxState::default(),
@@ -664,62 +609,77 @@ impl MultibotView {
             shell_host: crate::shell_host::ShellHost::default(),
             computer: ComputerViewState::default(),
             last_computer_url: None,
-            connected_host,
-            connection_status,
-            daemon_tx,
-            sessions,
-            host_sessions: cx.global::<SharedAppStore>().host_sessions.clone(),
-            host_txs: cx
-                .global::<SharedAppStore>()
-                .host_connections
-                .iter()
-                .filter_map(|(h, c)| c.daemon_tx.clone().map(|tx| (h.clone(), tx)))
-                .collect(),
-            host_statuses: cx.global::<SharedAppStore>().host_status_snapshots(),
-            selected_session_host: None,
-            pending_spawn_host: None,
-            selected_session: None,
-            messages: Vec::new(),
-            view_id,
-            closed_sessions: Vec::new(),
-            last_synced_revision: revision,
-            last_synced_connection_gen: connection_gen,
-            last_daemon_notice_seq: daemon_notice_seq,
-            pending_spawn_open: false,
-            _shared_store_sub,
-            _prompt_focus_sub,
-            _prompt_change_sub,
-            _window_activation_sub,
-            _host_focus_sub,
-            _daemon_event_task,
-            update_action_tx,
-            preserved_cli_args,
-            update_in_flight,
-            last_update_notice_seq: update_notice_seq,
-            daemon_version,
-            daemon_binary_hash,
-            chat_cache: ChatCache::default(),
-            active_switch_token: None,
-            pending_switch_tokens: HashMap::new(),
-            pending_older_page_before: HashMap::new(),
-            shared_chat_outbox,
-            chat_outbox: initial_chat_outbox,
-            persist_outbox_to_disk: false,
-            outbox_msg_map: HashMap::new(),
-            last_dispatched_prompt: None,
-            next_search_request_seq: 0,
-            remote_search_request_id: None,
-            remote_search_hits: Vec::new(),
-            remote_search_truncated: false,
+            connection: ViewConnectionState {
+                connected_host,
+                connection_status,
+                daemon_tx,
+                sessions,
+                host_sessions: cx.global::<SharedAppStore>().host_sessions.clone(),
+                host_txs: cx
+                    .global::<SharedAppStore>()
+                    .host_connections
+                    .iter()
+                    .filter_map(|(h, c)| c.daemon_tx.clone().map(|tx| (h.clone(), tx)))
+                    .collect(),
+                host_statuses: cx.global::<SharedAppStore>().host_status_snapshots(),
+                daemon_version,
+                daemon_binary_hash,
+            },
+            selection: SessionSelectionState {
+                selected_session_host: None,
+                pending_spawn_host: None,
+                selected_session: None,
+                closed_sessions: Vec::new(),
+                pending_spawn_open: false,
+                last_dispatched_prompt: None,
+            },
+            history: TranscriptState {
+                messages: Vec::new(),
+                chat_cache: ChatCache::default(),
+                active_switch_token: None,
+                pending_switch_tokens: HashMap::new(),
+                pending_older_page_before: HashMap::new(),
+                next_search_request_seq: 0,
+                remote_search_request_id: None,
+                remote_search_hits: Vec::new(),
+                remote_search_truncated: false,
+            },
+            sync: ViewSyncState {
+                view_id,
+                last_synced_revision: revision,
+                last_synced_connection_gen: connection_gen,
+                last_daemon_notice_seq: daemon_notice_seq,
+            },
+            _subscriptions: ViewSubscriptions {
+                _shared_store_sub,
+                _prompt_focus_sub,
+                _prompt_change_sub,
+                _window_activation_sub,
+                _host_focus_sub,
+                _daemon_event_task,
+                _shortcuts_search_sub: shortcuts_search_sub,
+            },
+            updater: UpdaterRuntimeState {
+                update_action_tx,
+                preserved_cli_args,
+                update_in_flight,
+                last_update_notice_seq: update_notice_seq,
+            },
+            outbox: ViewOutboxState {
+                shared_chat_outbox,
+                chat_outbox: initial_chat_outbox,
+                persist_outbox_to_disk: false,
+                outbox_msg_map: HashMap::new(),
+            },
             voice: crate::voice::VoiceState::default(),
-            deepgram_key_input,
-            deepgram_language_input,
-            prompt_input,
-            pending_focus_input: false,
-            shortcuts_search_input,
-            _shortcuts_search_sub: shortcuts_search_sub,
-            host_input,
-            palette_input,
+            inputs: ViewInputs {
+                deepgram_key_input,
+                deepgram_language_input,
+                prompt_input,
+                shortcuts_search_input,
+                host_input,
+                palette_input,
+            },
             notice: None,
         };
         view.start_account_once(cx);
@@ -805,7 +765,11 @@ impl MultibotView {
                     .when_some(self.render_update_pill(cx), |el, pill| el.child(pill))
                     .when(
                         self.main_surface == MainSurface::Chat
-                            && self.selected_session.as_ref().is_some_and(|s| s.working),
+                            && self
+                                .selection
+                                .selected_session
+                                .as_ref()
+                                .is_some_and(|s| s.working),
                         |el| {
                             el.child(
                                 div()
@@ -862,7 +826,7 @@ impl MultibotView {
                             .accessibility_label("Chat menu")
                             .tooltip("Chat menu")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                if let Some(session) = &this.selected_session {
+                                if let Some(session) = &this.selection.selected_session {
                                     this.open_palette_tab_context(
                                         this.session_key_for(session),
                                         window,
@@ -883,11 +847,17 @@ impl Render for MultibotView {
             && (self.sidebar_state.rename.is_some()
                 || self.sidebar_state.new_workspace_draft.is_some())
             && (self
+                .inputs
                 .prompt_input
                 .read(cx)
                 .focus_handle(cx)
                 .is_focused(window)
-                || self.host_input.read(cx).focus_handle(cx).is_focused(window))
+                || self
+                    .inputs
+                    .host_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window))
         {
             self.sidebar_state.rename = None;
             self.sidebar_state.new_workspace_draft = None;
@@ -896,18 +866,22 @@ impl Render for MultibotView {
         self.sync_browser_pane(window, cx);
         self.sync_embedded_shell(window, cx);
         let current_sig = self.focus_layout_signature();
-        let prev_sig = self.last_focus_layout_sig.replace(current_sig.clone());
+        let prev_sig = self
+            .focus
+            .last_focus_layout_sig
+            .replace(current_sig.clone());
         let layout_changed = prev_sig.as_ref().is_some_and(|prev| prev != &current_sig);
         if self.active_modal == ActiveModal::Shortcuts
             && prev_sig
                 .as_ref()
                 .is_none_or(|prev| prev.active_modal != ActiveModal::Shortcuts)
         {
-            self.shortcuts_search_input
+            self.inputs
+                .shortcuts_search_input
                 .update(cx, |state, cx| state.set_value("", window, cx));
             self.focus_active_surface_default(window, cx);
         }
-        if std::mem::take(&mut self.pending_focus_input)
+        if std::mem::take(&mut self.focus.pending_focus_input)
             && self.main_surface == MainSurface::Chat
             && self.active_modal == ActiveModal::None
             && !self.table_modal_state.is_open()
@@ -940,7 +914,7 @@ impl Render for MultibotView {
         let browser_pane = self.render_browser_pane(cx);
         let root = div()
             .id("multibot-root")
-            .track_focus(&self.root_focus_handle)
+            .track_focus(&self.focus.root_focus_handle)
             .on_mouse_down(
                 gpui_kit::MouseButton::Left,
                 cx.listener(|this, _, _, _| {
@@ -961,7 +935,7 @@ impl Render for MultibotView {
                     .child({
                         let surface = match self.main_surface {
                             MainSurface::Chat
-                                if self.selected_session.as_ref().is_some_and(|s| {
+                                if self.selection.selected_session.as_ref().is_some_and(|s| {
                                     s.agent == AgentKind::Shell && !s.archived
                                 }) =>
                             {

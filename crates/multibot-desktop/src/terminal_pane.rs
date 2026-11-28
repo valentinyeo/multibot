@@ -372,11 +372,15 @@ impl TerminalScreen {
         let mut row_start = 0;
         let mut row_end = 0;
         for r in first..=last {
-            if r == row { row_start = text.len(); }
+            if r == row {
+                row_start = text.len();
+            }
             for col in 0..self.cols {
                 text.push(self.cell(r, col).map_or(' ', |cell| cell.c));
             }
-            if r == row { row_end = text.len(); }
+            if r == row {
+                row_end = text.len();
+            }
         }
         crate::external_url::url_ranges(&text)
             .into_iter()
@@ -1102,6 +1106,7 @@ impl crate::app::MultibotView {
     pub(crate) fn spawn_terminal_for_active_session(&mut self, cx: &mut Context<Self>) {
         let host_label = self.active_session_host().to_string();
         let cwd = self
+            .selection
             .selected_session
             .as_ref()
             .and_then(|session| session.cwd.clone());
@@ -1513,7 +1518,12 @@ fn render_screen(
         let mut runs = h_flex().h(px(TERMINAL_FONT_SIZE_PX * 1.35));
         let chars: Vec<char> = trimmed.chars().collect();
         let links = screen.row_links(row);
-        let link_at = |col| links.iter().find(|(range, _)| range.contains(&col)).map(|(_, url)| url);
+        let link_at = |col| {
+            links
+                .iter()
+                .find(|(range, _)| range.contains(&col))
+                .map(|(_, url)| url)
+        };
         let mut start = 0usize;
         while start < chars.len() {
             let cell = screen.cell(row, start);
@@ -1539,19 +1549,24 @@ fn render_screen(
             if let Some(url) = link_at(start) {
                 let url = url.clone();
                 runs = runs.child(
-                    run.id(gpui_kit::SharedString::from(format!("terminal-link-{row}-{start}")))
-                        .role(gpui_kit::Role::Link)
-                        .test_support()
-                        .cursor_pointer()
-                        .hover(|style| style.underline())
-                        .on_click(move |event, _, cx| {
-                            if event.modifiers().control && !event.is_right_click() && !event.is_middle_click() {
-                                cx.stop_propagation();
-                                if let Err(error) = crate::external_url::open_external_url(&url) {
-                                    eprintln!("Could not open terminal link: {error}");
-                                }
+                    run.id(gpui_kit::SharedString::from(format!(
+                        "terminal-link-{row}-{start}"
+                    )))
+                    .role(gpui_kit::Role::Link)
+                    .test_support()
+                    .cursor_pointer()
+                    .hover(|style| style.underline())
+                    .on_click(move |event, _, cx| {
+                        if event.modifiers().control
+                            && !event.is_right_click()
+                            && !event.is_middle_click()
+                        {
+                            cx.stop_propagation();
+                            if let Err(error) = crate::external_url::open_external_url(&url) {
+                                eprintln!("Could not open terminal link: {error}");
                             }
-                        }),
+                        }
+                    }),
                 );
             } else {
                 runs = runs.child(run);
@@ -1889,7 +1904,14 @@ mod tests {
             assert_eq!(encode_key(&event), None, "{chord}");
         }
         for chord in [
-            "v", "shift-v", "alt-v", "ctrl-alt-v", "ctrl-c", "ctrl-d", "ctrl-z", "escape",
+            "v",
+            "shift-v",
+            "alt-v",
+            "ctrl-alt-v",
+            "ctrl-c",
+            "ctrl-d",
+            "ctrl-z",
+            "escape",
         ] {
             let event = KeyDownEvent {
                 keystroke: gpui_kit::Keystroke::parse(chord).unwrap(),
@@ -1937,15 +1959,23 @@ mod tests {
         let mut emulator = TerminalEmulator::new(TerminalSize::new(20, 6));
         emulator.advance(b"https://example.com/\x1b[31mabc_(def)\x1b[0m.,;\r\nfile:///etc/passwd");
         let screen = emulator.snapshot();
-        assert_eq!(screen.row_links(0), vec![(0..20, "https://example.com/abc_(def)".into())]);
-        assert_eq!(screen.row_links(1), vec![(0..9, "https://example.com/abc_(def)".into())]);
+        assert_eq!(
+            screen.row_links(0),
+            vec![(0..20, "https://example.com/abc_(def)".into())]
+        );
+        assert_eq!(
+            screen.row_links(1),
+            vec![(0..9, "https://example.com/abc_(def)".into())]
+        );
         assert!(screen.row_links(2).is_empty());
     }
 
     #[gpui_kit::test]
     fn terminal_url_requires_ctrl_click_and_opens_exact_url(cx: &mut TestAppContext) {
         use gpui_kit::test::TestWindowExt;
-        struct LinkGrid { screen: TerminalScreen }
+        struct LinkGrid {
+            screen: TerminalScreen,
+        }
         impl gpui_kit::Render for LinkGrid {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 render_screen(&self.screen, "monospace".into(), None)
@@ -1954,19 +1984,45 @@ mod tests {
         cx.update(gpui_kit::init);
         let mut emulator = TerminalEmulator::new(TerminalSize::new(60, 4));
         emulator.advance(b"visit https://example.com/a_(b)).,;\r\nhttp://example.org/?a=1&b=2");
-        let (handle, _) = cx.update(|cx| gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |_, cx| {
-            cx.new(|_| LinkGrid { screen: emulator.snapshot() })
-        }).unwrap());
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |_, cx| {
+                cx.new(|_| LinkGrid {
+                    screen: emulator.snapshot(),
+                })
+            })
+            .unwrap()
+        });
         cx.update_window(handle, |_, window, cx| {
             crate::external_url::take_opened_urls();
             window.render_frame(cx);
             window.click("terminal-link-0-6", cx);
             assert!(crate::external_url::take_opened_urls().is_empty());
-            window.click_with_modifiers("terminal-link-0-6", gpui_kit::Modifiers { control: true, ..Default::default() }, cx);
-            assert_eq!(crate::external_url::take_opened_urls(), ["https://example.com/a_(b)"]);
-            window.click_with_modifiers("terminal-link-1-0", gpui_kit::Modifiers { control: true, ..Default::default() }, cx);
-            assert_eq!(crate::external_url::take_opened_urls(), ["http://example.org/?a=1&b=2"]);
-        }).unwrap();
+            window.click_with_modifiers(
+                "terminal-link-0-6",
+                gpui_kit::Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+                cx,
+            );
+            assert_eq!(
+                crate::external_url::take_opened_urls(),
+                ["https://example.com/a_(b)"]
+            );
+            window.click_with_modifiers(
+                "terminal-link-1-0",
+                gpui_kit::Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+                cx,
+            );
+            assert_eq!(
+                crate::external_url::take_opened_urls(),
+                ["http://example.org/?a=1&b=2"]
+            );
+        })
+        .unwrap();
     }
 
     #[test]

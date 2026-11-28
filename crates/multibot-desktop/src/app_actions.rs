@@ -294,7 +294,7 @@ impl MultibotView {
                 // 12. Return from Inbox / Settings surface to Chat
                 this.set_main_surface(MainSurface::Chat);
                 this.focus_active_surface_default(window, cx);
-            } else if let Some(ref sess) = this.selected_session
+            } else if let Some(ref sess) = this.selection.selected_session
                 && sess.working
             {
                 // 13. Interrupt working agent on Esc in Chat View
@@ -393,6 +393,7 @@ impl MultibotView {
                 return;
             }
             if this
+                .selection
                 .selected_session
                 .as_ref()
                 .is_some_and(|s| s.agent == AgentKind::Shell)
@@ -400,11 +401,11 @@ impl MultibotView {
                 this.reconnect_embedded_shell(cx);
                 return;
             }
-            if !this.host_statuses.is_empty() || !this.settings.ssh_hosts.is_empty() {
+            if !this.connection.host_statuses.is_empty() || !this.settings.ssh_hosts.is_empty() {
                 this.reconnect_all_hosts(cx);
                 return;
             }
-            if let Some(ref tx) = this.daemon_tx
+            if let Some(ref tx) = this.connection.daemon_tx
                 && !tx.is_closed()
                 && tx
                     .send(ClientRequest::ListLifecycleSessions {
@@ -412,7 +413,7 @@ impl MultibotView {
                     })
                     .is_ok()
             {
-                if let Some(ref s) = this.selected_session {
+                if let Some(ref s) = this.selection.selected_session {
                     let _ = tx.send(ClientRequest::WatchSession {
                         session_id: s.id.clone(),
                         source_path: s.source_path.clone(),
@@ -430,6 +431,7 @@ impl MultibotView {
                 .try_global::<SharedAppStore>()
                 .and_then(|s| s.connected_target.clone());
             let host_label = this
+                .connection
                 .connected_host
                 .clone()
                 .or_else(|| this.settings.selected_host.clone());
@@ -715,7 +717,7 @@ impl MultibotView {
                     this.focus_inbox(window, cx);
                     cx.notify();
                 }
-            } else if let Some(sel) = this.selected_session.clone() {
+            } else if let Some(sel) = this.selection.selected_session.clone() {
                 let key = this.session_key_for(&sel);
                 if this.can_mount_sidebar_rename(&key) {
                     if this.main_surface == MainSurface::Chat {
@@ -753,7 +755,7 @@ impl MultibotView {
                 this.sidebar_state.new_workspace_draft = None;
                 this.chat_state.slash_sync_pending = false;
                 this.slash_picker_state.close();
-                let msgs = this.messages.clone();
+                let msgs = this.history.messages.clone();
                 this.mention_picker_state.close();
                 this.chat_state.open_find(&msgs, this.show_tool_calls());
                 this.focus_chat_panel(window, cx);
@@ -769,11 +771,11 @@ impl MultibotView {
                 this.sidebar_state.new_workspace_draft = None;
                 this.chat_state.slash_sync_pending = false;
                 this.chat_state.close_find();
-                if let Some(ref sel) = this.selected_session {
+                if let Some(ref sel) = this.selection.selected_session {
                     this.request_daemon_commands(sel.agent, sel.cwd.clone());
                 }
                 this.open_slash_browser(cx);
-                this.prompt_input.update(cx, |state, cx| {
+                this.inputs.prompt_input.update(cx, |state, cx| {
                     state.focus(window, cx);
                 });
             }

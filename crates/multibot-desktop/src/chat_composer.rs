@@ -10,7 +10,7 @@ impl MultibotView {
     }
 
     pub(crate) fn spawn_composer_options(&self, agent: AgentKind) -> Option<SessionOptions> {
-        let options = match &self.selected_session {
+        let options = match &self.selection.selected_session {
             Some(session) if session.agent == agent => self.composer_options_for(session),
             Some(_) => None,
             None if agent == AgentKind::Claude => Some(self.chat_state.draft_options.clone()),
@@ -22,11 +22,12 @@ impl MultibotView {
     }
 
     pub(crate) fn active_composer_options(&self) -> SessionOptions {
-        self.selected_session
+        self.selection
+            .selected_session
             .as_ref()
             .and_then(|s| self.composer_options_for(s))
             .unwrap_or_else(|| {
-                if self.selected_session.is_none() {
+                if self.selection.selected_session.is_none() {
                     self.chat_state.draft_options.clone()
                 } else {
                     SessionOptions::default()
@@ -39,7 +40,7 @@ impl MultibotView {
         update: impl FnOnce(&mut SessionOptions),
         cx: &mut Context<Self>,
     ) {
-        if let Some(session) = &self.selected_session {
+        if let Some(session) = &self.selection.selected_session {
             let key = self.session_key_for(session);
             update(self.chat_state.composer_options.entry(key).or_default());
         } else {
@@ -50,6 +51,7 @@ impl MultibotView {
 
     pub(super) fn render_composer_options(&self, cx: &mut Context<Self>) -> AnyElement {
         let agent = self
+            .selection
             .selected_session
             .as_ref()
             .map_or(AgentKind::Claude, |s| s.agent);
@@ -219,6 +221,7 @@ impl MultibotView {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Stateful<gpui_kit::Div> {
         let lifecycle = self
+            .selection
             .selected_session
             .as_ref()
             .map(|session| {
@@ -254,10 +257,14 @@ impl MultibotView {
         .flatten()
         .collect::<Vec<_>>()
         .join(" · ");
-        let is_working = self.selected_session.as_ref().is_some_and(|s| s.working);
+        let is_working = self
+            .selection
+            .selected_session
+            .as_ref()
+            .is_some_and(|s| s.working);
         let mut queued_entries = Vec::new();
         let mut queued_previews = Vec::new();
-        if let Some(session) = &self.selected_session {
+        if let Some(session) = &self.selection.selected_session {
             let key = self.session_key_for(session);
             if let Some(queue) = self.chat_state.queued_prompts.get(&key) {
                 queued_previews.extend(queue.iter().map(|(_, text)| text.clone()));
@@ -267,11 +274,11 @@ impl MultibotView {
                 session.agent,
                 &session.id,
             );
-            let outbox = self.shared_chat_outbox.lock().ok();
+            let outbox = self.outbox.shared_chat_outbox.lock().ok();
             let outbox = outbox
                 .as_ref()
                 .map(|shared| &shared.outbox)
-                .unwrap_or(&self.chat_outbox);
+                .unwrap_or(&self.outbox.chat_outbox);
             queued_entries = outbox
                 .entries
                 .iter()
@@ -344,21 +351,24 @@ impl MultibotView {
                             .small()
                             .label("Edit")
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                let draft = this.prompt_input.read(cx).value().to_string();
+                                let draft = this.inputs.prompt_input.read(cx).value().to_string();
                                 if let Some(mut entry) = this.remove_queued_entry(&edit_id) {
                                     let text = std::mem::replace(&mut entry.text, draft.clone());
                                     if !draft.is_empty()
-                                        && let Ok(mut shared) = this.shared_chat_outbox.lock()
+                                        && let Ok(mut shared) =
+                                            this.outbox.shared_chat_outbox.lock()
                                     {
                                         let _ = shared.outbox.enqueue_entry(entry);
-                                        if shared.persist_to_disk || this.persist_outbox_to_disk {
+                                        if shared.persist_to_disk
+                                            || this.outbox.persist_outbox_to_disk
+                                        {
                                             if let Err(err) = shared.outbox.save() {
                                                 this.notice = Some(err.to_string());
                                             }
                                         }
-                                        this.chat_outbox = shared.outbox.clone();
+                                        this.outbox.chat_outbox = shared.outbox.clone();
                                     }
-                                    this.prompt_input.update(cx, |input, cx| {
+                                    this.inputs.prompt_input.update(cx, |input, cx| {
                                         input.set_value(text, window, cx);
                                         input.focus(window, cx);
                                     });
@@ -511,7 +521,7 @@ impl MultibotView {
                         .rounded(RADIUS_CHIP).bg(theme::bg_active_row()).cursor_pointer()
                         .child(if lifecycle == multibot_core::workspaces::SessionLifecycle::Dissolved { "Reactivate" } else { "Move to Inbox" })
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            if let Some(session) = &this.selected_session {
+                            if let Some(session) = &this.selection.selected_session {
                                 let key = this.session_key_for(session);
                                 this.reactivate_session_key(&key, cx);
                             }
@@ -571,7 +581,7 @@ impl MultibotView {
                         ))
                         .child(
                             div().id("prompt-input").test_support().flex_1().min_w_0().child(
-                                Textarea::new(&self.prompt_input)
+                                Textarea::new(&self.inputs.prompt_input)
                                     .appearance(false),
                             ),
                         )
