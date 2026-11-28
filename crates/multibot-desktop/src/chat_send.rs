@@ -237,12 +237,12 @@ impl MultibotView {
             }
             multibot_core::voice::DictationPhase::Off => {}
         }
+        let raw_content = self.inputs.prompt_input.read(cx).content();
         let raw = self.bound_mention_prompt(cx);
         let trimmed = raw.trim().to_string();
         if trimmed.is_empty()
             && (!force
                 || (self.chat_state.pending_attachments.is_empty()
-                    && self.chat_state.quoted_snippets.is_empty()
                     && self.chat_state.reply_quote.is_none()))
         {
             return;
@@ -295,7 +295,7 @@ impl MultibotView {
         let snippets = std::mem::take(&mut self.chat_state.quoted_snippets);
         self.chat_state.selection_quote_popover = None;
         let staged = std::mem::take(&mut self.chat_state.pending_attachments);
-        let mut expanded = compose_snippet_quotes(&trimmed, &snippets);
+        let mut expanded = trimmed;
         if force && expanded.is_empty() && !staged.is_empty() {
             expanded = staged
                 .iter()
@@ -388,7 +388,7 @@ impl MultibotView {
                     Ok(Err(err)) => {
                         this.restore_failed_upload_draft(
                             &key,
-                            raw,
+                            raw_content,
                             quote,
                             snippets,
                             staged,
@@ -400,7 +400,7 @@ impl MultibotView {
                     Err(join_err) => {
                         this.restore_failed_upload_draft(
                             &key,
-                            raw,
+                            raw_content,
                             quote,
                             snippets,
                             staged,
@@ -430,7 +430,7 @@ impl MultibotView {
     pub(crate) fn restore_failed_upload_draft(
         &mut self,
         target_session_key: &str,
-        raw_prompt: String,
+        raw_prompt: InputContent,
         quote: Option<ReplyQuote>,
         snippets: Vec<QuotedSnippet>,
         staged: Vec<StagedAttachment>,
@@ -456,8 +456,7 @@ impl MultibotView {
                 self.chat_state.reply_quote = quote;
             }
             self.inputs.prompt_input.update(cx, |state, cx| {
-                state.select_all(window, cx);
-                state.replace(raw_prompt, window, cx);
+                state.set_value(raw_prompt, window, cx);
             });
         }
         cx.notify();

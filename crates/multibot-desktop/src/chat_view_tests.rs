@@ -4306,7 +4306,9 @@ fn message_navigation_scroll_menu_copy_reply_quote_and_focus(cx: &mut TestAppCon
         window.click("message-action-2", cx);
         window.render_frame(cx);
         let input = view.read(cx).inputs.prompt_input.read(cx);
-        assert_eq!(input.value().as_ref(), "[Quote #1] ");
+        assert_eq!(input.tokens().len(), 1);
+        assert_eq!(input.tokens()[0].token().id().as_ref(), "quote:1");
+        assert_eq!(input.value().as_ref(), "“Element 29 Second line” ");
         assert_eq!(
             view.read(cx).chat_state.quoted_snippets[0].full_text,
             "Element 29\nSecond line"
@@ -4771,9 +4773,28 @@ fn failed_upload_restores_prompt_quote_and_attachments_safely(cx: &mut TestAppCo
             v.selection.selected_session = Some(sess_a.clone());
 
             // 1. Same session, empty draft -> restores prompt, quote, and attachments.
+            let snippet = QuotedSnippet {
+                id: 1,
+                preview: "part".into(),
+                full_text: "full highlighted part".into(),
+            };
+            let label = snippet.inline_label();
+            let content = InputContent::new(format!("{label} please check shot.png @Other"))
+                .with_token(
+                    0..label.len(),
+                    InlineToken::new(snippet.token_id(), label.clone()),
+                )
+                .unwrap();
+            let start = content.text().len() - "@Other".len();
+            let content = content
+                .with_token(
+                    start..start + "@Other".len(),
+                    InlineToken::new("host:claude:other", "@Other"),
+                )
+                .unwrap();
             v.restore_failed_upload_draft(
                 &v.session_key_for(&sess_a),
-                "please check shot.png".into(),
+                content.clone(),
                 Some(quote.clone()),
                 vec![QuotedSnippet {
                     id: 1,
@@ -4785,10 +4806,7 @@ fn failed_upload_restores_prompt_quote_and_attachments_safely(cx: &mut TestAppCo
                 window,
                 cx,
             );
-            assert_eq!(
-                v.inputs.prompt_input.read(cx).value().as_ref(),
-                "please check shot.png"
-            );
+            assert_eq!(v.inputs.prompt_input.read(cx).content(), content);
             assert_eq!(
                 v.chat_state
                     .reply_quote
@@ -5895,13 +5913,36 @@ fn tool_only_messages_of_every_activity_role_follow_show_tools() {
     );
 }
 
+fn quote_content(text: &str, snippets: &[QuotedSnippet]) -> InputContent {
+    let mut content = InputContent::new(text.to_string());
+    for snippet in snippets {
+        let label = snippet.inline_label();
+        for (start, _) in text.match_indices(&label) {
+            if content
+                .tokens()
+                .iter()
+                .any(|span| span.range().start < start + label.len() && start < span.range().end)
+            {
+                continue;
+            }
+            content = content
+                .with_token(
+                    start..start + label.len(),
+                    InlineToken::new(snippet.token_id(), label.clone()),
+                )
+                .unwrap();
+        }
+    }
+    content
+}
+
 #[test]
 fn snippet_expansion_preserves_positions_full_text_and_does_not_reexpand_source_tokens() {
     let snippets = vec![
         QuotedSnippet {
             id: 1,
             preview: "first".into(),
-            full_text: "first\nsecond [Quote #2]".into(),
+            full_text: "first\nsecond “次の引用”".into(),
         },
         QuotedSnippet {
             id: 2,
@@ -5909,30 +5950,108 @@ fn snippet_expansion_preserves_positions_full_text_and_does_not_reexpand_source_
             full_text: "次の引用".into(),
         },
     ];
-    assert_eq!(
-        compose_snippet_quotes("before [Quote #2] between [Quote #1] after", &snippets),
-        "before \n\n> 次の引用\n\n between \n\n> first\n> second [Quote #2]\n\n after"
+    let draft = format!(
+        "before {} between {} after",
+        snippets[1].inline_label(),
+        snippets[0].inline_label()
     );
     assert_eq!(
-        compose_snippet_quotes("comment", &snippets),
-        "> first\n> second [Quote #2]\n\n> 次の引用\n\ncomment"
+        compose_snippet_quotes(&quote_content(&draft, &snippets), &snippets),
+        "before\n\n> 次の引用\n\nbetween\n\n> first\n> second “次の引用”\n\nafter"
     );
     assert_eq!(
-        compose_snippet_quotes("[Quote #99] plain", &[]),
-        "[Quote #99] plain"
+        compose_snippet_quotes(&InputContent::new("comment"), &snippets),
+        "comment"
     );
-    let full_text = (0..20)
-        .map(|n| format!("line {n}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    assert_eq!(
+        compose_snippet_quotes(&InputContent::new("“次の引用” plain"), &snippets),
+        "“次の引用” plain"
+    );
     let long = QuotedSnippet {
         id: 3,
         preview: "line".into(),
-        full_text,
+        full_text: (0..20)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
     };
-    let expanded = compose_snippet_quotes("[Quote #3]", &[long]);
+    let expanded = compose_snippet_quotes(
+        &quote_content(&long.inline_label(), std::slice::from_ref(&long)),
+        &[long],
+    );
     assert_eq!(expanded.lines().count(), 20);
     assert!(expanded.ends_with("> line 19"));
+}
+
+#[test]
+fn mixed_quote_and_mention_tokens_expand_in_reverse_byte_order() {
+    let snippet = QuotedSnippet {
+        id: 1,
+        preview: String::new(),
+        full_text: "selected @Other unchanged".into(),
+    };
+    let draft = format!("é @Other {} @Other", snippet.inline_label());
+    let mut content = quote_content(&draft, std::slice::from_ref(&snippet));
+    for (start, _) in draft.match_indices("@Other") {
+        if content
+            .tokens()
+            .iter()
+            .any(|span| span.range().contains(&start))
+        {
+            continue;
+        }
+        content = content
+            .with_token(
+                start..start + "@Other".len(),
+                InlineToken::new("host:claude:other", "@Other"),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        compose_snippet_quotes(&content, &[snippet]),
+        "é @Other{other}\n\n> selected @Other unchanged\n\n@Other{other}"
+    );
+}
+
+#[gpui_kit::test]
+fn quoted_mentions_stay_exact_while_plain_composer_mentions_bind(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.connection.sessions = vec![SessionSummary {
+                id: "target".into(),
+                title: "Other".into(),
+                ..Default::default()
+            }];
+            v.quote_snippet("selected @Other unchanged".into(), window, cx);
+            v.inputs
+                .prompt_input
+                .update(cx, |input, cx| input.replace("reply @Other", window, cx));
+            assert_eq!(
+                v.bound_mention_prompt(cx),
+                "> selected @Other unchanged\n\nreply @Other{target}"
+            );
+        });
+    })
+    .unwrap();
+}
+
+#[test]
+fn quote_labels_are_abbreviated_control_free_and_start_at_selected_words() {
+    let snippet = QuotedSnippet {
+        id: 1,
+        preview: String::new(),
+        full_text: "  Dead-vertical\tVibrant\nVerticons and more\u{0000}\u{2028}\u{2029} ".into(),
+    };
+    assert_eq!(snippet.inline_label(), "“Dead-vertical Vibrant Verticons…”");
+    let content = quote_content(&snippet.inline_label(), std::slice::from_ref(&snippet));
+    assert_eq!(content.tokens().len(), 1);
+    let short = QuotedSnippet {
+        full_text: "short\u{0000} quote".into(),
+        ..snippet
+    };
+    assert_eq!(short.inline_label(), "“short quote”");
+    quote_content(&short.inline_label(), &[short]);
 }
 
 #[test]
@@ -6049,7 +6168,15 @@ fn highlighted_quotes_use_shortcut_and_pill_and_send_in_commentary_order(cx: &mu
         );
         window.press("ctrl-l", cx);
         window.render_frame(cx);
-        assert!(window.find("quote-chip-1").visible());
+        assert!(window.try_find("quote-chip-1").is_none());
+        assert!(window.try_find("quoted-snippets").is_none());
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).tokens()[0]
+                .token()
+                .id()
+                .as_ref(),
+            "quote:1"
+        );
         assert!(view.read(cx).chat_state.selection_quote_popover.is_none());
         window.input("Between ", cx);
         let second = select_chat_line(window, cx, "Second highlighted passage.");
@@ -6058,7 +6185,7 @@ fn highlighted_quotes_use_shortcut_and_pill_and_send_in_commentary_order(cx: &mu
         assert_eq!(view.read(cx).chat_state.quoted_snippets.len(), 2);
         assert_eq!(
             view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
-            "Before [Quote #1] Between [Quote #2] After"
+            "Before “First highlighted passage.” Between “Second highlighted passage.” After"
         );
         window.press("enter", cx);
         let prompt = std::iter::from_fn(|| rx.try_recv().ok())
@@ -6070,9 +6197,9 @@ fn highlighted_quotes_use_shortcut_and_pill_and_send_in_commentary_order(cx: &mu
         assert_eq!(
             prompt,
             format!(
-                "Before \n\n> {}\n\n Between \n\n> {}\n\n After",
-                first.replace('\n', "\n> "),
-                second.replace('\n', "\n> ")
+                "Before\n\n> {}\n\nBetween\n\n> {}\n\nAfter",
+                first.trim().replace('\n', "\n> "),
+                second.trim().replace('\n', "\n> ")
             )
         );
         assert!(view.read(cx).chat_state.quoted_snippets.is_empty());
@@ -6086,6 +6213,47 @@ fn highlighted_quotes_use_shortcut_and_pill_and_send_in_commentary_order(cx: &mu
         );
     })
     .unwrap();
+}
+
+#[gpui_kit::test]
+fn context_quote_and_reply_use_captured_highlight_not_message_start(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.history.messages = vec![ChatMessage {
+                id: "selected-context".into(), role: MessageRole::Assistant,
+                text: "Wrong beginning of the message.\n\nExact highlighted words from later in the message.".into(),
+                ..Default::default()
+            }];
+            cx.notify();
+        });
+        window.render_frame(cx);
+        let selected = select_chat_line(window, cx, "Exact highlighted words from later in the message.");
+        window.right_click("msg-bubble-0", cx);
+        assert_eq!(view.read(cx).chat_state.context_menu_selected_text.as_deref(), Some(selected.as_str()));
+        TextSelection::clear(window, cx);
+        window.click("message-action-2", cx);
+        assert_eq!(view.read(cx).chat_state.quoted_snippets[0].full_text, selected.trim());
+        let token = view.read(cx).inputs.prompt_input.read(cx).tokens()[0].token().clone();
+        assert!(token.label().starts_with("“Exact highlighted words"));
+        assert!(token.label().ends_with("…”"));
+        assert!(view.read(cx).chat_state.context_menu_selected_text.is_none());
+        let selected = select_chat_line(window, cx, "Exact highlighted words from later in the message.");
+        window.right_click("msg-bubble-0", cx);
+        TextSelection::clear(window, cx);
+        window.click("message-action-1", cx);
+        assert_eq!(view.read(cx).chat_state.reply_quote.as_ref().unwrap().full_text, selected.trim());
+        assert!(view.read(cx).chat_state.context_menu_selected_text.is_none());
+        view.update(cx, |v, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| input.set_value("", window, cx));
+        });
+        let selected = select_chat_line(window, cx, "Exact highlighted words from later in the message.");
+        window.right_click("msg-bubble-0", cx);
+        TextSelection::clear(window, cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+        assert_eq!(view.read(cx).chat_state.quoted_snippets.last().unwrap().full_text, selected.trim());
+    }).unwrap();
 }
 
 #[gpui_kit::test]
@@ -6267,45 +6435,54 @@ fn keyboard_message_reply_reaction_copy_and_printable_return(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
-fn remove_quote_removes_its_token_and_session_switch_clears_snippets(cx: &mut TestAppContext) {
+fn backspace_removes_quote_and_never_sends_deleted_text(cx: &mut TestAppContext) {
     let (handle, view) = open_test_chat_window(cx);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     cx.update_window(handle, |_, window, cx| {
-        window.render_frame(cx);
         view.update(cx, |v, cx| {
-            v.quote_snippet("one".into(), window, cx);
-            v.quote_snippet("two".into(), window, cx);
+            v.connection.daemon_tx = Some(tx);
+            v.selection.selected_session = Some(SessionSummary {
+                id: "deleted-quote".into(),
+                ..Default::default()
+            });
+            v.quote_snippet("deleted whole-message beginning".into(), window, cx);
         });
         window.render_frame(cx);
-        window.click("remove-quote-1", cx);
-        assert_eq!(view.read(cx).chat_state.quoted_snippets.len(), 1);
+        window.press("backspace", cx);
+        window.press("backspace", cx);
         assert!(
-            !view
-                .read(cx)
+            view.read(cx)
                 .inputs
                 .prompt_input
                 .read(cx)
-                .value()
-                .contains("[Quote #1]")
+                .tokens()
+                .is_empty()
         );
         view.update(cx, |v, cx| {
-            v.select_session(
-                SessionSummary {
-                    id: "another-chat".into(),
-                    ..Default::default()
-                },
-                cx,
-            );
+            v.quote_snippet("exact selected words".into(), window, cx)
         });
+        window.input("my reply", cx);
+        window.press("enter", cx);
+        let prompt = std::iter::from_fn(|| rx.try_recv().ok())
+            .find_map(|request| match request {
+                ClientRequest::SendPrompt { text, .. } => Some(text),
+                _ => None,
+            })
+            .expect("sent prompt");
+        assert_eq!(prompt, "> exact selected words\n\nmy reply");
+        assert_eq!(
+            parse_quoted_message(&prompt).unwrap().preview,
+            "exact selected words"
+        );
         window.render_frame(cx);
-        assert!(view.read(cx).chat_state.quoted_snippets.is_empty());
-        assert!(view.read(cx).chat_state.selection_quote_popover.is_none());
-        assert!(!view.read(cx).chat_state.drag_selecting);
+        assert!(window.find("quote-ref-0").visible());
+        assert!(
+            gpui_kit::base::test_support::texts(window)
+                .iter()
+                .any(|text| text.text().contains("exact selected words"))
+        );
     })
     .unwrap();
-    cx.run_until_parked();
-    view.read_with(cx, |v, cx| {
-        assert!(!v.inputs.prompt_input.read(cx).value().contains("[Quote #"));
-    });
 }
 
 fn exercise_drag_scroll_cancel(cx: &mut TestAppContext, cancel: &str) {
@@ -6599,7 +6776,13 @@ fn session_drafts_preserve_text_quotes_attachments_and_clear_only_the_sent_chat(
                 is_image: false, size_bytes: 3, inserted_token: "draft-attachment.txt".into(),
             });
         });
-        let a_text = view.read(cx).inputs.prompt_input.read(cx).value().to_string();
+        view.update(cx, |v, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
+                input.replace_range_with_token(input.selected_range(), InlineToken::new("host:claude:mention-target", "@Other chat"), window, cx).unwrap();
+            });
+        });
+        let a_content = view.read(cx).inputs.prompt_input.read(cx).content();
+        assert_eq!(a_content.tokens().len(), 2);
         view.update(cx, |v, cx| v.select_session(b.clone(), cx));
         window.render_frame(cx);
         assert!(view.read(cx).inputs.prompt_input.read(cx).value().is_empty());
@@ -6609,7 +6792,7 @@ fn session_drafts_preserve_text_quotes_attachments_and_clear_only_the_sent_chat(
         window.input("Draft B stays here", cx);
         view.update(cx, |v, cx| v.select_session(a.clone(), cx));
         window.render_frame(cx);
-        assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value().as_ref(), a_text);
+        assert_eq!(view.read(cx).inputs.prompt_input.read(cx).content(), a_content);
         assert_eq!(view.read(cx).chat_state.quoted_snippets[0].full_text, "Full selected passage");
         assert_eq!(view.read(cx).chat_state.pending_attachments.len(), 1);
         assert_eq!(view.read(cx).chat_state.reply_quote.as_ref().unwrap().full_text, "Quoted reply");

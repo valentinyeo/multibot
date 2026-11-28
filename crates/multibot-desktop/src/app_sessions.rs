@@ -14,16 +14,23 @@ impl MultibotView {
         }
         if let Some(key) = outgoing {
             // A second switch may arrive before render has applied the first restore.
-            let draft = SessionDraft {
-                text: self
+            let mut draft = SessionDraft {
+                content: self
                     .chat_state
-                    .pending_draft_text
+                    .pending_draft_content
                     .take()
-                    .unwrap_or_else(|| self.inputs.prompt_input.read(cx).value().to_string()),
+                    .unwrap_or_else(|| self.inputs.prompt_input.read(cx).content()),
                 reply_quote: self.chat_state.reply_quote.take(),
                 quoted_snippets: std::mem::take(&mut self.chat_state.quoted_snippets),
                 pending_attachments: std::mem::take(&mut self.chat_state.pending_attachments),
             };
+            draft.quoted_snippets.retain(|snippet| {
+                draft
+                    .content
+                    .tokens()
+                    .iter()
+                    .any(|span| span.token().id().as_ref() == snippet.token_id())
+            });
             if draft == SessionDraft::default() {
                 self.chat_state.session_drafts.remove(&key);
             } else {
@@ -39,7 +46,7 @@ impl MultibotView {
             .and_then(|key| self.chat_state.session_drafts.get(key))
             .cloned()
             .unwrap_or_default();
-        self.chat_state.pending_draft_text = Some(draft.text);
+        self.chat_state.pending_draft_content = Some(draft.content);
         self.chat_state.reply_quote = draft.reply_quote;
         self.chat_state.quoted_snippets = draft.quoted_snippets;
         self.chat_state.pending_attachments = draft.pending_attachments;
@@ -50,7 +57,7 @@ impl MultibotView {
     }
 
     pub(crate) fn apply_pending_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = self.chat_state.pending_draft_text.take() {
+        if let Some(text) = self.chat_state.pending_draft_content.take() {
             self.inputs
                 .prompt_input
                 .update(cx, |input, cx| input.set_value(text, window, cx));

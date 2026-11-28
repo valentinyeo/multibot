@@ -307,6 +307,15 @@ impl MultibotView {
         let _prompt_change_sub = cx.subscribe(&prompt_input, |this, input, event, cx| {
             if matches!(event, gpui_kit::component::input::InputEvent::Change) {
                 this.sync_mention_picker(cx);
+                if this.chat_state.pending_draft_content.is_none() {
+                    this.chat_state.quoted_snippets.retain(|snippet| {
+                        input
+                            .read(cx)
+                            .tokens()
+                            .iter()
+                            .any(|span| span.token().id().as_ref() == snippet.token_id())
+                    });
+                }
             }
             if matches!(event, gpui_kit::component::input::InputEvent::Change)
                 && this.main_surface == MainSurface::Chat

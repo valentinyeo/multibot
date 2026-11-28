@@ -6,6 +6,8 @@ ships, move those bullets under its published version; keep older entries here.
 This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
+
+- Quotes appear as abbreviated blue text inside the composer and quote the exact selected words.
 - Add Browser: Sign in to Google in Ctrl+K to open a clean Chrome window on the shared Multibot profile without remote debugging flags (MBRU-140).
 - Automatically load older chat history when scrolling near the top and backfill sparse Antigravity chats on open (MBRU-138).
 - Match queued Send now to the composer’s up-arrow icon and use compact, borderless buttons for queued message actions (MBRU-129).

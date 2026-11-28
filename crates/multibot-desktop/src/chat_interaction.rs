@@ -38,17 +38,20 @@ impl MultibotView {
         let snippet = QuotedSnippet {
             id: self.chat_state.next_quote_id,
             preview: normalize_ws_collapse(&text).chars().take(32).collect(),
-            full_text: text,
+            full_text: text.trim().to_string(),
         };
         self.chat_state.next_quote_id += 1;
-        let token = format!("{} ", snippet.token());
+        let token = InlineToken::new(snippet.token_id(), snippet.inline_label());
         self.chat_state.quoted_snippets.push(snippet);
         self.chat_state.selection_quote_popover = None;
         self.chat_state.focused_message_idx = None;
         self.chat_state.close_message_menu();
         TextSelection::clear(window, cx);
         self.inputs.prompt_input.update(cx, |input, cx| {
-            input.replace(token, window, cx);
+            input
+                .replace_range_with_token(input.selected_range(), token, window, cx)
+                .expect("quote token has a valid label");
+            input.replace(" ", window, cx);
             input.focus(window, cx);
         });
         cx.notify();
@@ -757,6 +760,7 @@ impl MultibotView {
             .map(|(_, _, _, t, w)| (*t, *w))
             .unwrap_or((false, false));
 
+        let selected = self.chat_state.context_menu_selected_text.clone();
         let outcome = self.chat_state.handle_empty_composer_nav_key(
             key,
             composer_empty,
@@ -802,6 +806,7 @@ impl MultibotView {
             }
             MessageNavOutcome::ExecuteAction { action, .. } => {
                 if let Some((orig_idx, msg_id, msg_text, _, _)) = focused_meta {
+                    self.chat_state.context_menu_selected_text = selected;
                     self.execute_message_action(orig_idx, msg_id, msg_text, action, window, cx);
                 }
                 true
@@ -818,10 +823,18 @@ impl MultibotView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let selected = self
+            .chat_state
+            .context_menu_selected_text
+            .take()
+            .or_else(|| {
+                let selected = TextSelection::selected_text(window, cx);
+                (!selected.trim().is_empty()).then_some(selected)
+            });
         self.chat_state.close_message_menu();
         match action {
             MessageMenuAction::Reply => {
-                self.set_reply_quote(msg_id, msg_text, cx);
+                self.set_reply_quote(msg_id, selected.unwrap_or(msg_text).trim().to_string(), cx);
                 self.chat_state.focused_message_idx = None;
                 self.inputs
                     .prompt_input
@@ -833,7 +846,7 @@ impl MultibotView {
                 cx.notify();
             }
             MessageMenuAction::Quote => {
-                self.quote_snippet(msg_text, window, cx);
+                self.quote_snippet(selected.unwrap_or(msg_text), window, cx);
             }
             MessageMenuAction::React(emoji) => {
                 self.toggle_local_reaction(&msg_id, &msg_text, emoji, cx);
@@ -1029,7 +1042,9 @@ impl MultibotView {
                 .id("chat-find-bar-container")
                 .test_support()
                 .w_full()
-                .when(!self.settings.shell_fullscreen, |el| el.max_w(px(column_max_w)))
+                .when(!self.settings.shell_fullscreen, |el| {
+                    el.max_w(px(column_max_w))
+                })
                 .mx_auto()
                 .px_4()
                 .pt_1()

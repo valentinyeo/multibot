@@ -43,7 +43,7 @@ use gpui_kit::{
         Disableable, Selectable, Sizable,
         button::{Button, ButtonCustomVariant, ButtonVariants},
         h_flex,
-        input::{self, Textarea},
+        input::{self, InlineToken, InputContent, Textarea},
         label::Label,
         text::{TableData, TextView},
         v_flex,
@@ -423,7 +423,9 @@ impl MultibotView {
                                     .build(window, cx)
                             })
                             .child(lucide_icon(icons::CORNER_DOWN_LEFT, 14.0))
-                            .child(div().min_w_0().truncate().child(pq.preview.clone())),
+                            .child(div().min_w_0().truncate().child(
+                                Label::new(pq.preview.clone()).text_color(theme::text_muted()),
+                            )),
                     );
                 }
 
@@ -773,6 +775,9 @@ impl MultibotView {
                             return;
                         }
                         cx.stop_propagation();
+                        let selected = TextSelection::selected_text(window, cx);
+                        this.chat_state.context_menu_selected_text =
+                            (!selected.trim().is_empty()).then_some(selected);
                         this.chat_state.selection_quote_popover = None;
                         this.chat_state.focused_message_idx = Some(vis_idx);
                         this.chat_state.message_action_menu_open = true;

@@ -6,10 +6,10 @@ use gpui_kit::{
     AnyElement, Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Role,
     SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window,
     component::{h_flex, input::InlineToken, v_flex},
-    div, px,
+    div,
     prelude::FluentBuilder,
+    px,
 };
-use multibot_core::workspaces::parse_session_key;
 use std::ops::Range;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -392,24 +392,23 @@ impl MultibotView {
 
     pub(crate) fn bound_mention_prompt(&self, cx: &gpui_kit::App) -> String {
         let input = self.inputs.prompt_input.read(cx);
-        let mut text = input.value().to_string();
-        for span in input.tokens().iter().rev() {
-            if let Some((_, _, sid)) = parse_session_key(span.token().id()) {
-                text.replace_range(span.range(), &format!("{}{{{sid}}}", span.token().text()));
-            }
-        }
+        let mut content = input.content();
         let targets = self.mention_targets();
-        for mention in occurrences(&text, &targets).into_iter().rev() {
-            if !text[mention.range.clone()].ends_with('}')
+        for mention in occurrences(&input.value(), &targets) {
+            if !input.value()[mention.range.clone()].ends_with('}')
+                && !input.tokens().iter().any(|span| {
+                    span.range().start < mention.range.end && mention.range.start < span.range().end
+                })
                 && let Some(target) = mention.target
-            {
-                text.replace_range(
+                && let Ok(bound) = content.clone().with_token(
                     mention.range,
-                    &format!("{}{{{}}}", mention.label, target.session_id),
-                );
+                    InlineToken::new(target.session_key, mention.label),
+                )
+            {
+                content = bound;
             }
         }
-        text
+        crate::chat_view::compose_snippet_quotes(&content, &self.chat_state.quoted_snippets)
     }
 
     pub(crate) fn jump_mention_url(&mut self, url: &str, cx: &mut Context<Self>) -> bool {

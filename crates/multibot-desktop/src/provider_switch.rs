@@ -153,7 +153,7 @@ impl MultibotView {
             }
             self.open_session_on_host(host.into(), session.clone(), false, cx);
             if let Some(draft) = self.chat_state.session_drafts.remove(&old) {
-                self.chat_state.pending_draft_text = Some(draft.text);
+                self.chat_state.pending_draft_content = Some(draft.content);
                 self.chat_state.reply_quote = draft.reply_quote;
                 self.chat_state.quoted_snippets = draft.quoted_snippets;
                 self.chat_state.pending_attachments = draft.pending_attachments;

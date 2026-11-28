@@ -21,9 +21,9 @@ pub(crate) struct ImageViewerState {
     pub alt: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SessionDraft {
-    pub text: String,
+    pub content: InputContent,
     pub reply_quote: Option<ReplyQuote>,
     pub quoted_snippets: Vec<QuotedSnippet>,
     pub pending_attachments: Vec<StagedAttachment>,
@@ -36,9 +36,36 @@ pub(crate) struct QuotedSnippet {
     pub full_text: String,
 }
 
+pub(crate) const QUOTE_TOKEN_PREFIX: &str = "quote:";
+
+impl Default for SessionDraft {
+    fn default() -> Self {
+        Self {
+            content: InputContent::new(""),
+            reply_quote: None,
+            quoted_snippets: Vec::new(),
+            pending_attachments: Vec::new(),
+        }
+    }
+}
+
 impl QuotedSnippet {
-    pub(crate) fn token(&self) -> String {
-        format!("[Quote #{}]", self.id)
+    pub(crate) fn token_id(&self) -> String {
+        format!("{QUOTE_TOKEN_PREFIX}{}", self.id)
+    }
+
+    pub(crate) fn inline_label(&self) -> String {
+        let collapsed = normalize_ws_collapse(&self.full_text);
+        let clean: String = collapsed
+            .chars()
+            .filter(|ch| !ch.is_control() && !matches!(ch, '\u{2028}' | '\u{2029}'))
+            .collect();
+        let mut label: String = clean.chars().take(32).collect();
+        if clean.chars().count() > 32 {
+            label = label.trim_end().to_string();
+            label.push('…');
+        }
+        format!("“{label}”")
     }
 }
 
@@ -171,7 +198,7 @@ pub(crate) struct ChatViewState {
     pub image_fetch_state: HashMap<String, ImageFetchState>,
     pub image_viewer: Option<ImageViewerState>,
     pub session_drafts: HashMap<String, SessionDraft>,
-    pub pending_draft_text: Option<String>,
+    pub pending_draft_content: Option<InputContent>,
     pub failed_sends: HashMap<String, FailedSend>,
     pub expanded_tools: HashSet<String>,
     pub show_all_tools: HashSet<String>,
@@ -192,6 +219,7 @@ pub(crate) struct ChatViewState {
     pub composer_height: f32,
     pub header_height: f32,
     pub panel_bounds: gpui_kit::Bounds<Pixels>,
+    pub context_menu_selected_text: Option<String>,
     pub message_context_position: Option<Point<Pixels>>,
     pub reaction_picker_open: bool,
     pub focused_message_idx: Option<usize>,
@@ -236,7 +264,7 @@ impl Default for ChatViewState {
             image_fetch_state: HashMap::new(),
             image_viewer: None,
             session_drafts: HashMap::new(),
-            pending_draft_text: None,
+            pending_draft_content: None,
             failed_sends: HashMap::new(),
             expanded_tools: HashSet::new(),
             show_all_tools: HashSet::new(),
@@ -257,6 +285,7 @@ impl Default for ChatViewState {
             composer_height: 120.0,
             header_height: 72.0,
             panel_bounds: gpui_kit::Bounds::default(),
+            context_menu_selected_text: None,
             message_context_position: None,
             reaction_picker_open: false,
             focused_message_idx: None,
@@ -322,6 +351,7 @@ impl ChatViewState {
     }
 
     pub(crate) fn close_message_menu(&mut self) {
+        self.context_menu_selected_text = None;
         self.message_action_menu_open = false;
         self.message_action_index = 0;
         self.message_context_position = None;

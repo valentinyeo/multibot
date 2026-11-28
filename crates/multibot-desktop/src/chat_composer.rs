@@ -484,34 +484,6 @@ impl MultibotView {
                         ),
                 )
             })
-            .when(!self.chat_state.quoted_snippets.is_empty(), |el| {
-                let mut chips = h_flex().id("quoted-snippets").test_support()
-                    .w_full().when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0)))
-                    .mx_auto().px_5().pb_1().gap_1p5().flex_wrap();
-                for snippet in &self.chat_state.quoted_snippets {
-                    let id = snippet.id;
-                    chips = chips.child(h_flex()
-                        .id(format!("quote-chip-{id}")).test_support()
-                        .gap_2().items_center().px_2p5().py_1().rounded(RADIUS_CHIP)
-                        .bg(rgb(0x1E293B)).text_xs().text_color(theme::text_secondary())
-                        .child(format!("« {} »", snippet.preview))
-                        .child(div().id(format!("remove-quote-{id}")).tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Remove").build(window, cx)).role(Role::Button).test_support()
-                            .cursor_pointer().child(lucide_icon(icons::X, 12.0))
-                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                if let Some(index) = this.chat_state.quoted_snippets.iter().position(|snippet| snippet.id == id) {
-                                    let snippet = this.chat_state.quoted_snippets.remove(index);
-                                    this.inputs.prompt_input.update(cx, |input, cx| {
-                                        let draft = input.value().replace(&snippet.token(), "");
-                                        input.set_value(draft, window, cx);
-                                        input.focus(window, cx);
-                                    });
-                                    cx.notify();
-                                }
-                            }))));
-                }
-                el.child(chips)
-            })
             .when(!self.chat_state.pending_attachments.is_empty(), |el| {
                 let mut chips = h_flex()
                     .w_full()
@@ -648,7 +620,15 @@ impl MultibotView {
                         .child(
                             div().id("prompt-input").test_support().flex_1().min_w_0().child(
                                 Textarea::new(&self.inputs.prompt_input)
-                                    .appearance(false),
+                                    .appearance(false)
+                                    .token(|token_ctx, _, _| {
+                                        div().px_1().rounded(px(4.0))
+                                            .text_color(theme::accent_blue())
+                                            .when(token_ctx.token().id().starts_with(QUOTE_TOKEN_PREFIX), |el| {
+                                                el.bg(if token_ctx.is_selected() { rgba(0x3B82F644) } else { rgba(0x3B82F622) })
+                                            })
+                                            .child(token_ctx.token().label().clone())
+                                    }),
                             ),
                         )
                         .when(self.voice.phase != multibot_core::voice::DictationPhase::Off || self.voice.error.is_some(), |el| {

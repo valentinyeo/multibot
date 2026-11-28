@@ -378,52 +378,38 @@ pub(crate) fn quote_source_matches(candidate: &str, quoted_source: &str) -> bool
     c.starts_with(&q) || c.contains(&q)
 }
 
-pub(crate) fn compose_snippet_quotes(draft: &str, snippets: &[QuotedSnippet]) -> String {
-    let mut expanded = String::new();
-    let mut rest = draft;
-    let mut used = HashSet::new();
-    while let Some(start) = rest.find("[Quote #") {
-        expanded.push_str(&rest[..start]);
-        rest = &rest[start..];
-        let matched = snippets
-            .iter()
-            .find(|snippet| rest.starts_with(&snippet.token()));
-        if let Some(snippet) = matched {
-            used.insert(snippet.id);
-            expanded.push_str("\n\n");
-            expanded.push_str(
-                &snippet
+pub(crate) fn compose_snippet_quotes(content: &InputContent, snippets: &[QuotedSnippet]) -> String {
+    let mut text = content.text().to_string();
+    for span in content.tokens().iter().rev() {
+        if span.token().id().starts_with(QUOTE_TOKEN_PREFIX) {
+            if let Some(snippet) = snippets
+                .iter()
+                .find(|snippet| snippet.token_id() == span.token().id().as_ref())
+            {
+                let range = span.range();
+                let start = text[..range.start].trim_end().len();
+                let end = text.len() - text[range.end..].trim_start().len();
+                let block = snippet
                     .full_text
-                    .split('\n')
+                    .trim()
+                    .lines()
                     .map(|line| format!("> {line}"))
                     .collect::<Vec<_>>()
-                    .join("\n"),
-            );
-            expanded.push_str("\n\n");
-            rest = &rest[snippet.token().len()..];
-        } else {
-            expanded.push('[');
-            rest = &rest[1..];
+                    .join("\n");
+                let replacement = format!(
+                    "{}{block}{}",
+                    if start > 0 { "\n\n" } else { "" },
+                    if end < text.len() { "\n\n" } else { "" }
+                );
+                text.replace_range(start..end, &replacement);
+            }
+        } else if let Some((_, _, sid)) =
+            multibot_core::workspaces::parse_session_key(span.token().id())
+        {
+            text.replace_range(span.range(), &format!("{}{{{sid}}}", span.token().text()));
         }
     }
-    expanded.push_str(rest);
-    let mut unreferenced = String::new();
-    for snippet in snippets
-        .iter()
-        .filter(|snippet| !used.contains(&snippet.id))
-    {
-        unreferenced.push_str(
-            &snippet
-                .full_text
-                .split('\n')
-                .map(|line| format!("> {line}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
-        unreferenced.push_str("\n\n");
-    }
-    unreferenced.push_str(expanded.trim());
-    unreferenced.trim().to_string()
+    text.trim().to_string()
 }
 
 impl MultibotView {
