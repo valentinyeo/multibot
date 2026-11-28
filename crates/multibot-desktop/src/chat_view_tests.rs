@@ -6131,8 +6131,8 @@ fn snippet_expansion_preserves_positions_full_text_and_does_not_reexpand_source_
         "before\n\n> 次の引用\n\nbetween\n\n> first\n> second “次の引用”\n\nafter"
     );
     assert_eq!(
-        compose_snippet_quotes(&InputContent::new("comment"), &snippets),
-        "comment"
+        compose_snippet_quotes(&InputContent::new("  comment  "), &snippets),
+        "  comment  "
     );
     assert_eq!(
         compose_snippet_quotes(&InputContent::new("“次の引用” plain"), &snippets),

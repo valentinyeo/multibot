@@ -409,7 +409,7 @@ pub(crate) fn compose_snippet_quotes(content: &InputContent, snippets: &[QuotedS
             text.replace_range(span.range(), &format!("{}{{{sid}}}", span.token().text()));
         }
     }
-    text.trim().to_string()
+    text
 }
 
 impl MultibotView {
