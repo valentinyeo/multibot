@@ -1393,6 +1393,89 @@ fn palette_copy_and_reply_use_focused_message_or_latest(cx: &mut TestAppContext)
                 .unwrap()
                 .full_text,
             "Latest reply"
+/// Left edge of the Command Palette text that reads exactly `needle`.
+fn palette_text_lead(window: &gpui_kit::Window, needle: &str) -> gpui_kit::Pixels {
+    let modal = gpui_kit::ElementId::from("palette-modal");
+    gpui_kit::base::test_support::texts(window)
+        .into_iter()
+        .find(|text| text.visible() && text.text() == needle && text.path().contains(&modal))
+        .unwrap_or_else(|| panic!("missing palette text {needle:?}"))
+        .bounds()
+        .origin
+        .x
+}
+
+/// The palette has one leading edge. Search text, the sub-view breadcrumb,
+/// section headers, and row labels all share it, and row labels sit one icon
+/// column right of it, so the Command Palette never shows a ragged left margin.
+#[gpui_kit::test]
+fn palette_search_breadcrumb_headers_and_labels_share_one_leading_edge(cx: &mut TestAppContext) {
+    let (handle, view) = open_view(cx);
+    cx.update_window(handle, |_, window, cx| {
+        let now = 300_000_000_i64;
+        view.update(cx, |v, cx| {
+            // A recent session gives the main palette a real icon column.
+            let session = SessionSummary {
+                id: "s1".into(),
+                agent: AgentKind::Claude,
+                title: "Recent Session".into(),
+                source_path: "/tmp/s1.jsonl".into(),
+                updated_at_ms: now,
+                ..Default::default()
+            };
+            let key = v.session_key_for(&session);
+            v.connection.sessions = vec![session];
+            v.sidebar_state
+                .workspace_store
+                .record_session_view(&key, now);
+            // "Most used" rows are commands: they carry no glyph of their own.
+            for cid in ["pal-cmd-sidebar", "pal-cmd-settings"] {
+                v.palette_state.stats.record_command_use(cid, now);
+            }
+            v.open_palette(window, cx);
+        });
+        window.render_frame(cx);
+
+        let header = palette_text_lead(window, "Recent sessions");
+        let session_label = palette_text_lead(window, "Recent Session");
+        let command_label = palette_text_lead(window, "Cycle Sidebar");
+        assert_eq!(
+            session_label, command_label,
+            "a Most used command label starts off the session label column"
+        );
+        assert_eq!(
+            session_label.as_f32() - header.as_f32(),
+            PALETTE_ICON_COLUMN + 8.0,
+            "row labels must sit one icon column plus the row gap right of the header"
+        );
+
+        // The search row owns the gutter, so the caret and placeholder start on
+        // the lead line instead of 2px past it.
+        let search = window.find("palette-search-row");
+        assert_eq!(
+            search.bounds().origin.x.as_f32() + PALETTE_LEAD_INSET,
+            header.as_f32(),
+            "search text must start on the palette lead line"
+        );
+
+        // The Workspaces sub-view lists workspaces alone, so its breadcrumb and
+        // its labels both start on the lead line, with no icon column.
+        view.update(cx, |v, cx| {
+            v.open_workspace_switcher(window, cx);
+        });
+        window.render_frame(cx);
+        assert_eq!(
+            palette_text_lead(
+                window,
+                "Workspaces · Up/Down then Enter · Backspace to return"
+            ),
+            header,
+            "the Workspaces breadcrumb must start on the palette lead line"
+        );
+        assert_eq!(
+            palette_text_lead(window, "All"),
+            header,
+            "a Workspaces row label must start on the palette lead line"
         );
     })
     .unwrap();

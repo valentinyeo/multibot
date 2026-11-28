@@ -55,6 +55,15 @@ const PERMISSION_CHOICES: [(&str, &str, Option<PermissionLevel>, &str); 3] = [
     ),
 ];
 
+/// Inset from the palette modal's inner edge to the one leading edge that the
+/// search text, banner text, section headers, row icons, and row labels share.
+/// List rows reach it through the list's 8px padding plus each row's 12px padding.
+const PALETTE_LEAD_INSET: f32 = 20.0;
+
+/// Leading icon column of a session row. Rows without an icon reserve the same
+/// width, so every label in the main palette starts on one vertical line.
+const PALETTE_ICON_COLUMN: f32 = 22.0;
+
 pub(crate) struct SessionDirectoryPicker {
     agent: AgentKind,
     directories: Vec<String>,
@@ -82,6 +91,23 @@ pub(crate) struct PaletteState {
     pub input_sub: Option<Subscription>,
     pub persist_to_disk: bool,
     pub scroll_handle: ScrollHandle,
+}
+
+impl PaletteState {
+    /// Whether the rows lead with a leading glyph column. The main palette does:
+    /// session rows carry an agent glyph, and every command and workspace row
+    /// reserves the same column so all its labels share one line, including
+    /// while a query reorders the list. Sub-views that never list a session
+    /// (Workspaces, the provider, directory, reminder, dissolve, and end-shell
+    /// pickers) start their text on the lead line instead.
+    fn leads_with_icon_column(&self) -> bool {
+        self.mode == PaletteMode::Global
+            && !self.provider_picker
+            && self.directory_picker.is_none()
+            && self.reminder_target.is_none()
+            && self.dissolve_workspace_id.is_none()
+            && self.shell_kill_target.is_none()
+    }
 }
 
 impl MultibotView {
@@ -584,6 +610,7 @@ impl MultibotView {
             .track_scroll(&self.palette_state.scroll_handle)
             .gap_1()
             .p_2();
+        let has_icon_column = self.palette_state.leads_with_icon_column();
         let mut selectable_idx = 0usize;
         let mut session_el_counter = 0usize;
         let mut ws_el_counter = 0usize;
@@ -671,8 +698,8 @@ impl MultibotView {
                                                 .items_center()
                                                 .child(
                                                     div()
-                                                        .w(px(22.0))
-                                                        .h(px(22.0))
+                                                        .w(px(PALETTE_ICON_COLUMN))
+                                                        .h(px(PALETTE_ICON_COLUMN))
                                                         .rounded(RADIUS_CHIP)
                                                         .bg(Self::agent_color(agent))
                                                         .flex()
@@ -785,15 +812,29 @@ impl MultibotView {
                                         .items_center()
                                         .gap_2()
                                         .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(if destructive {
-                                                    theme::accent_amber()
-                                                } else {
-                                                    theme::text_primary()
+                                            h_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .gap_2()
+                                                .items_center()
+                                                .when(has_icon_column, |el| {
+                                                    el.child(
+                                                        div()
+                                                            .w(px(PALETTE_ICON_COLUMN))
+                                                            .flex_shrink_0(),
+                                                    )
                                                 })
-                                                .truncate()
-                                                .child(label_owned),
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(if destructive {
+                                                            theme::accent_amber()
+                                                        } else {
+                                                            theme::text_primary()
+                                                        })
+                                                        .truncate()
+                                                        .child(label_owned),
+                                                ),
                                         )
                                         .when(!chord_owned.is_empty(), |el| {
                                             el.child(
@@ -850,11 +891,27 @@ impl MultibotView {
                                     h_flex()
                                         .justify_between()
                                         .items_center()
+                                        .gap_2()
                                         .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(theme::text_primary())
-                                                .child(name_owned),
+                                            h_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .gap_2()
+                                                .items_center()
+                                                .when(has_icon_column, |el| {
+                                                    el.child(
+                                                        div()
+                                                            .w(px(PALETTE_ICON_COLUMN))
+                                                            .flex_shrink_0(),
+                                                    )
+                                                })
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(theme::text_primary())
+                                                        .truncate()
+                                                        .child(name_owned),
+                                                ),
                                         )
                                         .child(
                                             div()
@@ -1063,7 +1120,8 @@ impl MultibotView {
                             .justify_between()
                             .items_center()
                             .gap_3()
-                            .px_4()
+                            .pl(px(PALETTE_LEAD_INSET))
+                            .pr_4()
                             .pt_3()
                             .pb_2()
                             .border_b_1()
@@ -1131,13 +1189,19 @@ impl MultibotView {
                     )
                     .child(
                         div()
-                            .px_3()
+                            .id("palette-search-row")
+                            .test_support()
+                            .pl(px(PALETTE_LEAD_INSET))
+                            .pr_3()
                             .py_2p5()
                             .border_b_1()
                             .border_color(theme::border_subtle())
                             .child(
                                 Input::new(&self.inputs.palette_input)
                                     .id("palette-search")
+                                    // The row owns the gutter, so the caret and
+                                    // placeholder sit on the shared lead line.
+                                    .pl(px(0.0))
                                     .appearance(false),
                             ),
                     )
