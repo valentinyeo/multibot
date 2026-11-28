@@ -122,8 +122,7 @@ impl MultibotView {
         self.chat_state.live_activity_expanded = false;
         self.chat_state.newest_chord.reset();
         if session.agent == AgentKind::Shell && !session.archived {
-            self.shell_host.prepare_selection(&host);
-            self.select_embedded_shell(&host, &session.id);
+            self.shell_host.prepare_selection(&host, &session.id);
         }
         self.chat_state.composer_menu_open = false;
         // Reset per-session transient Chat View overlays, active inline rename & stale pagination

@@ -600,35 +600,7 @@ impl MultibotView {
             return;
         };
         if session.agent == multibot_proto::AgentKind::Shell {
-            let next_shell = if self.connection.host_sessions.is_empty() {
-                self.connection
-                    .sessions
-                    .iter()
-                    .find(|s| {
-                        s.agent == multibot_proto::AgentKind::Shell
-                            && !s.archived
-                            && s.id != session.id
-                    })
-                    .map(|s| s.id.clone())
-            } else {
-                self.connection
-                    .host_sessions
-                    .iter()
-                    .find(|(h, s)| {
-                        h == &host
-                            && s.agent == multibot_proto::AgentKind::Shell
-                            && !s.archived
-                            && s.id != session.id
-                    })
-                    .map(|(_, s)| s.id.clone())
-            };
-            // Switch before killing the attached session, or tmux may detach the shared client.
-            if let Some(request) =
-                self.shell_host
-                    .close_session(&host, &session.id, next_shell.as_deref())
-            {
-                let _ = tx.send(request);
-            }
+            self.shell_host.close_session(&host, &session.id);
         }
         if tx
             .send(multibot_proto::ClientRequest::ArchiveSession {
