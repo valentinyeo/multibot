@@ -7,6 +7,10 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 
+- Replace text action buttons in chat and Server shells with icons for stop, send now, edit, and remove (MBRU-93, MBRU-96).
+- Enlarge the three-dot busy indicator so it is clearly visible in chat (MBRU-95).
+- Keep sent messages visible until the transcript catches up, without showing queued messages as sent too early (MBRU-94).
+- Fix Force Send so interrupted Antigravity and agent turns resume reliably, with the force-sent message visible and no stray SIGINT notice (MBRU-97).
 - Keep live server shell lists updating after an early tmux connection failure.
 - Share one SSH connection per server across live shells, switching instantly without opening extra console windows.
 - Queue follow-up messages across Claude, Codex, Antigravity, Pi, and Cursor; edit, remove, or interrupt and send any queued message immediately.
