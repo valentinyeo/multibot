@@ -7,6 +7,7 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 
+- Autocomplete natural language durations and dates with resolved date and time previews in Alt+H Hibernate (MBRU-131).
 - Show each session’s live worker count in the sidebar and chat, with expandable tickets, folders, models, and elapsed time (MBRU-117).
 - Keep live shell mouse input responsive, restore attached shells in All, and improve dictation at natural pauses (MBRU-118, MBRU-119, MBRU-120).
 - Quote selected passages inline, reply directly with Enter, react with r, use message actions from Ctrl+K, and keep scrolling anchored during chat updates (MBRU-121, MBRU-122, MBRU-123).
