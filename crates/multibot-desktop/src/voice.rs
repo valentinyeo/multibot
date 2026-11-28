@@ -192,6 +192,7 @@ use windows_capture::Capture;
 mod windows_capture {
     use super::{VoiceEvent, VoiceSettings};
     use anyhow::{Result, bail};
+    use multibot_core::voice::{has_speech, utterance_boundary};
     use std::ffi::c_void;
     use std::ptr::null_mut;
     use std::sync::{
@@ -382,7 +383,8 @@ mod windows_capture {
     }
 
     fn enqueue(tx: &mpsc::SyncSender<Vec<u8>>, pcm: &mut Vec<u8>) -> Result<()> {
-        if pcm.is_empty() {
+        if !has_speech(pcm) {
+            pcm.clear();
             return Ok(());
         }
         tx.try_send(std::mem::take(pcm)).map_err(|_| {
@@ -440,7 +442,7 @@ mod windows_capture {
                 bail!("Could not start the microphone.");
             }
             let handles = [stop, event];
-            let mut pcm = Vec::with_capacity(64000);
+            let mut pcm = Vec::with_capacity(14 * 32_000);
             let mut next = 0;
             loop {
                 let result = WaitForMultipleObjects(2, handles.as_ptr(), 0, u32::MAX);
@@ -462,8 +464,11 @@ mod windows_capture {
                         bail!("Could not requeue the microphone audio buffer.");
                     }
                     next = (next + 1) % 4;
-                    if pcm.len() >= 64000 {
-                        enqueue(audio, &mut pcm)?;
+                    if result != 0 {
+                        while let Some(boundary) = utterance_boundary(&pcm) {
+                            let mut utterance = pcm.drain(..boundary).collect();
+                            enqueue(audio, &mut utterance)?;
+                        }
                     }
                 }
                 if result == 0 {

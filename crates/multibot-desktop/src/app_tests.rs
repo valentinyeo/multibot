@@ -582,7 +582,7 @@ fn server_shell_manager_recovers_and_ends_on_the_owning_host(cx: &mut TestAppCon
         window.render_frame(cx);
         let rows = view.read(cx).build_palette_rows("", now_unix_ms());
         assert_eq!(rows.len(), 2);
-        for (host, attached) in [("host-a", "Attached"), ("host-b", "Detached")] {
+        for (host, attached) in [("host-a", "Active"), ("host-b", "Background")] {
             assert!(rows.iter().any(|row| matches!(row, PaletteRow::Session { title, workspace_name, cwd, .. }
                 if title.contains("same-id") && workspace_name.contains(host) && workspace_name.contains(attached)
                     && cwd.as_deref() == Some("btop · projects"))));

@@ -1,12 +1,16 @@
 use super::{
     ShellLaunchSpec, ShellShortcut, ShellViewportRect, compute_console_grid, console_paste_chunks,
-    console_wheel_params, shell_shortcut, windows_quote,
+    console_wheel_params, shell_hooks_needed, shell_mouse_hook_interested, shell_shortcut,
+    windows_quote,
 };
 use anyhow::{Result, bail};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ptr::{null, null_mut};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, LazyLock, Mutex, Weak,
+    atomic::{AtomicBool, AtomicU32, Ordering},
+};
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WPARAM},
     Graphics::Gdi::ScreenToClient,
@@ -62,6 +66,7 @@ impl Drop for Process {
     }
 }
 
+#[derive(Clone)]
 struct VisibleShell {
     hwnd: usize,
     pid: u32,
@@ -94,16 +99,129 @@ struct ConsoleClick {
 }
 
 thread_local! {
-    static VISIBLE: RefCell<HashMap<usize, VisibleShell>> = RefCell::new(HashMap::new());
     static URL_CLICK: Cell<bool> = const { Cell::new(false) };
     static FORWARDED: RefCell<HashMap<u32, usize>> = RefCell::new(HashMap::new());
+}
+
+static VISIBLE: LazyLock<Arc<Mutex<HashMap<usize, VisibleShell>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
+static HAS_VISIBLE_SHELL: AtomicBool = AtomicBool::new(false);
+static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+static HOOK_ERROR: AtomicU32 = AtomicU32::new(0);
+static HOOKS: Mutex<Weak<InputHooks>> = Mutex::new(Weak::new());
+const UPDATE_HOOKS: u32 = WM_APP + 1;
+
+struct InputHooks {
+    thread_id: u32,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl InputHooks {
+    fn shared() -> Result<Arc<Self>> {
+        let mut shared = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(hooks) = shared.upgrade() {
+            return Ok(hooks);
+        }
+        let (ready, started) = std::sync::mpsc::sync_channel(1);
+        let thread = std::thread::Builder::new()
+            .name("shell-input-hooks".into())
+            .spawn(move || unsafe {
+                let mut message = MSG::default();
+                // PostThreadMessage requires a message queue before publishing the thread ID.
+                PeekMessageW(&mut message, null_mut(), 0, 0, PM_NOREMOVE);
+                let _ = ready.send(GetCurrentThreadId());
+                let mut keyboard: HHOOK = null_mut();
+                let mut mouse: HHOOK = null_mut();
+                while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
+                    if message.message == UPDATE_HOOKS {
+                        if HAS_VISIBLE_SHELL.load(Ordering::Relaxed) {
+                            if keyboard.is_null() {
+                                keyboard = SetWindowsHookExW(
+                                    WH_KEYBOARD_LL,
+                                    Some(keyboard_hook),
+                                    GetModuleHandleW(null()),
+                                    0,
+                                );
+                                mouse = SetWindowsHookExW(
+                                    WH_MOUSE_LL,
+                                    Some(mouse_hook),
+                                    GetModuleHandleW(null()),
+                                    0,
+                                );
+                                if keyboard.is_null() || mouse.is_null() {
+                                    HOOK_ERROR.store(
+                                        windows_sys::Win32::Foundation::GetLastError(),
+                                        Ordering::Relaxed,
+                                    );
+                                    UnhookWindowsHookEx(keyboard);
+                                    UnhookWindowsHookEx(mouse);
+                                    keyboard = null_mut();
+                                    mouse = null_mut();
+                                }
+                            }
+                        } else {
+                            UnhookWindowsHookEx(keyboard);
+                            UnhookWindowsHookEx(mouse);
+                            keyboard = null_mut();
+                            mouse = null_mut();
+                            FORWARDED.with(|v| v.borrow_mut().clear());
+                            URL_CLICK.set(false);
+                        }
+                    } else {
+                        TranslateMessage(&message);
+                        DispatchMessageW(&message);
+                    }
+                }
+                UnhookWindowsHookEx(keyboard);
+                UnhookWindowsHookEx(mouse);
+            })?;
+        let thread_id = started.recv()?;
+        HOOK_THREAD_ID.store(thread_id, Ordering::Release);
+        let hooks = Arc::new(Self {
+            thread_id,
+            thread: Some(thread),
+        });
+        *shared = Arc::downgrade(&hooks);
+        Ok(hooks)
+    }
+}
+
+impl Drop for InputHooks {
+    fn drop(&mut self) {
+        HOOK_THREAD_ID.store(0, Ordering::Release);
+        unsafe {
+            PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0);
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn update_visible(update: impl FnOnce(&mut HashMap<usize, VisibleShell>)) {
+    let mut visible = VISIBLE.lock().unwrap_or_else(|e| e.into_inner());
+    update(&mut visible);
+    let needed = shell_hooks_needed(visible.values().map(|shell| shell.hwnd));
+    let changed = HAS_VISIBLE_SHELL.swap(needed, Ordering::Relaxed) != needed;
+    drop(visible);
+    if changed {
+        unsafe {
+            PostThreadMessageW(HOOK_THREAD_ID.load(Ordering::Acquire), UPDATE_HOOKS, 0, 0);
+        }
+    }
+    let error = HOOK_ERROR.swap(0, Ordering::Relaxed);
+    if error != 0 {
+        eprintln!(
+            "Could not install shell input hooks: {}",
+            std::io::Error::from_raw_os_error(error as i32)
+        );
+    }
 }
 
 pub(super) struct NativeHost {
     pub(super) parent: usize,
     pub(super) job: Arc<Job>,
-    hook: usize,
-    mouse_hook: usize,
+    _hooks: Arc<InputHooks>,
     pastes: std::sync::mpsc::Sender<ConsolePaste>,
 }
 impl NativeHost {
@@ -128,21 +246,7 @@ impl NativeHost {
             {
                 return Err(std::io::Error::last_os_error().into());
             }
-            let hook = SetWindowsHookExW(
-                WH_KEYBOARD_LL,
-                Some(keyboard_hook),
-                GetModuleHandleW(null()),
-                0,
-            );
-            if hook.is_null() {
-                return Err(std::io::Error::last_os_error().into());
-            }
-            let mouse_hook =
-                SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), GetModuleHandleW(null()), 0);
-            if mouse_hook.is_null() {
-                UnhookWindowsHookEx(hook);
-                return Err(std::io::Error::last_os_error().into());
-            }
+            let hooks = InputHooks::shared()?;
             let (urls, requests) = std::sync::mpsc::channel::<ConsoleClick>();
             if let Err(error) = std::thread::Builder::new()
                 .name("console-links".into())
@@ -156,8 +260,6 @@ impl NativeHost {
                     }
                 })
             {
-                UnhookWindowsHookEx(hook);
-                UnhookWindowsHookEx(mouse_hook);
                 return Err(error.into());
             }
             let (pastes, requests) = std::sync::mpsc::channel::<ConsolePaste>();
@@ -171,8 +273,6 @@ impl NativeHost {
                     }
                 })
             {
-                UnhookWindowsHookEx(hook);
-                UnhookWindowsHookEx(mouse_hook);
                 return Err(error.into());
             }
             let (resizes, requests) = std::sync::mpsc::channel::<ConsoleResize>();
@@ -186,19 +286,16 @@ impl NativeHost {
                     }
                 })
             {
-                UnhookWindowsHookEx(hook);
-                UnhookWindowsHookEx(mouse_hook);
                 return Err(error.into());
             }
             let host = Self {
                 parent,
                 job,
-                hook: hook as usize,
-                mouse_hook: mouse_hook as usize,
+                _hooks: hooks,
                 pastes,
             };
-            VISIBLE.with(|v| {
-                v.borrow_mut().insert(
+            update_visible(|visible| {
+                visible.insert(
                     parent,
                     VisibleShell {
                         hwnd: 0,
@@ -216,7 +313,12 @@ impl NativeHost {
         }
     }
     pub(super) fn focus_visible(&self) {
-        let hwnd = VISIBLE.with(|v| v.borrow().get(&self.parent).map(|s| s.hwnd).unwrap_or(0));
+        let hwnd = VISIBLE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&self.parent)
+            .map(|s| s.hwnd)
+            .unwrap_or(0);
         unsafe {
             if hwnd != 0
                 && IsWindowVisible(hwnd as HWND) != 0
@@ -229,15 +331,15 @@ impl NativeHost {
     }
 
     pub(super) fn set_text_input_focus(&self, focused: bool) {
-        VISIBLE.with(|visible| {
-            if let Some(shell) = visible.borrow_mut().get_mut(&self.parent) {
+        update_visible(|visible| {
+            if let Some(shell) = visible.get_mut(&self.parent) {
                 shell.text_input_focused = focused;
             }
         });
     }
     pub(super) fn set_kill_confirmation(&self, confirming: bool) {
-        VISIBLE.with(|visible| {
-            if let Some(shell) = visible.borrow_mut().get_mut(&self.parent) {
+        update_visible(|visible| {
+            if let Some(shell) = visible.get_mut(&self.parent) {
                 shell.confirming_kill = confirming;
             }
         });
@@ -250,43 +352,48 @@ impl NativeHost {
 }
 impl Drop for NativeHost {
     fn drop(&mut self) {
-        VISIBLE.with(|v| v.borrow_mut().remove(&self.parent));
-        FORWARDED.with(|v| v.borrow_mut().retain(|_, parent| *parent != self.parent));
-        unsafe {
-            UnhookWindowsHookEx(self.hook as _);
-            UnhookWindowsHookEx(self.mouse_hook as _);
-        }
+        update_visible(|visible| {
+            visible.remove(&self.parent);
+        });
     }
 }
 
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code < 0 || !HAS_VISIBLE_SHELL.load(Ordering::Relaxed) {
+        return unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) };
+    }
     unsafe {
-        if code >= 0 {
-            let event = &*(lparam as *const KBDLLHOOKSTRUCT);
-            let key = event.vkCode;
-            let up = matches!(wparam as u32, WM_KEYUP | WM_SYSKEYUP);
-            if up {
-                if FORWARDED.with(|v| v.borrow_mut().remove(&key)).is_some() {
-                    return 1;
+        let event = &*(lparam as *const KBDLLHOOKSTRUCT);
+        let key = event.vkCode;
+        if matches!(wparam as u32, WM_KEYUP | WM_SYSKEYUP) {
+            if FORWARDED.with(|v| v.borrow_mut().remove(&key)).is_some() {
+                return 1;
+            }
+        } else if matches!(wparam as u32, WM_KEYDOWN | WM_SYSKEYDOWN) {
+            let ctrl = GetAsyncKeyState(0x11) < 0;
+            let alt = GetAsyncKeyState(0x12) < 0;
+            let shift = GetAsyncKeyState(0x10) < 0;
+            let parent = GetAncestor(GetForegroundWindow(), GA_ROOT) as usize;
+            let shell = VISIBLE
+                .try_lock()
+                .ok()
+                .and_then(|v| v.get(&parent).cloned());
+            if let Some(shell) = shell.filter(|s| s.hwnd != 0) {
+                let focus = thread_focus(parent as HWND);
+                // Browser state is UI-thread-local; use the actual Win32 focus instead.
+                let foreign_focus = !focus.is_null()
+                    && focus != parent as HWND
+                    && focus != shell.hwnd as HWND
+                    && IsChild(shell.hwnd as HWND, focus) == 0;
+                if foreign_focus {
+                    return CallNextHookEx(null_mut(), code, wparam, lparam);
                 }
-            } else if matches!(wparam as u32, WM_KEYDOWN | WM_SYSKEYDOWN) {
-                let ctrl = GetAsyncKeyState(0x11) < 0;
-                let alt = GetAsyncKeyState(0x12) < 0;
-                let shift = GetAsyncKeyState(0x10) < 0;
-                let foreground = GetForegroundWindow();
-                let root = GetAncestor(foreground, GA_ROOT) as usize;
-                let confirming = VISIBLE.with(|v| {
-                    v.borrow()
-                        .get(&root)
-                        .is_some_and(|shell| shell.confirming_kill)
-                });
-                let shortcut = if key == 0x1B && !ctrl && !alt && !shift && confirming {
+                let shortcut = if key == 0x1B && !ctrl && !alt && !shift && shell.confirming_kill {
                     Some(ShellShortcut::Forward("escape"))
                 } else {
                     shell_shortcut(key, ctrl, alt, shift)
                 };
                 if let Some(shortcut) = shortcut {
-                    // A held key is not the second confirmation press; key-up rearms it.
                     if key == 0x57
                         && ctrl
                         && shift
@@ -294,54 +401,26 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                     {
                         return 1;
                     }
-                    let parent = VISIBLE.with(|v| {
-                        v.borrow()
-                            .get(&root)
-                            .filter(|shell| {
-                                shell.hwnd != 0 && !crate::browser_pane::native::has_focus(root)
-                            })
-                            .map(|shell| (root, shell.hwnd))
-                    });
-                    if let Some((parent, hwnd)) = parent {
-                        let chord = match shortcut {
-                            ShellShortcut::Paste => {
-                                let sent = VISIBLE.with(|visible| {
-                                    let visible = visible.borrow();
-                                    let Some(shell) = visible.get(&parent) else {
-                                        return false;
-                                    };
-                                    let focus = thread_focus(parent as HWND);
-                                    if shell.text_input_focused && focus != hwnd as HWND {
-                                        return false;
-                                    }
-                                    shell
-                                        .pastes
-                                        .send(ConsolePaste {
-                                            hwnd,
-                                            pid: shell.pid,
-                                            parent,
-                                        })
-                                        .is_ok()
-                                });
-                                if sent {
-                                    FORWARDED.with(|v| v.borrow_mut().insert(key, parent));
-                                    return 1;
-                                }
+                    let sent = match shortcut {
+                        ShellShortcut::Paste => {
+                            if shell.text_input_focused && focus != shell.hwnd as HWND {
                                 return CallNextHookEx(null_mut(), code, wparam, lparam);
                             }
-                            ShellShortcut::Forward(chord) => chord,
-                        };
-                        SetForegroundWindow(parent as HWND);
-                        SetFocus(parent as HWND);
-                        if let Ok(stroke) = gpui_kit::Keystroke::parse(chord) {
-                            VISIBLE.with(|v| {
-                                if let Some(shell) = v.borrow().get(&parent) {
-                                    let _ = shell.shortcuts.send(stroke);
-                                }
-                            });
-                            FORWARDED.with(|v| v.borrow_mut().insert(key, parent));
-                            return 1;
+                            shell
+                                .pastes
+                                .send(ConsolePaste {
+                                    hwnd: shell.hwnd,
+                                    pid: shell.pid,
+                                    parent,
+                                })
+                                .is_ok()
                         }
+                        ShellShortcut::Forward(chord) => gpui_kit::Keystroke::parse(chord)
+                            .is_ok_and(|stroke| shell.shortcuts.send(stroke).is_ok()),
+                    };
+                    if sent {
+                        FORWARDED.with(|v| v.borrow_mut().insert(key, parent));
+                        return 1;
                     }
                 }
             }
@@ -351,81 +430,63 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
 }
 
 unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if !shell_mouse_hook_interested(
+        code,
+        wparam as u32,
+        HAS_VISIBLE_SHELL.load(Ordering::Relaxed),
+    ) {
+        return unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) };
+    }
     unsafe {
-        if code >= 0 {
-            if wparam as u32 == WM_LBUTTONUP && URL_CLICK.replace(false) {
-                return 1;
-            }
-            if wparam as u32 == WM_LBUTTONDOWN {
-                let event = &*(lparam as *const MSLLHOOKSTRUCT);
-                let target = WindowFromPoint(event.pt);
-                let shell = VISIBLE.with(|visible| {
-                    visible.borrow().iter().find_map(|(parent, shell)| {
-                        let hwnd = shell.hwnd as HWND;
-                        (!hwnd.is_null() && (target == hwnd || IsChild(hwnd, target) != 0))
-                            .then_some((*parent, shell.hwnd))
-                    })
-                });
-                if let Some((parent, hwnd)) = shell {
-                    SetForegroundWindow(parent as HWND);
-                    SetFocus(hwnd as HWND);
-                }
-            }
-            if wparam as u32 == WM_MOUSEWHEEL {
-                let event = &*(lparam as *const MSLLHOOKSTRUCT);
-                let target = WindowFromPoint(event.pt);
-                let root = GetAncestor(GetForegroundWindow(), GA_ROOT) as usize;
-                let forwarded = VISIBLE.with(|visible| {
-                    let visible = visible.borrow();
-                    let Some(shell) = visible.get(&root) else {
-                        return false;
-                    };
+        if wparam as u32 == WM_LBUTTONUP {
+            return if URL_CLICK.replace(false) {
+                1
+            } else {
+                CallNextHookEx(null_mut(), code, wparam, lparam)
+            };
+        }
+        let event = &*(lparam as *const MSLLHOOKSTRUCT);
+        let target = WindowFromPoint(event.pt);
+        let shell = VISIBLE.try_lock().ok().and_then(|visible| {
+            visible
+                .iter()
+                .find(|(_, shell)| {
                     let hwnd = shell.hwnd as HWND;
-                    if hwnd.is_null()
-                        || (target != hwnd && IsChild(hwnd, target) == 0)
-                        || crate::browser_pane::native::has_focus(root)
-                        || thread_focus(hwnd) == hwnd
-                    {
-                        return false;
-                    }
-                    let (w, l) = console_wheel_params(
-                        (event.mouseData >> 16) as i16,
-                        GetAsyncKeyState(0x11) < 0,
-                        GetAsyncKeyState(0x10) < 0,
-                        event.pt.x,
-                        event.pt.y,
-                    );
-                    PostMessageW(hwnd, WM_MOUSEWHEEL, w, l) != 0
-                });
-                if forwarded {
+                    !hwnd.is_null() && (target == hwnd || IsChild(hwnd, target) != 0)
+                })
+                .map(|(parent, shell)| (*parent, shell.clone()))
+        });
+        if let Some((parent, shell)) = shell {
+            let hwnd = shell.hwnd as HWND;
+            // The native button-down focuses the child console. Never SetFocus across threads here.
+            if wparam as u32 == WM_MOUSEWHEEL
+                && GetAncestor(GetForegroundWindow(), GA_ROOT) == parent as HWND
+                && thread_focus(hwnd) != hwnd
+            {
+                let (w, l) = console_wheel_params(
+                    (event.mouseData >> 16) as i16,
+                    GetAsyncKeyState(0x11) < 0,
+                    GetAsyncKeyState(0x10) < 0,
+                    event.pt.x,
+                    event.pt.y,
+                );
+                if PostMessageW(hwnd, WM_MOUSEWHEEL, w, l) != 0 {
                     return 1;
                 }
             }
             if wparam as u32 == WM_LBUTTONDOWN && GetAsyncKeyState(0x11) < 0 {
-                let event = &*(lparam as *const MSLLHOOKSTRUCT);
-                let target = WindowFromPoint(event.pt);
-                let request_sent = VISIBLE.with(|visible| {
-                    visible.borrow().values().any(|shell| {
-                        let hwnd = shell.hwnd as HWND;
-                        if hwnd.is_null() || (target != hwnd && IsChild(hwnd, target) == 0) {
-                            return false;
-                        }
-                        let mut point = event.pt;
-                        if ScreenToClient(hwnd, &mut point) == 0 {
-                            return false;
-                        }
-                        shell
-                            .urls
-                            .send(ConsoleClick {
-                                hwnd: shell.hwnd,
-                                pid: shell.pid,
-                                x: point.x,
-                                y: point.y,
-                            })
-                            .is_ok()
-                    })
-                });
-                if request_sent {
+                let mut point = event.pt;
+                if ScreenToClient(hwnd, &mut point) != 0
+                    && shell
+                        .urls
+                        .send(ConsoleClick {
+                            hwnd: shell.hwnd,
+                            pid: shell.pid,
+                            x: point.x,
+                            y: point.y,
+                        })
+                        .is_ok()
+                {
                     URL_CLICK.set(true);
                     return 1;
                 }
@@ -812,8 +873,8 @@ impl EmbeddedShellHandle {
                 if self.visible {
                     ShowWindow(self.hwnd as HWND, SW_HIDE);
                     self.visible = false;
-                    VISIBLE.with(|v| {
-                        if let Some(shell) = v.borrow_mut().get_mut(&parent) {
+                    update_visible(|visible| {
+                        if let Some(shell) = visible.get_mut(&parent) {
                             if shell.hwnd == self.hwnd {
                                 shell.hwnd = 0;
                             }
@@ -848,16 +909,17 @@ impl EmbeddedShellHandle {
                 if focus_on_show {
                     self.focus();
                 }
-                VISIBLE.with(|v| {
-                    if let Some(shell) = v.borrow_mut().get_mut(&parent) {
+                update_visible(|visible| {
+                    if let Some(shell) = visible.get_mut(&parent) {
                         shell.hwnd = self.hwnd;
                         shell.pid = self.pid;
                     }
                 });
             }
             if resize {
-                VISIBLE.with(|v| {
-                    if let Some(shell) = v.borrow().get(&parent) {
+                {
+                    let visible = VISIBLE.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(shell) = visible.get(&parent) {
                         let _ = shell.resizes.send(ConsoleResize {
                             pid: self.pid,
                             hwnd: self.hwnd,
@@ -865,15 +927,15 @@ impl EmbeddedShellHandle {
                             height: rect.height,
                         });
                     }
-                });
+                }
             }
         }
     }
 }
 impl Drop for EmbeddedShellHandle {
     fn drop(&mut self) {
-        VISIBLE.with(|v| {
-            if let Some(shell) = v.borrow_mut().get_mut(&self.parent) {
+        update_visible(|visible| {
+            if let Some(shell) = visible.get_mut(&self.parent) {
                 if shell.hwnd == self.hwnd {
                     shell.hwnd = 0;
                 }

@@ -17,6 +17,17 @@ use std::collections::HashMap;
 pub const SHELL_HEADER_HEIGHT: f32 = 44.0;
 
 #[cfg(any(windows, test))]
+fn shell_hooks_needed(windows: impl IntoIterator<Item = usize>) -> bool {
+    windows.into_iter().any(|hwnd| hwnd != 0)
+}
+
+#[cfg(any(windows, test))]
+fn shell_mouse_hook_interested(code: i32, message: u32, visible: bool) -> bool {
+    // WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL. Never inspect mouse movement.
+    code >= 0 && matches!(message, 0x0201 | 0x0202 | 0x020A) && visible
+}
+
+#[cfg(any(windows, test))]
 fn compute_console_grid(
     client_w: i32,
     client_h: i32,
@@ -657,6 +668,9 @@ impl MultibotView {
                             if cx
                                 .update(|window, cx| {
                                     if let Some(view) = weak.upgrade() {
+                                        if let Some(host) = &view.read(cx).shell_host.native {
+                                            host.focus_parent();
+                                        }
                                         view.read(cx)
                                             .focus
                                             .root_focus_handle
@@ -952,6 +966,28 @@ mod native;
 mod tests {
     use super::*;
     use gpui_kit::AppContext;
+
+    #[test]
+    fn input_hooks_follow_visible_windows_across_multiple_hosts() {
+        assert!(!shell_hooks_needed([]));
+        assert!(!shell_hooks_needed([0, 0]));
+        assert!(shell_hooks_needed([42, 0]));
+        assert!(shell_hooks_needed([0, 84]));
+        assert!(shell_hooks_needed([42, 84]));
+        assert!(!shell_hooks_needed([0, 0]));
+    }
+
+    #[test]
+    fn mouse_hook_bypasses_moves_negative_codes_and_hidden_shells() {
+        for message in [0x0200, 0x0203, 0x0204, 0x020E, 0] {
+            assert!(!shell_mouse_hook_interested(0, message, true));
+        }
+        for message in [0x0201, 0x0202, 0x020A] {
+            assert!(shell_mouse_hook_interested(0, message, true));
+            assert!(!shell_mouse_hook_interested(-1, message, true));
+            assert!(!shell_mouse_hook_interested(0, message, false));
+        }
+    }
 
     #[test]
     fn console_grid_tracks_client_pixels_and_font_size() {

@@ -732,6 +732,9 @@ impl MultibotView {
             .workspace_store
             .wake_workspace(&workspace_id);
         self.sidebar_state.workspace_store.move_to_inbox(key);
+        self.sidebar_state
+            .workspace_store
+            .record_session_input(key, now_unix_ms());
         self.selection
             .closed_sessions
             .retain(|(h, s)| h != &host || s.id != session.id || s.agent != session.agent);

@@ -304,8 +304,8 @@ impl MultibotView {
                         .or_else(|| shell.cwd.clone())
                         .unwrap_or_default();
                     let attached = match shell.shell_attached {
-                        Some(true) => "Attached",
-                        Some(false) => "Detached",
+                        Some(true) => "Active",
+                        Some(false) => "Background",
                         None => "Live",
                     };
                     let title = format!("{title} · {}", shell.id);
