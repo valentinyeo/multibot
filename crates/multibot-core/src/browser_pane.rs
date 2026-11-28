@@ -211,18 +211,7 @@ pub fn client_to_screen_rect(
 pub fn signin_launch_args(profile: &Path) -> Vec<OsString> {
     let mut profile_arg = OsString::from("--user-data-dir=");
     profile_arg.push(profile);
-    vec![
-        profile_arg,
-        "--disable-gpu".into(),
-        "--disable-gpu-compositing".into(),
-        "--disable-accelerated-video-decode".into(),
-        "--disable-background-mode".into(),
-        "--no-first-run".into(),
-        "--no-default-browser-check".into(),
-        "--hide-crash-restore-bubble".into(),
-        "--new-window".into(),
-        GOOGLE_SIGNIN_URL.into(),
-    ]
+    vec![profile_arg, GOOGLE_SIGNIN_URL.into()]
 }
 
 pub fn launch_args(profile: &Path, url: &str) -> Vec<OsString> {
@@ -306,26 +295,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signin_uses_shared_profile_and_keeps_gpu_disabled() {
+    fn signin_uses_only_shared_profile_and_google_url() {
         let profile = shared_profile(&browser_profile_root(Path::new("roaming path")));
         let args = signin_launch_args(&profile);
         let mut profile_arg = OsString::from("--user-data-dir=");
         profile_arg.push(&profile);
-        assert!(args.contains(&profile_arg));
-        for arg in [
-            "--disable-gpu",
-            "--disable-gpu-compositing",
-            "--disable-accelerated-video-decode",
-            "--disable-background-mode",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--hide-crash-restore-bubble",
-            "--new-window",
-            GOOGLE_SIGNIN_URL,
-        ] {
-            assert!(args.contains(&OsString::from(arg)), "missing {arg}");
-        }
-        assert_eq!(args.last(), Some(&OsString::from(GOOGLE_SIGNIN_URL)));
+        assert_eq!(args, vec![profile_arg, OsString::from(GOOGLE_SIGNIN_URL)]);
     }
 
     #[test]
@@ -564,7 +539,7 @@ mod tests {
     #[test]
     fn launch_uses_a_full_browser_window_with_software_rendering() {
         for url in [DEFAULT_URL, "https://example.com/path?q=hello%20world"] {
-            let args = launch_args(Path::new("profile"), url);
+            let args = launch_args_with_bounds(Path::new("profile"), url, None);
             assert_eq!(&args[args.len() - 2..], ["--new-window", url]);
             assert!(
                 !args

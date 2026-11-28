@@ -6,6 +6,7 @@ ships, move those bullets under its published version; keep older entries here.
 This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
+- Open Google sign-in in plain stock Chrome without extra software GPU or automation flags.
 - Keep Done and Hibernated sessions searchable in Ctrl+K (excluding only Dissolved sessions) with Done and Hibernated labels (MBRU-142).
 - Widen Inbox, quiet row borders, hide repeated workspace badges, and show preview text without Markdown formatting (MBRU-143).
 - Format chat URLs, /skills, @bot mentions, inline code, and code blocks with clean, borderless tokens and clickable links (MBRU-126).
