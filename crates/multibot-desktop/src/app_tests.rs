@@ -136,6 +136,16 @@ fn queued_message_edit_remove_and_force_send_are_clickable(cx: &mut TestAppConte
         });
         while rx.try_recv().is_ok() {}
         window.render_frame(cx);
+        for (id, label) in [
+            ("queue-send-0", "Send now"),
+            ("queue-edit-0", "Edit queued message"),
+            ("queue-remove-0", "Remove queued message"),
+        ] {
+            assert_eq!(window.find(id).label(), Some(label));
+            let id = gpui_kit::ElementId::from(id);
+            assert!(!gpui_kit::base::test_support::texts(window)
+                .iter().any(|text| text.path().contains(&id)));
+        }
         window.click("queue-edit-0", cx);
         assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value().as_ref(), "edit this");
         assert!(view.read(cx).inputs.prompt_input.read(cx).focus_handle(cx).is_focused(window));
@@ -278,8 +288,12 @@ fn server_shell_manager_recovers_and_ends_on_the_owning_host(cx: &mut TestAppCon
         window.click("pal-cmd-server-shells", cx);
         window.input("Btop A", cx);
         window.render_frame(cx);
+        assert_eq!(window.find("pal-shell-end-0").label(), Some("End shell"));
+        assert!(!gpui_kit::base::test_support::texts(window).iter().any(|text|
+            text.path().contains(&gpui_kit::ElementId::from("pal-shell-end-0"))));
         window.click("pal-shell-end-0", cx);
         window.render_frame(cx);
+        assert!(window.find("pal-shell-kill-confirm").visible());
         assert!(!std::iter::from_fn(|| rx_a.try_recv().ok()).any(|req| matches!(req, ClientRequest::ArchiveSession { .. })));
         window.click("pal-shell-kill-confirm", cx);
         assert!(std::iter::from_fn(|| rx_a.try_recv().ok()).any(|req| matches!(req,
@@ -2402,6 +2416,11 @@ fn wave1_composer_controls_preserve_drafts_and_stop_working_session(cx: &mut Tes
         window.render_frame(cx);
         assert_eq!(window.find("composer-effort-3").checked(), Some(true));
         assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value().as_str(), "Unsent draft");
+        let stop = window.find("stop-agent");
+        assert_eq!(stop.label(), Some("Stop response"));
+        assert_eq!(stop.bounds().size, gpui_kit::size(px(32.0), px(32.0)));
+        assert!(!gpui_kit::base::test_support::texts(window).iter().any(|text|
+            text.path().contains(&gpui_kit::ElementId::from("stop-agent"))));
         window.click("stop-agent", cx);
         window.render_frame(cx);
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::InterruptSession { session_id, .. }) if session_id == "active"));

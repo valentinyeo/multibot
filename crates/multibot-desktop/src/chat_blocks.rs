@@ -117,7 +117,8 @@ impl MultibotView {
                         Button::new(btn_id)
                             .xsmall()
                             .icon(lucide_icon(icons::COPY, 14.0))
-                            .label("Copy")
+                            .accessibility_label("Copy")
+                            .tooltip("Copy")
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
                                 let _ = weak.update(cx, |view, cx| {
@@ -134,7 +135,9 @@ impl MultibotView {
                 let weak = weak_table.clone();
                 Button::new(btn_id)
                     .xsmall()
-                    .label("Expand")
+                    .icon(lucide_icon(icons::MAXIMIZE_2, 14.0))
+                    .accessibility_label("Expand table")
+                    .tooltip("Expand table")
                     .on_click(move |_, window, cx| {
                         let _ = weak.update(cx, |view, cx| {
                             view.open_table_from_gpui_data(&data_clone, cx);

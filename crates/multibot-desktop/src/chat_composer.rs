@@ -341,7 +341,9 @@ impl MultibotView {
                     .child(
                         Button::new(format!("queue-send-{index}"))
                             .small()
-                            .label("Send now")
+                            .icon(lucide_icon(icons::SEND, 14.0))
+                            .accessibility_label("Send now")
+                            .tooltip("Send now")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.force_send_queued_entry(&force_id, cx);
                             })),
@@ -349,7 +351,9 @@ impl MultibotView {
                     .child(
                         Button::new(format!("queue-edit-{index}"))
                             .small()
-                            .label("Edit")
+                            .icon(lucide_icon(icons::PENCIL, 14.0))
+                            .accessibility_label("Edit queued message")
+                            .tooltip("Edit queued message")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 let draft = this.inputs.prompt_input.read(cx).value().to_string();
                                 if let Some(mut entry) = this.remove_queued_entry(&edit_id) {
@@ -379,7 +383,7 @@ impl MultibotView {
                     .child(
                         Button::new(format!("queue-remove-{index}"))
                             .small()
-                            .icon(lucide_icon(icons::X, 12.0))
+                            .icon(lucide_icon(icons::TRASH_2, 14.0))
                             .accessibility_label("Remove queued message")
                             .tooltip("Remove queued message")
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -616,7 +620,16 @@ impl MultibotView {
                                 })),
                         )
                         .when(is_working, |el| el.child(
-                            Button::new("stop-agent").small().label("Stop")
+                            Button::new("stop-agent")
+                                .small()
+                                .custom(ButtonCustomVariant::new(cx).foreground(rgb(0xFFFFFF).into())
+                                    .hover(rgb(0xDC4C48).into()).active(rgb(0xDC4C48).into()))
+                                .size(px(32.0))
+                                .rounded(RADIUS_CHIP)
+                                .bg(rgb(0xC83E3B))
+                                .text_color(rgb(0xFFFFFF))
+                                .icon(lucide_icon(icons::SQUARE_FILLED, 14.0))
+                                .accessibility_label("Stop response")
                                 .tooltip("Stop response")
                                 .on_click(cx.listener(|this, _, _, cx| { this.interrupt_active_session(cx); })),
                         ))

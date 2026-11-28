@@ -1704,6 +1704,56 @@ fn chat_urls_open_on_regular_click_and_reject_unsafe_schemes(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
+fn busy_indicator_has_three_readable_dots_and_disappears_when_idle(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.selection.selected_session = Some(SessionSummary {
+                id: "busy-dots".into(),
+                working: true,
+                ..Default::default()
+            });
+            cx.notify();
+        });
+        for phase in 0..3 {
+            view.update(cx, |v, cx| {
+                v.chat_state.busy_tick_phase = phase;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let indicator = window.find("chat-busy-dots");
+            assert!(indicator.visible());
+            assert_eq!(indicator.bounds().size.height, px(32.0));
+            let mut previous = None;
+            for index in 0..3 {
+                let dot = window.find(format!("chat-busy-dot-{index}"));
+                assert!(dot.visible());
+                assert_eq!(dot.bounds().size, gpui_kit::size(px(16.0), px(16.0)));
+                if let Some(right) = previous {
+                    assert_eq!(dot.bounds().left() - right, px(8.0));
+                }
+                previous = Some(dot.bounds().right());
+            }
+            assert!(window.try_find("chat-busy-dot-3").is_none());
+            assert!(
+                !gpui_kit::base::test_support::texts(window)
+                    .iter()
+                    .any(|text| text
+                        .path()
+                        .contains(&gpui_kit::ElementId::from("chat-busy-dots")))
+            );
+        }
+        view.update(cx, |v, cx| {
+            v.selection.selected_session.as_mut().unwrap().working = false;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("chat-busy-dots").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn renders_rich_chat_blocks_and_toggles_tools_diff_and_todo_drawer(cx: &mut TestAppContext) {
     let (handle, view) = open_test_chat_window(cx);
     cx.update_window(handle, |_, window, cx| {

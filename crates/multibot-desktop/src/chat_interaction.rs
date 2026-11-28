@@ -828,7 +828,9 @@ impl MultibotView {
                                 .child(
                                     Button::new("chat-find-prev")
                                         .xsmall()
-                                        .label("Prev")
+                                        .icon(lucide_icon(icons::CHEVRON_UP, 14.0))
+                                        .accessibility_label("Previous match")
+                                        .tooltip("Previous match")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             if let Some(idx) = this.chat_state.find_prev() {
                                                 this.chat_state.scroll_handle.scroll_to_item(idx);
@@ -839,7 +841,9 @@ impl MultibotView {
                                 .child(
                                     Button::new("chat-find-next")
                                         .xsmall()
-                                        .label("Next")
+                                        .icon(lucide_icon(icons::CHEVRON_DOWN, 14.0))
+                                        .accessibility_label("Next match")
+                                        .tooltip("Next match")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             if let Some(idx) = this.chat_state.find_next() {
                                                 this.chat_state.scroll_handle.scroll_to_item(idx);

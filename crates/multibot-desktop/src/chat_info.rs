@@ -1,4 +1,5 @@
 use crate::app::MultibotView;
+use crate::icons::{self, lucide_icon};
 use crate::state::ActiveModal;
 use crate::theme::{self, RADIUS_MODAL};
 use gpui_kit::{
@@ -152,7 +153,8 @@ impl MultibotView {
                             .child(
                                 Button::new("close-chat-info")
                                     .xsmall()
-                                    .label("Close")
+                                    .icon(lucide_icon(icons::X, 14.0))
+                                    .accessibility_label("Close")
                                     .tooltip("Close · Esc")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.active_modal = ActiveModal::None;
@@ -185,8 +187,9 @@ impl MultibotView {
                                         el.child(
                                             Button::new("copy-chat-cwd")
                                                 .xsmall()
-                                                .label("Copy")
-                                                .accessibility_label("Copy working directory")
+                                                .icon(lucide_icon(icons::COPY, 14.0))
+                                                .accessibility_label("Copy")
+                                                .tooltip("Copy")
                                                 .on_click(move |_, _, cx| {
                                                     cx.write_to_clipboard(
                                                         ClipboardItem::new_string(cwd.clone()),
