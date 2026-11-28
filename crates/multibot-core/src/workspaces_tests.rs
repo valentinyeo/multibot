@@ -2577,6 +2577,88 @@ fn palette_workspaces_mode_lists_only_visible_workspaces_and_virtual_views() {
 }
 
 #[test]
+fn palette_search_includes_done_and_hibernated_but_not_dissolved_sessions() {
+    let now = 1_000;
+    for state in [
+        "active",
+        "waiting",
+        "archived",
+        "hibernated",
+        "snoozed",
+        "killed",
+        "dissolved",
+        "archived-workspace",
+    ] {
+        let mut store = WorkspaceStore::new();
+        let workspace = store.create_workspace("Project", None).unwrap();
+        let mut session = make_session("s1", AgentKind::Claude, "Find me", now, false, false);
+        session.cwd = Some("/home/project-folder".into());
+        session.archived = matches!(state, "archived" | "killed");
+        session.archive_kill_process = state == "killed";
+        let inputs = [make_input("h", &session)];
+        let key = &inputs[0].key;
+        store.assign_session_workspace(key, &workspace.id);
+        match state {
+            "waiting" => store.archive_to_waiting_session(key, now, &session),
+            "hibernated" => store.hibernate_session(key, &session, Some(now + 60_000), None, false),
+            "snoozed" => {
+                store.snooze_workspace(&workspace.id, now + 60_000, now).unwrap();
+            }
+            "dissolved" => store.dissolve_session(key, now),
+            "archived-workspace" => {
+                store
+                    .workspaces
+                    .iter_mut()
+                    .find(|ws| ws.id == workspace.id)
+                    .unwrap()
+                    .archived = true;
+            }
+            _ => {}
+        }
+        store.record_session_view(key, now);
+        let stats = PaletteStats::default();
+        for query in ["Find me", "find", "folder", "claude", ""] {
+            let rows = rank_palette(
+                &store,
+                &stats,
+                &inputs,
+                &[],
+                query,
+                &PaletteMode::Global,
+                None,
+                None,
+                now,
+            );
+            let sessions: Vec<_> = rows
+                .iter()
+                .filter_map(|row| match row {
+                    PaletteRow::Session {
+                        session_key,
+                        workspace_name,
+                        ..
+                    } => Some((session_key, workspace_name)),
+                    _ => None,
+                })
+                .collect();
+            let included = if query.is_empty() {
+                state == "active"
+            } else {
+                !matches!(state, "killed" | "dissolved" | "archived-workspace")
+            };
+            assert_eq!(sessions.len(), usize::from(included), "{state}: {query:?}");
+            if included {
+                let label = match state {
+                    "waiting" | "archived" => "Project · Done",
+                    "hibernated" | "snoozed" => "Project · Hibernated",
+                    _ => "Project",
+                };
+                assert_eq!(sessions[0], (key, &label.to_string()), "{state}: {query:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn palette_main_search_ranks_sessions_above_equal_matching_workspaces() {
     let mut store = WorkspaceStore::new();
     let workspace = store.create_workspace("Product", None).unwrap();

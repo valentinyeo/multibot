@@ -6,6 +6,7 @@ ships, move those bullets under its published version; keep older entries here.
 This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
+- Keep Done and Hibernated sessions searchable in Ctrl+K (excluding only Dissolved sessions) with Done and Hibernated labels (MBRU-142).
 - Automatically load older chat history when scrolling near the top and backfill sparse Antigravity chats on open (MBRU-138).
 - Match queued Send now to the composer’s up-arrow icon and use compact, borderless buttons for queued message actions (MBRU-129).
 - Align Main Chat controls and sidebar edges, widen the reading column, fit short message bubbles to their text, and keep long messages and table controls inside narrow windows (MBRU-112).
