@@ -72,8 +72,7 @@ fn normalize(mut value: Value) -> Option<Value> {
             }
         }
     }
-    let mut normalized =
-        json!({"type":kind, "uuid":value.get("id"), "timestamp":value.get("timestamp"),
+    let mut normalized = json!({"type":kind, "uuid":value.get("id"), "timestamp":value.get("timestamp"),
         "message":{"model":message.get("model")}});
     normalized["message"]["content"] = content;
     Some(normalized)

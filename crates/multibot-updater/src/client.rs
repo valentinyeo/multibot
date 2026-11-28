@@ -341,7 +341,8 @@ pub(crate) fn get_following_allowed_redirects(
         }
 
         let current_origin = Url::parse(&current_url).ok().map(|u| u.origin());
-        let same_origin = hop == 0 || (initial_origin.is_some() && current_origin == initial_origin);
+        let same_origin =
+            hop == 0 || (initial_origin.is_some() && current_origin == initial_origin);
 
         let mut req = agent.get(&current_url).header("User-Agent", user_agent);
         if same_origin {
@@ -453,11 +454,7 @@ impl UpdateClient {
 
     /// Queries the configured GitHub Releases endpoint with optional `If-None-Match` ETag,
     /// applies draft/prerelease/SemVer/`rejected.txt` filters, and validates release metadata.
-    pub fn check_for_update(
-        &self,
-        etag: Option<&str>,
-        updates_dir: &Path,
-    ) -> Result<CheckOutcome> {
+    pub fn check_for_update(&self, etag: Option<&str>, updates_dir: &Path) -> Result<CheckOutcome> {
         let mut headers: Vec<(&str, &str)> = vec![("Accept", "application/vnd.github+json")];
         if let Some(raw_etag) = etag {
             let trimmed = raw_etag.trim();

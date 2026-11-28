@@ -151,7 +151,11 @@ pub fn launch_args(profile: &Path, url: &str) -> Vec<OsString> {
 /// Chromium writes the ephemeral loopback port and the browser WebSocket path.
 pub fn parse_devtools_active_port(contents: &str) -> Option<(u16, &str)> {
     let mut lines = contents.lines();
-    let port = lines.next()?.parse::<u16>().ok().filter(|port| *port != 0)?;
+    let port = lines
+        .next()?
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)?;
     let path = lines.next()?;
     let id = path.strip_prefix("/devtools/browser/")?;
     if id.is_empty() || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
@@ -195,9 +199,24 @@ mod tests {
 
     #[test]
     fn devtools_active_port_parses_only_loopback_port_and_browser_path() {
-        assert_eq!(parse_devtools_active_port("9222\n/devtools/browser/abc-123\n"), Some((9222, "/devtools/browser/abc-123")));
-        assert_eq!(parse_devtools_active_port("9222\r\n/devtools/browser/abc-123\r\n"), Some((9222, "/devtools/browser/abc-123")));
-        for invalid in ["", "0\n/devtools/browser/id", "65536\n/devtools/browser/id", "localhost:9222\n/devtools/browser/id", "9222\nws://evil", "9222\n/devtools/browser/", "9222\n/devtools/browser/id?x=1", "9222\n/devtools/browser/id\nextra"] {
+        assert_eq!(
+            parse_devtools_active_port("9222\n/devtools/browser/abc-123\n"),
+            Some((9222, "/devtools/browser/abc-123"))
+        );
+        assert_eq!(
+            parse_devtools_active_port("9222\r\n/devtools/browser/abc-123\r\n"),
+            Some((9222, "/devtools/browser/abc-123"))
+        );
+        for invalid in [
+            "",
+            "0\n/devtools/browser/id",
+            "65536\n/devtools/browser/id",
+            "localhost:9222\n/devtools/browser/id",
+            "9222\nws://evil",
+            "9222\n/devtools/browser/",
+            "9222\n/devtools/browser/id?x=1",
+            "9222\n/devtools/browser/id\nextra",
+        ] {
             assert!(parse_devtools_active_port(invalid).is_none(), "{invalid:?}");
         }
     }

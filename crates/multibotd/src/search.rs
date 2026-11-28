@@ -729,11 +729,13 @@ mod tests {
         let over_prefix = r#"{"type":"user","uuid":"u-over","message":{"content":""#;
         let fill_over =
             (SEARCH_MAX_LINE_BYTES + 1) - over_prefix.len() - marker.len() - suffix.len();
-        let over_line = format!("{over_prefix}{}{marker}{suffix}", make_spaced('b', fill_over));
+        let over_line = format!(
+            "{over_prefix}{}{marker}{suffix}",
+            make_spaced('b', fill_over)
+        );
         assert_eq!(over_line.len(), SEARCH_MAX_LINE_BYTES + 1);
 
-        let after_line =
-            "{\"type\":\"assistant\",\"uuid\":\"u-after\",\"message\":{\"content\":\"EXACT_CAP_NEEDLE after\"}}\n";
+        let after_line = "{\"type\":\"assistant\",\"uuid\":\"u-after\",\"message\":{\"content\":\"EXACT_CAP_NEEDLE after\"}}\n";
         let expected_after_offset = (exact_line.len() + over_line.len()) as u64;
 
         let combined = format!("{exact_line}{over_line}{after_line}");

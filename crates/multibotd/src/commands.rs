@@ -140,7 +140,11 @@ pub fn list_commands(home: &Path, agent: AgentKind, cwd: Option<&Path>) -> Vec<S
     items.sort_by(|a, b| {
         a.opens_in_terminal
             .cmp(&b.opens_in_terminal)
-            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+            .then_with(|| {
+                a.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
+            })
             .then_with(|| a.trigger.cmp(&b.trigger))
     });
     items
@@ -485,7 +489,10 @@ struct Frontmatter {
 }
 
 fn parse_frontmatter(raw: &str) -> Frontmatter {
-    let normalized = raw.strip_prefix('\u{feff}').unwrap_or(raw).replace("\r\n", "\n");
+    let normalized = raw
+        .strip_prefix('\u{feff}')
+        .unwrap_or(raw)
+        .replace("\r\n", "\n");
     if !normalized.starts_with("---\n") {
         return Frontmatter {
             name: None,
@@ -831,10 +838,8 @@ mod tests {
 
     fn temp_home(tag: &str) -> PathBuf {
         let n = CMD_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "multibotd-cmds-{tag}-{}-{n}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("multibotd-cmds-{tag}-{}-{n}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -877,9 +882,17 @@ mod tests {
         .unwrap();
 
         let claude_cmds = list_commands(&home, AgentKind::Claude, Some(&sub));
-        assert!(claude_cmds.iter().any(|c| c.name == "compact" && c.source == "builtin" && !c.opens_in_terminal));
-        assert!(claude_cmds.iter().any(|c| c.name == "ops:deploy" && c.source == "project_command" && c.description == "Deploy production release"));
-        assert!(claude_cmds.iter().any(|c| c.name == "my-skill" && c.source == "project_skill" && c.description == "Multi-line skill description"));
+        assert!(
+            claude_cmds
+                .iter()
+                .any(|c| c.name == "compact" && c.source == "builtin" && !c.opens_in_terminal)
+        );
+        assert!(claude_cmds.iter().any(|c| c.name == "ops:deploy"
+            && c.source == "project_command"
+            && c.description == "Deploy production release"));
+        assert!(claude_cmds.iter().any(|c| c.name == "my-skill"
+            && c.source == "project_skill"
+            && c.description == "Multi-line skill description"));
         assert!(!claude_cmds.iter().any(|c| c.name == "hidden-skill"));
         // User skill overrides builtin `theme` and flips opens_in_terminal to false
         let theme = claude_cmds.iter().find(|c| c.name == "theme").unwrap();
@@ -888,7 +901,11 @@ mod tests {
 
         // Codex prompts + `$` skills
         fs::create_dir_all(home.join(".codex/prompts")).unwrap();
-        fs::write(home.join(".codex/prompts/review.md"), "# Review PR carefully\n").unwrap();
+        fs::write(
+            home.join(".codex/prompts/review.md"),
+            "# Review PR carefully\n",
+        )
+        .unwrap();
         fs::create_dir_all(repo.join(".agents/skills/helper")).unwrap();
         fs::write(
             repo.join(".agents/skills/helper/SKILL.md"),
@@ -897,13 +914,29 @@ mod tests {
         .unwrap();
 
         let codex_cmds = list_commands(&home, AgentKind::Codex, Some(&sub));
-        assert!(codex_cmds.iter().any(|c| c.name == "prompts:review" && c.trigger == "/" && c.source == "user_prompt"));
-        assert!(codex_cmds.iter().any(|c| c.name == "helper" && c.trigger == "$" && c.source == "project_skill"));
+        assert!(
+            codex_cmds.iter().any(|c| c.name == "prompts:review"
+                && c.trigger == "/"
+                && c.source == "user_prompt")
+        );
+        assert!(
+            codex_cmds
+                .iter()
+                .any(|c| c.name == "helper" && c.trigger == "$" && c.source == "project_skill")
+        );
 
         // Antigravity builtins + .agents/skills
         let agy_cmds = list_commands(&home, AgentKind::Antigravity, Some(&sub));
-        assert!(agy_cmds.iter().any(|c| c.name == "teamwork" && c.source == "builtin"));
-        assert!(agy_cmds.iter().any(|c| c.name == "helper" && c.trigger == "/" && c.source == "project_skill"));
+        assert!(
+            agy_cmds
+                .iter()
+                .any(|c| c.name == "teamwork" && c.source == "builtin")
+        );
+        assert!(
+            agy_cmds
+                .iter()
+                .any(|c| c.name == "helper" && c.trigger == "/" && c.source == "project_skill")
+        );
 
         let _ = fs::remove_dir_all(&home);
     }
@@ -1132,12 +1165,14 @@ mod tests {
         assert_eq!(poteto.source, "plugin_skill");
         assert_eq!(poteto.description, "Concise style");
 
-        assert!(cmds
-            .iter()
-            .any(|c| c.name == "pstack:ship" && c.source == "plugin_command"));
-        assert!(cmds
-            .iter()
-            .any(|c| c.name == "here:here-skill" && c.source == "plugin_skill"));
+        assert!(
+            cmds.iter()
+                .any(|c| c.name == "pstack:ship" && c.source == "plugin_command")
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| c.name == "here:here-skill" && c.source == "plugin_skill")
+        );
 
         assert!(!cmds.iter().any(|c| c.name.contains("off-skill")));
         assert!(
@@ -1155,9 +1190,10 @@ mod tests {
 
         // No settings file at all.
         let cmds = list_commands(&home, AgentKind::Claude, None);
-        assert!(cmds
-            .iter()
-            .any(|c| c.name == "clear" && c.source == "builtin"));
+        assert!(
+            cmds.iter()
+                .any(|c| c.name == "clear" && c.source == "builtin")
+        );
 
         // Broken settings JSON.
         write(&home.join(".claude/settings.json"), "{not json");

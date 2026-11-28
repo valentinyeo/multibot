@@ -85,7 +85,9 @@ pub fn native_brain_transcript(home: &Path, conversation_id: &str) -> Option<Pat
 /// Also returns the future native path, so an event-driven watcher can follow its creation.
 pub fn transcript_target(home: &Path, session_id: &str, source: &Path) -> PathBuf {
     let metadata = super::MetadataStore::load(home);
-    let recorded = metadata.get(session_id).and_then(|m| m.native_session_id.clone());
+    let recorded = metadata
+        .get(session_id)
+        .and_then(|m| m.native_session_id.clone());
     let conversation = recorded.filter(|id| is_conversation_id(id)).or_else(|| {
         if !source.starts_with(home.join(".multibot/history")) {
             return brain_conversation_id(source);
@@ -96,31 +98,49 @@ pub fn transcript_target(home: &Path, session_id: &str, source: &Path) -> PathBu
         let mut conversation = None;
         loop {
             line.clear();
-            let n = reader.by_ref().take(64 * 1024 + 1).read_until(b'\n', &mut line).ok()?;
-            if n == 0 { break; }
+            let n = reader
+                .by_ref()
+                .take(64 * 1024 + 1)
+                .read_until(b'\n', &mut line)
+                .ok()?;
+            if n == 0 {
+                break;
+            }
             if line.len() > 64 * 1024 {
-                if line.last() != Some(&b'\n') { reader.skip_until(b'\n').ok()?; }
+                if line.last() != Some(&b'\n') {
+                    reader.skip_until(b'\n').ok()?;
+                }
                 continue;
             }
             if let Ok(value) = serde_json::from_slice::<Value>(&line)
                 && value.get("type").and_then(Value::as_str) == Some("multibot_meta")
-                && let Some(id) = value.get("conversation_id").and_then(Value::as_str).filter(|id| is_conversation_id(id))
+                && let Some(id) = value
+                    .get("conversation_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| is_conversation_id(id))
             {
                 conversation = Some(id.to_string());
             }
         }
         conversation
     });
-    let Some(conversation) = conversation else { return source.to_path_buf(); };
+    let Some(conversation) = conversation else {
+        return source.to_path_buf();
+    };
     native_brain_transcript(home, &conversation).unwrap_or_else(|| {
-        home.join(".gemini/antigravity-cli/brain").join(conversation)
+        home.join(".gemini/antigravity-cli/brain")
+            .join(conversation)
             .join(".system_generated/logs/transcript.jsonl")
     })
 }
 
 pub fn resolve_transcript(home: &Path, session_id: &str, source: &Path) -> PathBuf {
     let target = transcript_target(home, session_id, source);
-    if target.is_file() { target } else { source.to_path_buf() }
+    if target.is_file() {
+        target
+    } else {
+        source.to_path_buf()
+    }
 }
 
 pub fn antigravity_discovery_roots(home: &Path) -> Vec<PathBuf> {
@@ -318,7 +338,11 @@ impl AgyStreamAccumulator {
                             .get("text")
                             .or_else(|| u.get("content"))
                             .and_then(Value::as_str)
-                            .map(|s| strip_base64_in_str(&strip_system_reminders(s)).trim().to_string())
+                            .map(|s| {
+                                strip_base64_in_str(&strip_system_reminders(s))
+                                    .trim()
+                                    .to_string()
+                            })
                             .filter(|s| !s.is_empty());
                         events.push(AgyStreamOutput::UserAccepted { text });
                     }
@@ -330,8 +354,7 @@ impl AgyStreamAccumulator {
                                 self.emitted_text_in_turn = true;
                             }
                         }
-                        if is_terminal
-                            && let Some(raw_text) = self.text_by_step.remove(&step_index)
+                        if is_terminal && let Some(raw_text) = self.text_by_step.remove(&step_index)
                         {
                             let cleaned = strip_base64_in_str(&strip_system_reminders(&raw_text))
                                 .trim()
@@ -431,7 +454,11 @@ impl AgyStreamAccumulator {
                 let fallback_message = if !self.emitted_text_in_turn {
                     r.get("response")
                         .and_then(Value::as_str)
-                        .map(|s| strip_base64_in_str(&strip_system_reminders(s)).trim().to_string())
+                        .map(|s| {
+                            strip_base64_in_str(&strip_system_reminders(s))
+                                .trim()
+                                .to_string()
+                        })
                         .filter(|s| !s.is_empty())
                         .map(|text| {
                             let mut blocks = vec![MessageBlock::Text { text: text.clone() }];
@@ -520,8 +547,14 @@ fn extract_agy_tool_diff(tool_name: &str, params: &Value) -> Option<DiffBlock> {
         .map(String::from);
     match kind.as_str() {
         "edit" | "edit_file" => {
-            let old = params.get("old_string").and_then(Value::as_str).unwrap_or("");
-            let new = params.get("new_string").and_then(Value::as_str).unwrap_or("");
+            let old = params
+                .get("old_string")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let new = params
+                .get("new_string")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             build_diff_block(path, compute_unified_diff_lines(old, new, 1))
         }
         "write" | "write_file" | "write_to_file" => {
@@ -576,13 +609,11 @@ fn parse_tool_status_str(s: &str) -> ToolStatus {
 }
 
 fn parse_row_timestamp(row: &Value) -> Option<i64> {
-    row.get("timestamp_ms")
-        .and_then(Value::as_i64)
-        .or_else(|| {
-            row.get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(parse_iso_ms)
-        })
+    row.get("timestamp_ms").and_then(Value::as_i64).or_else(|| {
+        row.get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_iso_ms)
+    })
 }
 
 fn parse_row_todos(row: &Value) -> Vec<TodoItem> {
@@ -1406,10 +1437,7 @@ mod tests {
 
     #[test]
     fn antigravity_discovers_all_roots_preferring_multibot_history() {
-        let dir = std::env::temp_dir().join(format!(
-            "multibotd-agy-disc-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("multibotd-agy-disc-{}", std::process::id()));
         let hosted = hosted_history_path(&dir, "agy-1");
         append_history_record(
             &hosted,
@@ -1440,10 +1468,12 @@ mod tests {
         let hosted_s = sessions.iter().find(|s| s.id == "agy-1").unwrap();
         assert_eq!(hosted_s.title, "Hosted Agy");
         assert_eq!(hosted_s.model.as_deref(), Some("gemini-4"));
-        assert_eq!(hosted_s.last_assistant_preview.as_deref(), Some("Tests fixed"));
+        assert_eq!(
+            hosted_s.last_assistant_preview.as_deref(),
+            Some("Tests fixed")
+        );
         assert!(
-            Path::new(&hosted_s.source_path)
-                .starts_with(dir.join(".multibot").join("history"))
+            Path::new(&hosted_s.source_path).starts_with(dir.join(".multibot").join("history"))
         );
 
         let legacy_s = sessions.iter().find(|s| s.id == "legacy-session").unwrap();
@@ -1543,10 +1573,8 @@ mod tests {
         assert_eq!(parsed.messages[1].text, "Result [image omitted] ok");
 
         // Verify ListSessions / discover_all_sessions also picks up conversation_id & user_input title
-        let dir = std::env::temp_dir().join(format!(
-            "multibotd-agy-raw-stream-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("multibotd-agy-raw-stream-{}", std::process::id()));
         let brain = dir.join(".gemini/antigravity/brain");
         fs::create_dir_all(&brain).unwrap();
         fs::write(brain.join("stream_file.jsonl"), &payload).unwrap();
@@ -1562,10 +1590,8 @@ mod tests {
 
     #[test]
     fn antigravity_scrubs_base64_in_tool_summary_diff_todos_and_meta_title() {
-        let dir = std::env::temp_dir().join(format!(
-            "multibotd-agy-b64-scrub-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("multibotd-agy-b64-scrub-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let hosted = hosted_history_path(&dir, "agy-b64");
         let raw_b64 = "Z".repeat(300);

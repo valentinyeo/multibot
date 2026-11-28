@@ -105,11 +105,7 @@ pub(crate) fn clean_note_line(raw: &str) -> Option<String> {
             break;
         }
     }
-    if s.is_empty()
-        || s.starts_with('#')
-        || s.contains("```")
-        || has_forbidden_control_or_bidi(s)
-    {
+    if s.is_empty() || s.starts_with('#') || s.contains("```") || has_forbidden_control_or_bidi(s) {
         return None;
     }
     if s.chars().count() > MAX_NOTE_CHARS {

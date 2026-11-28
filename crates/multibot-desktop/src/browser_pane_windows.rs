@@ -51,7 +51,11 @@ pub(super) struct Browser {
     _job: Handle,
     pub(super) cdp: crate::browser_cdp::BrowserController,
     pub(super) binding_id: String,
-    pub(super) bridge: Option<(String, String, UnboundedSender<multibot_proto::ClientRequest>)>,
+    pub(super) bridge: Option<(
+        String,
+        String,
+        UnboundedSender<multibot_proto::ClientRequest>,
+    )>,
 }
 
 fn wide(s: &OsStr) -> Vec<u16> {
@@ -126,12 +130,18 @@ impl Browser {
         let profile = session_profile(&isolated_root()?, session);
         real_directory(&profile)?;
         // Chromium otherwise forwards a second launch into the first window's process.
-        let profile_lock = std::fs::OpenOptions::new().create(true).truncate(false)
-            .read(true).write(true).open(profile.join("multibot-pane.lock"))?;
-        profile_lock.try_lock().context("This session's browser is already open in another window or is still closing")?;
+        let profile_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(profile.join("multibot-pane.lock"))?;
+        profile_lock.try_lock().context(
+            "This session's browser is already open in another window or is still closing",
+        )?;
         match std::fs::remove_file(profile.join("DevToolsActivePort")) {
-            Ok(()) => {},
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {},
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => return Err(err.into()),
         }
         let mut command = command_line(&program, &launch_args(&profile, url));
@@ -203,9 +213,15 @@ impl Browser {
         }
     }
 
-    pub(super) fn bind(&mut self, host: String, session_id: String, tx: UnboundedSender<multibot_proto::ClientRequest>) {
+    pub(super) fn bind(
+        &mut self,
+        host: String,
+        session_id: String,
+        tx: UnboundedSender<multibot_proto::ClientRequest>,
+    ) {
         let _ = tx.send(multibot_proto::ClientRequest::BrowserBind {
-            session_id: session_id.clone(), binding_id: self.binding_id.clone(),
+            session_id: session_id.clone(),
+            binding_id: self.binding_id.clone(),
         });
         self.bridge = Some((host, session_id, tx));
     }
@@ -281,7 +297,8 @@ impl Drop for Browser {
     fn drop(&mut self) {
         if let Some((_, session_id, tx)) = self.bridge.take() {
             let _ = tx.send(multibot_proto::ClientRequest::BrowserUnbind {
-                session_id, binding_id: self.binding_id.clone(),
+                session_id,
+                binding_id: self.binding_id.clone(),
             });
         }
         self.place(None);

@@ -122,8 +122,14 @@ impl WatchManager {
 
         let requested_path = source_path;
         let source_path = if agent == AgentKind::Antigravity {
-            crate::providers::antigravity::resolve_transcript(&self.home, &session_id, &requested_path)
-        } else { requested_path.clone() };
+            crate::providers::antigravity::resolve_transcript(
+                &self.home,
+                &session_id,
+                &requested_path,
+            )
+        } else {
+            requested_path.clone()
+        };
         let targets = session_watch_targets(&self.home, &session_id, &requested_path, agent);
         let watched_targets = Arc::new(std::sync::Mutex::new(targets.clone()));
         let callback_targets = Arc::clone(&watched_targets);
@@ -131,12 +137,23 @@ impl WatchManager {
         let fs_tx_requeue = fs_tx.clone();
         let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-            let Ok(event) = res else { return; };
-            if is_ignored_read_event(&event.kind) { return; }
+            let Ok(event) = res else {
+                return;
+            };
+            if is_ignored_read_event(&event.kind) {
+                return;
+            }
             let matches_name = event.paths.iter().any(|p| {
-                callback_targets.lock().unwrap().iter().any(|target| target.starts_with(p))
-            }) || (matches!(event.kind, EventKind::Modify(ModifyKind::Name(_))) && event.paths.is_empty());
-            if matches_name { let _ = fs_tx.send(()); }
+                callback_targets
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|target| target.starts_with(p))
+            }) || (matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
+                && event.paths.is_empty());
+            if matches_name {
+                let _ = fs_tx.send(());
+            }
         })?;
         let mut watch_dirs = HashSet::new();
         sync_session_watches(&mut watcher, &targets, &mut watch_dirs)?;
@@ -540,17 +557,33 @@ fn session_watch_targets(home: &Path, id: &str, source: &Path, agent: AgentKind)
     let mut targets = vec![source.to_path_buf()];
     if agent == AgentKind::Antigravity {
         let native = crate::providers::antigravity::transcript_target(home, id, source);
-        if native != source { targets.push(native); }
+        if native != source {
+            targets.push(native);
+        }
     }
     targets
 }
 
-fn sync_session_watches(watcher: &mut RecommendedWatcher, targets: &[PathBuf], current: &mut HashSet<PathBuf>) -> Result<()> {
-    let desired: HashSet<_> = targets.iter().filter_map(|target| {
-        target.parent().and_then(|parent| parent.ancestors().find(|p| p.is_dir())).map(Path::to_path_buf)
-    }).collect();
-    for path in desired.difference(current) { watcher.watch(path, RecursiveMode::NonRecursive)?; }
-    for path in current.difference(&desired) { let _ = watcher.unwatch(path); }
+fn sync_session_watches(
+    watcher: &mut RecommendedWatcher,
+    targets: &[PathBuf],
+    current: &mut HashSet<PathBuf>,
+) -> Result<()> {
+    let desired: HashSet<_> = targets
+        .iter()
+        .filter_map(|target| {
+            target
+                .parent()
+                .and_then(|parent| parent.ancestors().find(|p| p.is_dir()))
+                .map(Path::to_path_buf)
+        })
+        .collect();
+    for path in desired.difference(current) {
+        watcher.watch(path, RecursiveMode::NonRecursive)?;
+    }
+    for path in current.difference(&desired) {
+        let _ = watcher.unwatch(path);
+    }
     *current = desired;
     Ok(())
 }
@@ -698,8 +731,7 @@ fn emit_session_updated(
     let live = LiveActivity::cached(home);
     let active_ids = process_mgr.active_session_ids();
     let connected_ids = process_mgr.connected_session_ids();
-    let server_workspaces =
-        crate::server_workspaces::ServerWorkspaceIndex::load_default_cached();
+    let server_workspaces = crate::server_workspaces::ServerWorkspaceIndex::load_default_cached();
     let ctx = DiscoveryContext {
         active_session_ids: &active_ids,
         connected_session_ids: &connected_ids,
@@ -742,8 +774,7 @@ fn sync_dir_watches(
                 if scan_new_roots {
                     for entry in WalkDir::new(&canon).max_depth(5).into_iter().flatten() {
                         let ep = entry.path();
-                        if ep.is_file()
-                            && ep.extension().and_then(|e| e.to_str()) == Some("jsonl")
+                        if ep.is_file() && ep.extension().and_then(|e| e.to_str()) == Some("jsonl")
                         {
                             discovered_jsonl.push(ep.to_path_buf());
                         }
@@ -791,7 +822,10 @@ fn desired_provider_watch_roots(home: &Path) -> Vec<(PathBuf, AgentKind)> {
             candidates.push((expanded.join("projects"), AgentKind::Claude));
         }
     }
-    candidates.push((base_home.join(".claude").join("projects"), AgentKind::Claude));
+    candidates.push((
+        base_home.join(".claude").join("projects"),
+        AgentKind::Claude,
+    ));
     candidates.push((
         base_home.join(".config").join("claude").join("projects"),
         AgentKind::Claude,
@@ -876,10 +910,8 @@ mod tests {
 
     fn temp_home(tag: &str) -> PathBuf {
         let n = WATCH_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "multibotd-watch-{tag}-{}-{n}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("multibotd-watch-{tag}-{}-{n}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -908,20 +940,48 @@ mod tests {
         let home = temp_home("agy-source-switch");
         let cid = "4d5d5535-249c-4f10-90d9-7ec49c2eeb53";
         let mirror = hosted_history_path(&home, "new-chat");
-        append_history_record(&mirror, &json!({"type":"multibot_meta", "session_id":"new-chat"})).unwrap();
+        append_history_record(
+            &mirror,
+            &json!({"type":"multibot_meta", "session_id":"new-chat"}),
+        )
+        .unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let pm = ProcessManager::new(home.clone(), tx.clone());
         let mut wm = WatchManager::new(home.clone(), tx, pm);
-        wm.watch_session("new-chat".into(), mirror.clone(), AgentKind::Antigravity).await.unwrap();
+        wm.watch_session("new-chat".into(), mirror.clone(), AgentKind::Antigravity)
+            .await
+            .unwrap();
         assert!(matches!(rx.recv().await, Some(ServerEvent::History { .. })));
-        append_history_record(&mirror, &json!({"type":"multibot_meta", "session_id":"new-chat", "conversation_id":cid})).unwrap();
+        append_history_record(
+            &mirror,
+            &json!({"type":"multibot_meta", "session_id":"new-chat", "conversation_id":cid}),
+        )
+        .unwrap();
         // A ping through the watcher is not available, so wait for the metadata update.
-        assert!(recv_matching(&mut rx, Duration::from_secs(3), |ev| matches!(ev, ServerEvent::SessionUpdated { .. })).await.is_some());
-        let native = home.join(".gemini/antigravity-cli/brain").join(cid).join(".system_generated/logs/transcript.jsonl");
+        assert!(
+            recv_matching(&mut rx, Duration::from_secs(3), |ev| matches!(
+                ev,
+                ServerEvent::SessionUpdated { .. }
+            ))
+            .await
+            .is_some()
+        );
+        let native = home
+            .join(".gemini/antigravity-cli/brain")
+            .join(cid)
+            .join(".system_generated/logs/transcript.jsonl");
         fs::create_dir_all(native.parent().unwrap()).unwrap();
-        append_history_record(&native, &json!({"type":"PLANNER_RESPONSE", "content":"First native reply"})).unwrap();
+        append_history_record(
+            &native,
+            &json!({"type":"PLANNER_RESPONSE", "content":"First native reply"}),
+        )
+        .unwrap();
         assert!(recv_matching(&mut rx, Duration::from_secs(3), |ev| matches!(ev, ServerEvent::History { session_id, messages, .. } if session_id == "new-chat" && messages.iter().any(|m| m.text == "First native reply"))).await.is_some());
-        append_history_record(&native, &json!({"type":"PLANNER_RESPONSE", "content":"Next native reply"})).unwrap();
+        append_history_record(
+            &native,
+            &json!({"type":"PLANNER_RESPONSE", "content":"Next native reply"}),
+        )
+        .unwrap();
         assert!(recv_matching(&mut rx, Duration::from_secs(3), |ev| matches!(ev, ServerEvent::HistoryAppend { messages, .. } if messages.iter().any(|m| m.text == "Next native reply"))).await.is_some());
         wm.shutdown().await;
         fs::remove_dir_all(home).unwrap();
@@ -934,20 +994,59 @@ mod tests {
         let home = temp_home("agy-authoritative");
         let cid = "4d5d5535-249c-4f10-90d9-7ec49c2eeb53";
         let mirror = hosted_history_path(&home, "hosted");
-        append_history_record(&mirror, &json!({"type":"multibot_meta", "session_id":"hosted", "conversation_id":cid})).unwrap();
+        append_history_record(
+            &mirror,
+            &json!({"type":"multibot_meta", "session_id":"hosted", "conversation_id":cid}),
+        )
+        .unwrap();
         append_history_record(&mirror, &json!({"type":"multibot_history", "row":{"id":"old", "role":"assistant", "text":"Before restart"}})).unwrap();
-        let native = home.join(".gemini/antigravity-cli/brain").join(cid).join(".system_generated/logs/transcript.jsonl");
+        let native = home
+            .join(".gemini/antigravity-cli/brain")
+            .join(cid)
+            .join(".system_generated/logs/transcript.jsonl");
         fs::create_dir_all(native.parent().unwrap()).unwrap();
-        append_history_record(&native, &json!({"type":"PLANNER_RESPONSE", "content":"Before restart"})).unwrap();
-        append_history_record(&native, &json!({"type":"PLANNER_RESPONSE", "content":"Saved while daemon stopped"})).unwrap();
-        let page = crate::continuity::read_page(&home, "hosted", AgentKind::Antigravity, &mirror, None, None, None, None).unwrap();
-        assert_eq!(page.messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), vec!["Before restart", "Saved while daemon stopped"]);
+        append_history_record(
+            &native,
+            &json!({"type":"PLANNER_RESPONSE", "content":"Before restart"}),
+        )
+        .unwrap();
+        append_history_record(
+            &native,
+            &json!({"type":"PLANNER_RESPONSE", "content":"Saved while daemon stopped"}),
+        )
+        .unwrap();
+        let page = crate::continuity::read_page(
+            &home,
+            "hosted",
+            AgentKind::Antigravity,
+            &mirror,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            page.messages
+                .iter()
+                .map(|m| m.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Before restart", "Saved while daemon stopped"]
+        );
         let (tx, mut rx) = mpsc::unbounded_channel();
         let pm = ProcessManager::new(home.clone(), tx.clone());
         let mut wm = WatchManager::new(home.clone(), tx, pm);
-        wm.watch_session("hosted".into(), mirror, AgentKind::Antigravity).await.unwrap();
-        assert!(matches!(rx.recv().await, Some(ServerEvent::History { messages, .. }) if messages.len() == 2));
-        append_history_record(&native, &json!({"type":"PLANNER_RESPONSE", "content":"Native live reply"})).unwrap();
+        wm.watch_session("hosted".into(), mirror, AgentKind::Antigravity)
+            .await
+            .unwrap();
+        assert!(
+            matches!(rx.recv().await, Some(ServerEvent::History { messages, .. }) if messages.len() == 2)
+        );
+        append_history_record(
+            &native,
+            &json!({"type":"PLANNER_RESPONSE", "content":"Native live reply"}),
+        )
+        .unwrap();
         let event = recv_matching(&mut rx, Duration::from_secs(3), |ev| matches!(ev, ServerEvent::HistoryAppend { messages, session_id, .. } if session_id == "hosted" && messages.iter().any(|m| m.text == "Native live reply"))).await;
         assert!(event.is_some(), "must tail native transcript, not mirror");
         wm.shutdown().await;
@@ -1057,14 +1156,18 @@ mod tests {
             .unwrap();
 
         // Drain initial History events
-        let _ = recv_matching(&mut rx, Duration::from_secs(2), |e| {
-            matches!(e, ServerEvent::History { session_id, .. } if session_id == "sessA")
-        })
+        let _ = recv_matching(
+            &mut rx,
+            Duration::from_secs(2),
+            |e| matches!(e, ServerEvent::History { session_id, .. } if session_id == "sessA"),
+        )
         .await
         .expect("initial History A");
-        let _ = recv_matching(&mut rx, Duration::from_secs(2), |e| {
-            matches!(e, ServerEvent::History { session_id, .. } if session_id == "sessB")
-        })
+        let _ = recv_matching(
+            &mut rx,
+            Duration::from_secs(2),
+            |e| matches!(e, ServerEvent::History { session_id, .. } if session_id == "sessB"),
+        )
         .await
         .expect("initial History B");
 
@@ -1077,9 +1180,11 @@ mod tests {
         .unwrap();
         fa.flush().unwrap();
 
-        let ev_a = recv_matching(&mut rx, Duration::from_secs(2), |e| {
-            matches!(e, ServerEvent::HistoryAppend { session_id, .. } if session_id == "sessA")
-        })
+        let ev_a = recv_matching(
+            &mut rx,
+            Duration::from_secs(2),
+            |e| matches!(e, ServerEvent::HistoryAppend { session_id, .. } if session_id == "sessA"),
+        )
         .await
         .expect("HistoryAppend A");
         if let ServerEvent::HistoryAppend { messages, .. } = ev_a {
@@ -1097,9 +1202,11 @@ mod tests {
         .unwrap();
         fb.flush().unwrap();
 
-        let ev_b = recv_matching(&mut rx, Duration::from_secs(2), |e| {
-            matches!(e, ServerEvent::HistoryAppend { session_id, .. } if session_id == "sessB")
-        })
+        let ev_b = recv_matching(
+            &mut rx,
+            Duration::from_secs(2),
+            |e| matches!(e, ServerEvent::HistoryAppend { session_id, .. } if session_id == "sessB"),
+        )
         .await
         .expect("HistoryAppend B while A unwatched");
         if let ServerEvent::HistoryAppend { messages, .. } = ev_b {
@@ -1335,9 +1442,11 @@ mod tests {
         )
         .unwrap();
 
-        let ev = recv_matching(&mut rx, Duration::from_secs(2), |e| {
-            matches!(e, ServerEvent::SessionUpdated { session } if session.id == "dir_sess")
-        })
+        let ev = recv_matching(
+            &mut rx,
+            Duration::from_secs(2),
+            |e| matches!(e, ServerEvent::SessionUpdated { session } if session.id == "dir_sess"),
+        )
         .await
         .expect("SessionUpdated from WatchDirectory");
         if let ServerEvent::SessionUpdated { session } = ev {
@@ -1371,9 +1480,11 @@ mod tests {
         )
         .unwrap();
 
-        let ev = recv_matching(&mut rx, Duration::from_secs(3), |e| {
-            matches!(e, ServerEvent::SessionUpdated { session } if session.id == "late")
-        })
+        let ev = recv_matching(
+            &mut rx,
+            Duration::from_secs(3),
+            |e| matches!(e, ServerEvent::SessionUpdated { session } if session.id == "late"),
+        )
         .await
         .expect("SessionUpdated for late-created Claude root");
         if let ServerEvent::SessionUpdated { session } = ev {
@@ -1412,9 +1523,11 @@ mod tests {
         )
         .unwrap();
 
-        let ev = recv_matching(&mut rx, Duration::from_secs(3), |e| {
-            matches!(e, ServerEvent::SessionUpdated { session } if session.id == "late-agy-1")
-        })
+        let ev = recv_matching(
+            &mut rx,
+            Duration::from_secs(3),
+            |e| matches!(e, ServerEvent::SessionUpdated { session } if session.id == "late-agy-1"),
+        )
         .await
         .expect("SessionUpdated for late-created .multibot/history root");
         if let ServerEvent::SessionUpdated { session } = ev {
@@ -1476,7 +1589,9 @@ mod tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, rx.recv()).await {
             if let ServerEvent::HistoryAppend { messages, .. } = ev
-                && messages.iter().any(|m| m.id == "sentinel" && m.text == "FINAL_SENTINEL")
+                && messages
+                    .iter()
+                    .any(|m| m.id == "sentinel" && m.text == "FINAL_SENTINEL")
             {
                 saw_sentinel = true;
                 break;
@@ -1646,8 +1761,7 @@ mod tests {
         let line_1_5m = format!(
             "{{\"type\":\"user\",\"uuid\":\"u-1_5m\",\"message\":{{\"content\":[{{\"type\":\"image\",\"source\":{{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"{b64_1_5m}\"}}}}]}}}}\n"
         );
-        let line_follow =
-            "{\"type\":\"assistant\",\"uuid\":\"a-follow\",\"message\":{\"content\":\"AFTER_B64\"}}\n";
+        let line_follow = "{\"type\":\"assistant\",\"uuid\":\"a-follow\",\"message\":{\"content\":\"AFTER_B64\"}}\n";
         {
             let mut f = OpenOptions::new().append(true).open(&path).unwrap();
             f.write_all(line_1_5m.as_bytes()).unwrap();
@@ -1686,8 +1800,14 @@ mod tests {
                 }
             }
         }
-        assert!(saw_1_5m, "1.5 MiB Anthropic base64 line must stream via HistoryAppend");
-        assert!(saw_follow, "follow-up line after 1.5 MiB base64 must stream via HistoryAppend");
+        assert!(
+            saw_1_5m,
+            "1.5 MiB Anthropic base64 line must stream via HistoryAppend"
+        );
+        assert!(
+            saw_follow,
+            "follow-up line after 1.5 MiB base64 must stream via HistoryAppend"
+        );
 
         wm.unwatch_session(None);
         let _ = fs::remove_dir_all(&home);

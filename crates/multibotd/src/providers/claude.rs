@@ -81,8 +81,13 @@ pub fn format_claude_model(raw: &str) -> String {
 }
 
 enum UserCleanOutcome {
-    Drop { interrupted: bool },
-    Keep { text: String, quoted_id: Option<String> },
+    Drop {
+        interrupted: bool,
+    },
+    Keep {
+        text: String,
+        quoted_id: Option<String>,
+    },
 }
 
 fn clean_claude_user_text(raw: &str) -> UserCleanOutcome {
@@ -128,13 +133,17 @@ fn clean_claude_user_text(raw: &str) -> UserCleanOutcome {
             Regex::new(r"(?s)<command-name>\s*(.*?)\s*</command-name>")
                 .expect("valid command-name regex")
         });
-        re.captures(&text).and_then(|c| c.get(1)).map(|m| m.as_str().trim().to_string())
+        re.captures(&text)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().trim().to_string())
     } else if text.contains("<command-message>") {
         let re = CMD_MSG_RE.get_or_init(|| {
             Regex::new(r"(?s)<command-message>\s*(.*?)\s*</command-message>")
                 .expect("valid command-message regex")
         });
-        re.captures(&text).and_then(|c| c.get(1)).map(|m| m.as_str().trim().to_string())
+        re.captures(&text)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().trim().to_string())
     } else {
         None
     };
@@ -146,8 +155,7 @@ fn clean_claude_user_text(raw: &str) -> UserCleanOutcome {
             cmd.insert(0, '/');
         }
         let args_re = CMD_ARGS_RE.get_or_init(|| {
-            Regex::new(r"(?s)<command-args>(.*?)</command-args>")
-                .expect("valid command-args regex")
+            Regex::new(r"(?s)<command-args>(.*?)</command-args>").expect("valid command-args regex")
         });
         let mention_re = MENTION_NOTE_RE.get_or_init(|| {
             Regex::new(
@@ -243,8 +251,14 @@ fn extract_claude_input_diff(name: &str, input: &Value) -> Option<DiffBlock> {
             build_diff_block(path, lines)
         }
         "edit" => {
-            let old = input.get("old_string").and_then(Value::as_str).unwrap_or("");
-            let new = input.get("new_string").and_then(Value::as_str).unwrap_or("");
+            let old = input
+                .get("old_string")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let new = input
+                .get("new_string")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let lines = compute_unified_diff_lines(old, new, 1);
             build_diff_block(path, lines)
         }
@@ -554,10 +568,9 @@ impl ClaudeProvider {
                                             &tool_text(output_raw),
                                             MAX_TOOL_DETAIL_CHARS,
                                         );
-                                        let is_error = part
-                                            .get("is_error")
-                                            .and_then(Value::as_bool)
-                                            == Some(true);
+                                        let is_error =
+                                            part.get("is_error").and_then(Value::as_bool)
+                                                == Some(true);
                                         let status = if is_error {
                                             ToolStatus::Error
                                         } else {
@@ -567,8 +580,7 @@ impl ClaudeProvider {
 
                                         if let Some(tref) = open_tools.remove(tool_use_id) {
                                             if tref.is_task_create
-                                                && let Some(ref internal_id) =
-                                                    tref.task_internal_id
+                                                && let Some(ref internal_id) = tref.task_internal_id
                                                 && let Some(returned_id) =
                                                     extract_task_id_from_output(&output_text)
                                                 && let Some(entry) = task_entries
@@ -894,17 +906,17 @@ impl ClaudeProvider {
                                                     }
                                                     is_task_create = true;
                                                     task_internal_id = Some(tid);
-                                                    parsed.todos = task_entries_to_todos(&task_entries);
+                                                    parsed.todos =
+                                                        task_entries_to_todos(&task_entries);
                                                     msg_todos = parsed.todos.clone();
                                                 }
                                             }
                                             "TaskUpdate" => {
-                                                if let Some(tid) = input
-                                                    .get("taskId")
-                                                    .and_then(|v| {
-                                                        v.as_str()
-                                                            .map(String::from)
-                                                            .or_else(|| v.as_u64().map(|n| n.to_string()))
+                                                if let Some(tid) =
+                                                    input.get("taskId").and_then(|v| {
+                                                        v.as_str().map(String::from).or_else(|| {
+                                                            v.as_u64().map(|n| n.to_string())
+                                                        })
                                                     })
                                                 {
                                                     let status_str = input
@@ -913,8 +925,9 @@ impl ClaudeProvider {
                                                         .unwrap_or("");
                                                     if status_str.eq_ignore_ascii_case("deleted") {
                                                         task_entries.retain(|t| t.id != tid);
-                                                    } else if let Some(entry) =
-                                                        task_entries.iter_mut().find(|t| t.id == tid)
+                                                    } else if let Some(entry) = task_entries
+                                                        .iter_mut()
+                                                        .find(|t| t.id == tid)
                                                     {
                                                         if !status_str.is_empty() {
                                                             entry.status =
@@ -930,7 +943,8 @@ impl ClaudeProvider {
                                                                 sanitize_todo_content(subj);
                                                         }
                                                     }
-                                                    parsed.todos = task_entries_to_todos(&task_entries);
+                                                    parsed.todos =
+                                                        task_entries_to_todos(&task_entries);
                                                     msg_todos = parsed.todos.clone();
                                                 }
                                             }
@@ -1063,7 +1077,10 @@ fn is_filtered_claude_entry(val: &Value) -> bool {
     val.get("isSidechain").and_then(Value::as_bool) == Some(true)
         || val.get("isMeta").and_then(Value::as_bool) == Some(true)
         || val.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
-        || val.get("isVisibleInTranscriptOnly").and_then(Value::as_bool) == Some(true)
+        || val
+            .get("isVisibleInTranscriptOnly")
+            .and_then(Value::as_bool)
+            == Some(true)
 }
 
 enum ClaudeImagePart {
@@ -1144,9 +1161,8 @@ fn task_entries_to_todos(entries: &[TaskEntry]) -> Vec<TodoItem> {
 
 fn extract_task_id_from_output(output: &str) -> Option<String> {
     static TASK_ID_RE: OnceLock<Regex> = OnceLock::new();
-    let re = TASK_ID_RE.get_or_init(|| {
-        Regex::new(r"(?i)task\s*#?(\d+)").expect("valid task id regex")
-    });
+    let re =
+        TASK_ID_RE.get_or_init(|| Regex::new(r"(?i)task\s*#?(\d+)").expect("valid task id regex"));
     re.captures(output)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string())
@@ -1182,7 +1198,10 @@ mod tests {
             Some("0123456789abcdef")
         );
         assert_eq!(parsed.messages[1].id, "u2");
-        assert_eq!(parsed.messages[1].text, "> quoted line\n\n/review check this");
+        assert_eq!(
+            parsed.messages[1].text,
+            "> quoted line\n\n/review check this"
+        );
         assert_eq!(parsed.messages[2].id, "u4");
         assert_eq!(parsed.messages[2].text, "follow up");
         // Final line was interrupt marker -> tail_activity must be Idle!
@@ -1295,12 +1314,21 @@ mod tests {
         assert!(msg.blocks.iter().any(|b| matches!(b, MessageBlock::Image { url: Some(u), .. } if u == "https://example.com/screen.png")));
 
         // Verify Edit tool_use paired with Completed, diff, summary +2 -1, base64 scrubbed
-        let edit_blk = msg.blocks.iter().find_map(|b| match b {
-            MessageBlock::ToolUse { call_id, summary, status, diff, output, .. } if call_id == "call_edit" => {
-                Some((summary, status, diff, output))
-            }
-            _ => None,
-        }).unwrap();
+        let edit_blk = msg
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                MessageBlock::ToolUse {
+                    call_id,
+                    summary,
+                    status,
+                    diff,
+                    output,
+                    ..
+                } if call_id == "call_edit" => Some((summary, status, diff, output)),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(edit_blk.0, "Edited main.rs +2 -1");
         assert_eq!(*edit_blk.1, ToolStatus::Completed);
         assert_eq!(edit_blk.2.as_ref().unwrap().added, 2);
@@ -1308,22 +1336,38 @@ mod tests {
         assert!(edit_blk.3.as_deref().unwrap().contains("[image omitted]"));
 
         // Verify Bash error & 4000-char cap
-        let bash_blk = msg.blocks.iter().find_map(|b| match b {
-            MessageBlock::ToolUse { call_id, summary, status, detail, .. } if call_id == "call_bash" => {
-                Some((summary, status, detail))
-            }
-            _ => None,
-        }).unwrap();
+        let bash_blk = msg
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                MessageBlock::ToolUse {
+                    call_id,
+                    summary,
+                    status,
+                    detail,
+                    ..
+                } if call_id == "call_bash" => Some((summary, status, detail)),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(bash_blk.0, "Ran Run tests");
         assert_eq!(*bash_blk.1, ToolStatus::Error);
         assert_eq!(bash_blk.2.chars().count(), MAX_TOOL_DETAIL_CHARS);
         assert!(!bash_blk.2.contains("[image omitted]"));
 
         // Verify ONLY call_q_open emitted as QuestionPrompt (call_q_done was answered)
-        let q_prompts: Vec<_> = msg.blocks.iter().filter_map(|b| match b {
-            MessageBlock::QuestionPrompt { prompt_id, provider, questions } => Some((prompt_id, provider, questions)),
-            _ => None,
-        }).collect();
+        let q_prompts: Vec<_> = msg
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                MessageBlock::QuestionPrompt {
+                    prompt_id,
+                    provider,
+                    questions,
+                } => Some((prompt_id, provider, questions)),
+                _ => None,
+            })
+            .collect();
         assert_eq!(q_prompts.len(), 1);
         assert_eq!(q_prompts[0].0, "call_q_open");
         assert_eq!(q_prompts[0].1, "claude");
@@ -1332,9 +1376,15 @@ mod tests {
 
     #[test]
     fn claude_task_create_and_update_and_model_formatting() {
-        assert_eq!(format_claude_model("claude-sonnet-4-5-20250929"), "Sonnet 4.5");
+        assert_eq!(
+            format_claude_model("claude-sonnet-4-5-20250929"),
+            "Sonnet 4.5"
+        );
         assert_eq!(format_claude_model("claude-haiku-3-5"), "Haiku 3.5");
-        assert_eq!(sanitize_claude_project_dir("/home/user/my-app"), "-home-user-my-app");
+        assert_eq!(
+            sanitize_claude_project_dir("/home/user/my-app"),
+            "-home-user-my-app"
+        );
 
         let lines = vec![
             json!({
@@ -1359,10 +1409,8 @@ mod tests {
 
     #[test]
     fn parses_claude_jsonl_messages_slice1_compat() {
-        let dir = std::env::temp_dir().join(format!(
-            "multibotd-claude-compat-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("multibotd-claude-compat-{}", std::process::id()));
         let proj = dir.join(".claude").join("projects").join("demo");
         fs::create_dir_all(&proj).unwrap();
         let path = proj.join("abc123.jsonl");
@@ -1419,12 +1467,18 @@ mod tests {
         let parsed = ClaudeProvider.parse_slice(payload.as_bytes(), 0);
         assert_eq!(parsed.messages.len(), 2);
 
-        assert_eq!(parsed.messages[0].text, "Check screenshot: [image omitted] done");
+        assert_eq!(
+            parsed.messages[0].text,
+            "Check screenshot: [image omitted] done"
+        );
         assert!(parsed.messages[0].blocks.iter().any(|b| matches!(
             b,
             MessageBlock::Text { text } if text == "Check screenshot: [image omitted] done"
         )));
-        assert_eq!(parsed.messages[1].text, "Here is image: [image omitted] done");
+        assert_eq!(
+            parsed.messages[1].text,
+            "Here is image: [image omitted] done"
+        );
         assert!(parsed.messages[1].blocks.iter().any(|b| matches!(
             b,
             MessageBlock::Text { text } if text == "Here is image: [image omitted] done"
@@ -1472,10 +1526,8 @@ mod tests {
             json!({"type": "user", "uuid": "u2", "message": {"content": "Never mind, do X instead"}}),
             json!({"type": "assistant", "uuid": "a2", "message": {"content": [{"type": "text", "text": "Done with X!"}]}})
         );
-        let dir = std::env::temp_dir().join(format!(
-            "multibotd-claude-stale-q-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("multibotd-claude-stale-q-{}", std::process::id()));
         let proj = dir.join(".claude/projects/demo");
         fs::create_dir_all(&proj).unwrap();
         fs::write(proj.join("stale_q.jsonl"), &superseded_payload).unwrap();

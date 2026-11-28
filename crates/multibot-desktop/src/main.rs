@@ -29,17 +29,17 @@ mod voice;
 
 use app::{
     ArchiveSession, BrowseCommands, CaptureBrowserPane, CloseOverlay, CopyLatestCodeBlock,
-    DeleteSession, FindInChat, FocusBrowserPane, FontZoomIn, FontZoomOut, FontZoomReset,
-    InboxNext, InboxNextSplit, InboxPrev, InboxPrevSplit, JumpSession1, JumpSession2, JumpSession3,
-    JumpSession4, JumpSession5, JumpSession6, JumpSession7, JumpSession8, JumpSession9, JumpWorkspace1,
-    JumpWorkspace2, JumpWorkspace3, JumpWorkspace4, JumpWorkspace5, JumpWorkspace6, JumpWorkspace7,
-    JumpWorkspace8, JumpWorkspace9, MarkSessionUnread, MoveSessionDown, MoveSessionUp, MoveSessionWaiting,
-    MultibotView, NewSession, NewWindow, NextSession, NextWorkspace, OpenDissolved, OpenDone,
-    OpenHibernated, OpenInbox, OpenPalette, OpenShortcuts, OpenWorkspaces, PrevSession, PrevWorkspace,
-    ReconnectSession, RemindSession, RenameActiveSession, ReopenClosedSession, SnoozeWorkspace,
-    ToggleBrowserPane, ToggleFavorite, ToggleGroup, ToggleHibernateMode, ToggleInbox, ToggleSettings,
-    ToggleFullscreen, ToggleSidebar, ToggleTerminal, ToggleUnreadOnly, UndoWaiting, VoiceDictation,
-    WorkspaceViewAll,
+    DeleteSession, FindInChat, FocusBrowserPane, FontZoomIn, FontZoomOut, FontZoomReset, InboxNext,
+    InboxNextSplit, InboxPrev, InboxPrevSplit, JumpSession1, JumpSession2, JumpSession3,
+    JumpSession4, JumpSession5, JumpSession6, JumpSession7, JumpSession8, JumpSession9,
+    JumpWorkspace1, JumpWorkspace2, JumpWorkspace3, JumpWorkspace4, JumpWorkspace5, JumpWorkspace6,
+    JumpWorkspace7, JumpWorkspace8, JumpWorkspace9, MarkSessionUnread, MoveSessionDown,
+    MoveSessionUp, MoveSessionWaiting, MultibotView, NewSession, NewWindow, NextSession,
+    NextWorkspace, OpenDissolved, OpenDone, OpenHibernated, OpenInbox, OpenPalette, OpenShortcuts,
+    OpenWorkspaces, PrevSession, PrevWorkspace, ReconnectSession, RemindSession,
+    RenameActiveSession, ReopenClosedSession, SnoozeWorkspace, ToggleBrowserPane, ToggleFavorite,
+    ToggleFullscreen, ToggleGroup, ToggleHibernateMode, ToggleInbox, ToggleSettings, ToggleSidebar,
+    ToggleTerminal, ToggleUnreadOnly, UndoWaiting, VoiceDictation, WorkspaceViewAll,
     WorkspaceViewFavorites, WorkspaceViewFrequent,
 };
 use gpui_kit::{
@@ -293,9 +293,7 @@ fn main() {
         });
 
         // Signal update readiness ONLY AFTER GPUI/DXGI window creation succeeded!
-        if is_update_ready_launch
-            && let Ok(exe) = std::env::current_exe()
-        {
+        if is_update_ready_launch && let Ok(exe) = std::env::current_exe() {
             let _ = signal_update_ready(&exe);
             if let Some(exe_dir) = exe.parent().map(std::path::Path::to_path_buf) {
                 let updates_dir = MultibotSettings::updates_dir();

@@ -207,7 +207,10 @@ fn read_http_request(stream: &TcpStream) -> Option<RecordedRequest> {
 }
 
 fn write_http_response(stream: &mut TcpStream, resp: &MockResponse) -> std::io::Result<()> {
-    let mut head = format!("HTTP/1.1 {} {}\r\nConnection: close\r\n", resp.status, resp.reason);
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\nConnection: close\r\n",
+        resp.status, resp.reason
+    );
     let mut has_cl = false;
     for (k, v) in &resp.headers {
         if k.eq_ignore_ascii_case("content-length") {
@@ -348,7 +351,10 @@ fn update_state_default_is_idle_and_platform_stub_works() {
         PathBuf::from("/tmp/multibot-updates"),
         vec!["--gpu=software".into()],
     );
-    assert_eq!(platform.updates_dir(), PathBuf::from("/tmp/multibot-updates"));
+    assert_eq!(
+        platform.updates_dir(),
+        PathBuf::from("/tmp/multibot-updates")
+    );
     assert_eq!(platform.preserved_cli_args(), vec!["--gpu=software"]);
 
     let plan = SwapPlan {
@@ -821,8 +827,13 @@ fn check_update_manifest_happy_path_and_headers() {
         _ => MockResponse::status(404, "Not Found"),
     });
 
-    let (_zip, manifest, _info) =
-        make_valid_release_fixture(exe, daemon, &[], srv.url("/assets/multibot-windows-x64.zip"), "0.1.2");
+    let (_zip, manifest, _info) = make_valid_release_fixture(
+        exe,
+        daemon,
+        &[],
+        srv.url("/assets/multibot-windows-x64.zip"),
+        "0.1.2",
+    );
     *manifest_holder.lock().unwrap() = serde_json::to_string(&manifest).unwrap();
     *release_holder.lock().unwrap() = serde_json::json!({
         "tag_name": "v0.1.2",
@@ -856,7 +867,10 @@ fn check_update_manifest_happy_path_and_headers() {
             assert_eq!(release.version, "0.1.2");
             assert_eq!(release.tag, "v0.1.2");
             // CI note filtered out by notes filter.
-            assert_eq!(release.notes, vec!["Faster chat switching", "In-app updater"]);
+            assert_eq!(
+                release.notes,
+                vec!["Faster chat switching", "In-app updater"]
+            );
             assert_eq!(release.asset.sha256, manifest.windows_x64.sha256);
         }
         other => panic!("expected UpdateAvailable, got {other:?}"),
@@ -865,7 +879,10 @@ fn check_update_manifest_happy_path_and_headers() {
     let reqs = srv.recorded();
     assert_eq!(reqs.len(), 2);
     assert_eq!(reqs[0].method, "GET");
-    assert_eq!(reqs[0].headers.get("user-agent").map(String::as_str), Some("Multibot/0.1.0"));
+    assert_eq!(
+        reqs[0].headers.get("user-agent").map(String::as_str),
+        Some("Multibot/0.1.0")
+    );
     assert_eq!(
         reqs[0].headers.get("accept").map(String::as_str),
         Some("application/vnd.github+json")
@@ -896,8 +913,13 @@ fn check_update_fallback_to_sha256sums_when_manifest_missing() {
         _ => MockResponse::status(404, "Not Found"),
     });
 
-    let (zip_bytes, manifest, _) =
-        make_valid_release_fixture(exe, daemon, &[], srv.url("/assets/multibot-windows-x64.zip"), "0.2.0");
+    let (zip_bytes, manifest, _) = make_valid_release_fixture(
+        exe,
+        daemon,
+        &[],
+        srv.url("/assets/multibot-windows-x64.zip"),
+        "0.2.0",
+    );
     *sums_holder.lock().unwrap() = format!(
         "{}  multibot-windows-x64.zip\n{} *./multibot.exe\n{} multibotd-linux-x86_64\n",
         manifest.windows_x64.sha256,
@@ -1007,10 +1029,18 @@ fn check_update_skips_draft_prerelease_older_and_rejected_versions() {
 
     let srv = MockHttpServer::start(|req| {
         let json = match req.path.as_str() {
-            "/draft" => serde_json::json!({ "tag_name": "v0.2.0", "draft": true, "prerelease": false, "assets": [] }),
-            "/pre" => serde_json::json!({ "tag_name": "v0.2.0-rc.1", "draft": false, "prerelease": true, "assets": [] }),
-            "/older" => serde_json::json!({ "tag_name": "v0.1.0", "draft": false, "prerelease": false, "assets": [] }),
-            "/rejected" => serde_json::json!({ "tag_name": "v0.1.9", "draft": false, "prerelease": false, "assets": [] }),
+            "/draft" => {
+                serde_json::json!({ "tag_name": "v0.2.0", "draft": true, "prerelease": false, "assets": [] })
+            }
+            "/pre" => {
+                serde_json::json!({ "tag_name": "v0.2.0-rc.1", "draft": false, "prerelease": true, "assets": [] })
+            }
+            "/older" => {
+                serde_json::json!({ "tag_name": "v0.1.0", "draft": false, "prerelease": false, "assets": [] })
+            }
+            "/rejected" => {
+                serde_json::json!({ "tag_name": "v0.1.9", "draft": false, "prerelease": false, "assets": [] })
+            }
             _ => return MockResponse::status(404, "Not Found"),
         };
         MockResponse::ok_json(json.to_string())
@@ -1188,7 +1218,9 @@ fn redirect_relative_and_allowed_multi_hop_succeeds() {
     let dir = TempTestDir::new("redirect-ok");
     let srv = MockHttpServer::start(|req| match req.path.as_str() {
         "/start" => MockResponse::status(302, "Found").with_header("Location", "/hop1"),
-        "/hop1" => MockResponse::status(307, "Temporary Redirect").with_header("Location", "/final"),
+        "/hop1" => {
+            MockResponse::status(307, "Temporary Redirect").with_header("Location", "/final")
+        }
         "/final" => MockResponse::status(304, "Not Modified"),
         _ => MockResponse::status(404, "Not Found"),
     });
@@ -1209,8 +1241,10 @@ fn redirect_to_disallowed_host_blocked_before_connect() {
     let srv = MockHttpServer::start(|req| match req.path.as_str() {
         "/evil" => MockResponse::status(302, "Found")
             .with_header("Location", "https://evil.example.com/payload.zip"),
-        "/raw" => MockResponse::status(302, "Found")
-            .with_header("Location", "https://raw.githubusercontent.com/a/b/main/c.zip"),
+        "/raw" => MockResponse::status(302, "Found").with_header(
+            "Location",
+            "https://raw.githubusercontent.com/a/b/main/c.zip",
+        ),
         _ => MockResponse::status(404, "Not Found"),
     });
 
@@ -1250,9 +1284,8 @@ fn redirect_does_not_leak_api_headers_cross_origin() {
     let target_srv = Arc::clone(&target_url);
 
     let srv = MockHttpServer::start(move |req| match req.path.as_str() {
-        "/origin-a" => {
-            MockResponse::status(302, "Found").with_header("Location", target_srv.lock().unwrap().clone())
-        }
+        "/origin-a" => MockResponse::status(302, "Found")
+            .with_header("Location", target_srv.lock().unwrap().clone()),
         "/origin-b" => MockResponse::status(304, "Not Modified"),
         _ => MockResponse::status(404, "Not Found"),
     });
@@ -1306,7 +1339,10 @@ fn download_and_stage_happy_path_progress_and_allowlist_filtering() {
     let (zip_bytes, _manifest, info) = make_valid_release_fixture(
         &exe_bytes,
         &daemon_bytes,
-        &[("README.txt", b"benign extra file that must not be extracted")],
+        &[(
+            "README.txt",
+            b"benign extra file that must not be extracted",
+        )],
         srv.url("/download"),
         "0.2.1",
     );
@@ -1331,7 +1367,10 @@ fn download_and_stage_happy_path_progress_and_allowlist_filtering() {
     assert_eq!(prev, zip_bytes.len() as u64);
 
     assert_eq!(fs::read(&staged.multibot_exe_path).unwrap(), exe_bytes);
-    assert_eq!(fs::read(&staged.multibotd_linux_path).unwrap(), daemon_bytes);
+    assert_eq!(
+        fs::read(&staged.multibotd_linux_path).unwrap(),
+        daemon_bytes
+    );
     // Non-allowlisted README.txt must NOT be extracted, and archive.zip.part must be removed.
     assert!(!staged.staging_dir.join("README.txt").exists());
     assert!(!staged.staging_dir.join("archive.zip.part").exists());
@@ -1430,7 +1469,8 @@ fn extract_rejects_binary_sha256_mismatch_and_cleans_staging() {
 
     let zip_holder = Arc::new(Mutex::new(Vec::<u8>::new()));
     let zip_srv = Arc::clone(&zip_holder);
-    let srv = MockHttpServer::start(move |_| MockResponse::ok_bytes(zip_srv.lock().unwrap().clone()));
+    let srv =
+        MockHttpServer::start(move |_| MockResponse::ok_bytes(zip_srv.lock().unwrap().clone()));
 
     let (zip_bytes, _manifest, mut info) =
         make_valid_release_fixture(exe_bytes, daemon_bytes, &[], srv.url("/z"), "0.2.0");
@@ -1496,8 +1536,8 @@ fn extract_rejects_zip_slip_and_symlink_and_duplicate_and_missing_binary() {
             ]),
         )
         .unwrap();
-        let err = extract_and_verify_archive(&dup_zip, dir.path(), &exe_sha, &daemon_sha)
-            .unwrap_err();
+        let err =
+            extract_and_verify_archive(&dup_zip, dir.path(), &exe_sha, &daemon_sha).unwrap_err();
         assert!(
             err.to_string().contains("duplicate or shadowed"),
             "expected duplicate/shadowed error for {shadowed:?}, got: {err}"
@@ -1516,10 +1556,8 @@ fn extract_rejects_zip_bomb_exceeding_uncompressed_cap() {
     // 64 KiB of zeros compresses to ~100 bytes, well below 4 KiB zip size, but explodes past 4 KiB uncompressed cap!
     let zeros = vec![0u8; 64 * 1024];
     let daemon = b"\x7fELF-small";
-    let zip_bytes = make_deflated_zip_bytes(&[
-        ("multibot.exe", &zeros),
-        ("multibotd-linux-x86_64", daemon),
-    ]);
+    let zip_bytes =
+        make_deflated_zip_bytes(&[("multibot.exe", &zeros), ("multibotd-linux-x86_64", daemon)]);
     assert!(
         zip_bytes.len() < 4096,
         "zip bomb fixture should be tiny compressed"
@@ -1559,12 +1597,7 @@ fn build_relaunch_args_preserves_gpu_and_strips_update_ready_and_version() {
     let args = build_relaunch_args(&preserved);
     assert_eq!(
         args,
-        vec![
-            "--gpu=software",
-            "--gpu",
-            "luid:0x1234",
-            UPDATE_READY_ARG,
-        ]
+        vec!["--gpu=software", "--gpu", "luid:0x1234", UPDATE_READY_ARG,]
     );
 }
 
@@ -1908,7 +1941,11 @@ fn atomic_swapper_rolls_back_and_records_rejected_on_spawn_error_or_readiness_ti
             launcher: MockLauncher::spawn_err("OS refused to spawn"),
         };
 
-        assert!(AtomicSwapper::new(200).apply_staged_update(&platform, &staged).is_err());
+        assert!(
+            AtomicSwapper::new(200)
+                .apply_staged_update(&platform, &staged)
+                .is_err()
+        );
         assert_eq!(fs::read(&current_exe).unwrap(), b"good-exe");
         assert_eq!(fs::read(&current_daemon).unwrap(), b"good-daemon");
         assert!(is_version_rejected(&updates_dir, "0.2.5").unwrap());
@@ -1951,7 +1988,11 @@ fn atomic_swapper_rolls_back_and_records_rejected_on_spawn_error_or_readiness_ti
             launcher: MockLauncher::ok(777, false),
         };
 
-        assert!(AtomicSwapper::new(200).apply_staged_update(&platform, &staged).is_err());
+        assert!(
+            AtomicSwapper::new(200)
+                .apply_staged_update(&platform, &staged)
+                .is_err()
+        );
         assert_eq!(fs::read(&current_exe).unwrap(), b"good-exe");
         assert_eq!(fs::read(&current_daemon).unwrap(), b"good-daemon");
         assert!(is_version_rejected(&updates_dir, "0.2.6").unwrap());
@@ -1965,12 +2006,20 @@ fn readiness_marker_signal_and_verify_roundtrip() {
     fs::write(&exe_path, b"exe").unwrap();
 
     // Without marker -> verify_readiness times out quickly as false.
-    assert!(!DefaultProcessLauncher.verify_readiness(&exe_path, 40).unwrap());
+    assert!(
+        !DefaultProcessLauncher
+            .verify_readiness(&exe_path, 40)
+            .unwrap()
+    );
 
     // After signal_update_ready -> verify_readiness returns true and deletes marker.
     signal_update_ready(&exe_path).unwrap();
     assert!(readiness_marker_path(&exe_path).exists());
-    assert!(DefaultProcessLauncher.verify_readiness(&exe_path, 200).unwrap());
+    assert!(
+        DefaultProcessLauncher
+            .verify_readiness(&exe_path, 200)
+            .unwrap()
+    );
     assert!(!readiness_marker_path(&exe_path).exists());
 }
 
@@ -2023,7 +2072,10 @@ fn ci_emitted_update_manifest_parses_and_passes_notes_filter() {
     assert_eq!(parsed.schema_version, MANIFEST_SCHEMA_VERSION);
     assert_eq!(parsed.version, "0.1.42");
     assert_eq!(parsed.tag, "v0.1.42");
-    assert!(is_allowed_https_url_with_local(&parsed.windows_x64.url, false));
+    assert!(is_allowed_https_url_with_local(
+        &parsed.windows_x64.url,
+        false
+    ));
     assert_eq!(
         filter_plain_english_notes(&parsed.notes),
         vec!["Performance and stability improvements"]
@@ -2247,13 +2299,9 @@ fn extract_and_verify_archive_direct_call_cleans_up_unverified_files_on_error() 
     assert!(!staging.join("multibotd-linux-x86_64").exists());
 
     // Case 2: valid multibot.exe hash, tampered daemon hash -> Err and BOTH files removed!
-    let err2 = extract_and_verify_archive(
-        &zip_path,
-        &staging,
-        &sha256_hex(exe_bytes),
-        &"f".repeat(64),
-    )
-    .unwrap_err();
+    let err2 =
+        extract_and_verify_archive(&zip_path, &staging, &sha256_hex(exe_bytes), &"f".repeat(64))
+            .unwrap_err();
     assert!(err2.to_string().contains("SHA-256 mismatch"));
     assert!(
         !staging.join("multibot.exe").exists(),
@@ -2293,41 +2341,25 @@ fn rate_limit_backoff_parses_rfc9110_imf_fixdate_retry_after() {
     // Wed, 21 Oct 2026 09:28:00 GMT == 1_792_574_880 Unix seconds;
     // at now = 1_792_567_680, delta is exactly 7200s (2 hours).
     assert_eq!(
-        parse_rate_limit_backoff(
-            Some("Wed, 21 Oct 2026 09:28:00 GMT"),
-            None,
-            1_792_567_680
-        ),
+        parse_rate_limit_backoff(Some("Wed, 21 Oct 2026 09:28:00 GMT"), None, 1_792_567_680),
         Duration::from_secs(7200)
     );
 
     // Past HTTP-date -> clamped to 900s (MIN_RATE_LIMIT_BACKOFF).
     assert_eq!(
-        parse_rate_limit_backoff(
-            Some("Wed, 21 Oct 2026 09:28:00 GMT"),
-            None,
-            1_792_580_000
-        ),
+        parse_rate_limit_backoff(Some("Wed, 21 Oct 2026 09:28:00 GMT"), None, 1_792_580_000),
         MIN_RATE_LIMIT_BACKOFF
     );
 
     // Far-future HTTP-date -> clamped to 24h (MAX_RATE_LIMIT_BACKOFF).
     assert_eq!(
-        parse_rate_limit_backoff(
-            Some("Sat, 24 Oct 2026 09:28:00 GMT"),
-            None,
-            1_792_567_680
-        ),
+        parse_rate_limit_backoff(Some("Sat, 24 Oct 2026 09:28:00 GMT"), None, 1_792_567_680),
         MAX_RATE_LIMIT_BACKOFF
     );
 
     // Leap day 2024-02-29 12:00:00 GMT == 1_709_208_000; at now = 1_709_204_400 -> 3600s.
     assert_eq!(
-        parse_rate_limit_backoff(
-            Some("Thu, 29 Feb 2024 12:00:00 GMT"),
-            None,
-            1_709_204_400
-        ),
+        parse_rate_limit_backoff(Some("Thu, 29 Feb 2024 12:00:00 GMT"), None, 1_709_204_400),
         Duration::from_secs(3600)
     );
 
@@ -2573,5 +2605,3 @@ fn zwsp_and_bom_duration_wording_are_rejected_without_disturbing_zwj_emoji_or_cl
     let expected: Vec<String> = clean_notes.iter().map(|s| (*s).to_string()).collect();
     assert_eq!(filtered, expected);
 }
-
-

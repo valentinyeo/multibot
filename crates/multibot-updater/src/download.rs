@@ -192,9 +192,7 @@ pub(crate) fn extract_and_verify_archive_with_limit(
                 .checked_add(entry_bytes)
                 .is_none_or(|t| t > max_uncompressed_bytes)
             {
-                bail!(
-                    "uncompressed zip entry exceeded maximum allowed size (zip bomb protection)"
-                );
+                bail!("uncompressed zip entry exceeded maximum allowed size (zip bomb protection)");
             }
             out_file.write_all(&buf[..n])?;
             hasher.update(&buf[..n]);
@@ -266,7 +264,10 @@ impl UpdateClient {
         // Pre-flight validation.
         let safe_ver = normalize_version(&release.version)?;
         if !is_allowed_https_url_with_local(&release.asset.url, self.config.allow_local_http) {
-            bail!("blocked disallowed release asset URL: {}", release.asset.url);
+            bail!(
+                "blocked disallowed release asset URL: {}",
+                release.asset.url
+            );
         }
         if release.asset.size_bytes > max_bytes {
             bail!(
@@ -314,8 +315,8 @@ impl UpdateClient {
         {
             bail!("update download Content-Length {len} exceeds maximum allowed size {max_bytes}");
         }
-        let bytes_total =
-            header_len.or_else(|| (release.asset.size_bytes > 0).then_some(release.asset.size_bytes));
+        let bytes_total = header_len
+            .or_else(|| (release.asset.size_bytes > 0).then_some(release.asset.size_bytes));
 
         let zip_path = staging_dir.join("archive.zip.part");
         {

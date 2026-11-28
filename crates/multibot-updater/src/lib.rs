@@ -18,8 +18,8 @@ pub use client::{
 pub use download::{download_and_stage_update, extract_and_verify_archive};
 pub use notes::{
     COLLAPSED_NOTES_LIMIT, MAX_STORED_NOTES, accumulate_release_notes,
-    contains_forbidden_duration_wording, filter_plain_english_notes,
-    has_forbidden_control_or_bidi, is_user_facing_note, parse_release_body_notes,
+    contains_forbidden_duration_wording, filter_plain_english_notes, has_forbidden_control_or_bidi,
+    is_user_facing_note, parse_release_body_notes,
 };
 pub use rejected::{
     REJECTED_FILENAME, is_version_rejected, read_rejected_versions, record_rejected_version,
@@ -27,10 +27,10 @@ pub use rejected::{
 };
 pub use security::{
     ALLOWED_ZIP_FILES, ENV_UPDATE_URL, MAX_METADATA_BYTES, MAX_REDIRECT_HOPS,
-    MAX_UPDATE_ARCHIVE_BYTES, decompress_gzip_limited, inspect_zip_entries,
-    is_allowed_https_url, is_allowed_https_url_with_local, is_newer_version,
-    is_safe_zip_entry_path, is_valid_sha256_hex, normalize_version, sanitize_update_url_override,
-    sha256_file, sha256_hex, update_url_override_from_env, verify_sha256_hex,
+    MAX_UPDATE_ARCHIVE_BYTES, decompress_gzip_limited, inspect_zip_entries, is_allowed_https_url,
+    is_allowed_https_url_with_local, is_newer_version, is_safe_zip_entry_path, is_valid_sha256_hex,
+    normalize_version, sanitize_update_url_override, sha256_file, sha256_hex,
+    update_url_override_from_env, verify_sha256_hex,
 };
 pub use swapper::{
     ApplyResult, AtomicSwapper, DEFAULT_READINESS_TIMEOUT_MS, DefaultFileSwapper,

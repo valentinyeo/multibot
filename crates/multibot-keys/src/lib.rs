@@ -1191,10 +1191,16 @@ mod tests {
     #[test]
     fn critical_legacy_chords_are_preserved() {
         assert_eq!(by_id("palette.open").unwrap().gpui_key, "ctrl-k");
-        assert_eq!(by_id("palette.open_global").unwrap().gpui_key, "ctrl-shift-k");
+        assert_eq!(
+            by_id("palette.open_global").unwrap().gpui_key,
+            "ctrl-shift-k"
+        );
         assert_eq!(by_id("inbox.open").unwrap().gpui_key, "alt-i");
         assert_eq!(by_id("inbox.toggle").unwrap().gpui_key, "ctrl-shift-i");
-        assert_eq!(by_id("view.sidebar_cycle").unwrap().gpui_key, "ctrl-shift-b");
+        assert_eq!(
+            by_id("view.sidebar_cycle").unwrap().gpui_key,
+            "ctrl-shift-b"
+        );
         assert_eq!(by_id("system.settings").unwrap().gpui_key, "ctrl-,");
         assert_eq!(by_id("system.shortcuts").unwrap().gpui_key, "f1");
         assert_eq!(by_id("system.new_window").unwrap().gpui_key, "ctrl-n");
@@ -1466,7 +1472,11 @@ mod tests {
         ];
         for &id in wired_slice34_ids {
             let spec = by_id(id).unwrap_or_else(|| panic!("missing shortcut {id}"));
-            assert!(spec.wired, "expected {id} ({}) to be wired: true", spec.gpui_key);
+            assert!(
+                spec.wired,
+                "expected {id} ({}) to be wired: true",
+                spec.gpui_key
+            );
         }
         for (id, key) in [
             ("browser.toggle", "alt-a"),

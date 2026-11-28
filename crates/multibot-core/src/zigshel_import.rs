@@ -92,9 +92,7 @@ pub fn import_zigshel_bundle_readonly(zigshel_dir: Option<&Path>) -> ZigShellImp
 }
 
 fn is_safe_ssh_token(s: &str) -> bool {
-    !s.is_empty()
-        && !s.starts_with('-')
-        && !s.chars().any(|c| c.is_whitespace() || c.is_control())
+    !s.is_empty() && !s.starts_with('-') && !s.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 fn is_regular_non_symlink_dir(path: &Path) -> bool {
@@ -237,10 +235,7 @@ pub fn import_zigshel_bundle_from_dir(dir: &Path) -> ZigShellImportBundle {
                     .map(str::to_string)
                     .unwrap_or_else(|| deterministic_ws_slug(&name, slot_idx));
                 let color = parse_zigshel_color(obj.get("color"));
-                let snoozed = obj
-                    .get("snoozed")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
+                let snoozed = obj.get("snoozed").and_then(Value::as_bool).unwrap_or(false);
                 let archived = obj
                     .get("archived")
                     .and_then(Value::as_bool)
@@ -462,15 +457,17 @@ pub fn merge_zigshel_bundle(
         }
     }
 
-    let sessions = bundle.sessions.iter().cloned().chain(
-        bundle.favorites.iter().map(|fav| ImportedSession {
+    let sessions = bundle
+        .sessions
+        .iter()
+        .cloned()
+        .chain(bundle.favorites.iter().map(|fav| ImportedSession {
             session_key: fav.session_key.clone(),
             title: fav.title.clone(),
             workspace_id: fav.workspace_id.clone(),
             favorite: true,
             ..Default::default()
-        }),
-    );
+        }));
     for session in sessions {
         if session.favorite && store.favorites.insert(session.session_key.clone()) {
             stats.favorites_added += 1;
@@ -1198,18 +1195,36 @@ mod tests {
             (STARRED_WORKSPACE_ID, &inputs[2].key),
         ] {
             let layout = store.compute_sidebar_layout_with_options(
-                workspace, WorkspaceView::All, &inputs, false, None, 1000,
+                workspace,
+                WorkspaceView::All,
+                &inputs,
+                false,
+                None,
+                1000,
             );
-            assert_eq!(layout.flat_display_order, vec![expected.clone()], "{workspace}");
+            assert_eq!(
+                layout.flat_display_order,
+                vec![expected.clone()],
+                "{workspace}"
+            );
         }
         assert_eq!(store.session_meta.len(), 4);
         let codex = &store.session_meta[&inputs[1].key];
         assert!(codex.pinned && codex.muted);
         assert!(store.inbox_excluded.contains(&inputs[1].key));
-        assert_eq!(store.effective_title(&inputs[1].key, "fallback"), "Ship Vstack");
+        assert_eq!(
+            store.effective_title(&inputs[1].key, "fallback"),
+            "Ship Vstack"
+        );
         assert!(store.session_meta[&inputs[2].key].starred_pinned);
-        assert_eq!(std::fs::read_to_string(dir.join("session.json")).unwrap(), session_json);
-        assert_eq!(std::fs::read_to_string(dir.join("ssh-key/servers.txt")).unwrap(), servers);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("session.json")).unwrap(),
+            session_json
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("ssh-key/servers.txt")).unwrap(),
+            servers
+        );
         std::fs::remove_dir_all(dir).unwrap();
         std::fs::remove_dir_all(state_dir).unwrap();
     }
@@ -1225,8 +1240,11 @@ mod tests {
                 "connected\t1\t22\t1000\tvps.example.com\tubuntu\tVPS Hetzner\t\n",
                 "connected\t1\t22\t1000\tVPS.EXAMPLE.COM\tUbuntu\tDuplicate Alias\t\n",
             ),
-        ).unwrap();
-        std::fs::write(dir.join("session.json"), r#"{"tabs":[
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("session.json"),
+            r#"{"tabs":[
             {"kind":"tmux", "csid":"zero"},
             {"kind":"vps", "csid":"vps-zero"},
             {"kind":"vps2", "csid":"one"},
@@ -1234,17 +1252,29 @@ mod tests {
             {"host":"Explicit Host", "tmux_host":1, "csid":"explicit-host"},
             {"tmux_host":"Named Host", "csid":"named-host"},
             {"kind":"local", "csid":"local"}
-        ]}"#).unwrap();
+        ]}"#,
+        )
+        .unwrap();
         let bundle = import_zigshel_bundle_from_dir(&dir);
         assert_eq!(bundle.hosts.len(), 1);
         assert_eq!(bundle.hosts[0].name, "VPS Hetzner");
-        let keys: Vec<_> = bundle.sessions.iter().map(|s| s.session_key.as_str()).collect();
-        assert_eq!(keys, vec![
-            "vps hetzner:claude:zero", "vps hetzner:claude:vps-zero",
-            "vps hetzner:claude:one", "vps hetzner:claude:explicit-one",
-            "explicit host:claude:explicit-host", "named host:claude:named-host",
-            "local:claude:local",
-        ]);
+        let keys: Vec<_> = bundle
+            .sessions
+            .iter()
+            .map(|s| s.session_key.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "vps hetzner:claude:zero",
+                "vps hetzner:claude:vps-zero",
+                "vps hetzner:claude:one",
+                "vps hetzner:claude:explicit-one",
+                "explicit host:claude:explicit-host",
+                "named host:claude:named-host",
+                "local:claude:local",
+            ]
+        );
         std::fs::remove_file(dir.join("ssh-key/servers.txt")).unwrap();
         let fallback = import_zigshel_bundle_from_dir(&dir);
         assert_eq!(fallback.sessions[0].session_key, "vps0:claude:zero");
@@ -1257,7 +1287,9 @@ mod tests {
     #[test]
     fn imports_agent_discriminants_before_session_name_heuristics() {
         let dir = unique_dir("agent-discriminants");
-        std::fs::write(dir.join("session.json"), r#"{"tabs":[
+        std::fs::write(
+            dir.join("session.json"),
+            r#"{"tabs":[
             {"agent":"codex", "ai_agent":1, "csid":"explicit"},
             {"ai_agent":1, "tmux_session":"codex-misleading", "csid":"claude"},
             {"ai_agent":2, "claude_session":true, "csid":"codex"},
@@ -1269,22 +1301,40 @@ mod tests {
             {"claude_session":true, "csid":"claude-old"},
             {"csid":"csid-only"},
             {"ai_agent":99, "tmux_session":"codex-unknown", "csid":"unknown"}
-        ]}"#).unwrap();
+        ]}"#,
+        )
+        .unwrap();
         let bundle = import_zigshel_bundle_from_dir(&dir);
-        let keys: Vec<_> = bundle.sessions.iter().map(|s| s.session_key.as_str()).collect();
-        assert_eq!(keys, vec![
-            "local:codex:explicit", "local:claude:claude", "local:codex:codex",
-            "local:pi:pi", "local:antigravity:antigravity", "local:codex:codex-old",
-            "local:antigravity:agy-old", "local:antigravity:agy-short",
-            "local:claude:claude-old", "local:claude:csid-only", "local:claude:unknown",
-        ]);
+        let keys: Vec<_> = bundle
+            .sessions
+            .iter()
+            .map(|s| s.session_key.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "local:codex:explicit",
+                "local:claude:claude",
+                "local:codex:codex",
+                "local:pi:pi",
+                "local:antigravity:antigravity",
+                "local:codex:codex-old",
+                "local:antigravity:agy-old",
+                "local:antigravity:agy-short",
+                "local:claude:claude-old",
+                "local:claude:csid-only",
+                "local:claude:unknown",
+            ]
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn imports_workspace_precedence_and_preserves_existing_choices_on_reimport() {
         let dir = unique_dir("workspace-precedence");
-        std::fs::write(dir.join("session.json"), r#"{
+        std::fs::write(
+            dir.join("session.json"),
+            r#"{
             "workspaces":[{"wid":"legacy-general", "name":"GENERAL"},
                           {"wid":"WORK", "name":"Legacy Work"}],
             "tabs":[
@@ -1296,29 +1346,67 @@ mod tests {
                 {"csid":"fallback", "workspace":99},
                 {"csid":"invalid", "workspace_id":"missing"}
             ]
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         let bundle = import_zigshel_bundle_from_dir(&dir);
-        assert_eq!(bundle.sessions[0].workspace_id.as_deref(), Some("legacy-general"));
+        assert_eq!(
+            bundle.sessions[0].workspace_id.as_deref(),
+            Some("legacy-general")
+        );
         assert_eq!(bundle.sessions[1].workspace_id.as_deref(), Some("WORK"));
         assert_eq!(bundle.sessions[2].workspace_id.as_deref(), Some("WORK"));
-        assert_eq!(bundle.sessions[3].workspace_id.as_deref(), Some("legacy-general"));
+        assert_eq!(
+            bundle.sessions[3].workspace_id.as_deref(),
+            Some("legacy-general")
+        );
         assert_eq!(bundle.favorite_keys, vec!["local:claude:index"]);
         let mut store = WorkspaceStore::new();
         store.create_workspace("Work", None).unwrap();
         store.assign_session_workspace("local:claude:id", "general");
-        store.apply_session_rename("local:claude:id", "Keep my title").unwrap();
+        store
+            .apply_session_rename("local:claude:id", "Keep my title")
+            .unwrap();
         let first = merge_zigshel_bundle(&mut store, &bundle);
-        assert_eq!(first, ImportMergeStats {
-            workspaces_added: 0, favorites_added: 1, sessions_assigned: 3,
-        });
-        assert_eq!(store.session_meta["local:claude:index"].workspace_id.as_deref(), Some("work"));
-        assert_eq!(store.session_meta["local:claude:id"].workspace_id.as_deref(), Some("general"));
-        assert!(store.session_meta["local:claude:invalid"].workspace_id.is_none());
-        assert_eq!(store.effective_title("local:claude:omitted", "fallback"), "My title");
-        assert_eq!(store.effective_title("local:claude:id", "fallback"), "Keep my title");
+        assert_eq!(
+            first,
+            ImportMergeStats {
+                workspaces_added: 0,
+                favorites_added: 1,
+                sessions_assigned: 3,
+            }
+        );
+        assert_eq!(
+            store.session_meta["local:claude:index"]
+                .workspace_id
+                .as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            store.session_meta["local:claude:id"]
+                .workspace_id
+                .as_deref(),
+            Some("general")
+        );
+        assert!(
+            store.session_meta["local:claude:invalid"]
+                .workspace_id
+                .is_none()
+        );
+        assert_eq!(
+            store.effective_title("local:claude:omitted", "fallback"),
+            "My title"
+        );
+        assert_eq!(
+            store.effective_title("local:claude:id", "fallback"),
+            "Keep my title"
+        );
         assert!(store.session_titles["local:claude:omitted"].manual);
         let before = store.clone();
-        assert_eq!(merge_zigshel_bundle(&mut store, &bundle), ImportMergeStats::default());
+        assert_eq!(
+            merge_zigshel_bundle(&mut store, &bundle),
+            ImportMergeStats::default()
+        );
         assert_eq!(store, before);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1343,31 +1431,55 @@ mod tests {
         assert_eq!(stats.workspaces_added, 0);
         assert_eq!(stats.favorites_added, 1);
         assert_eq!(stats.sessions_assigned, 1);
-        assert_eq!(store.session_meta["vps hetzner:codex:rollout"].workspace_id.as_deref(), Some("general"));
-        assert_eq!(store.effective_title("vps hetzner:codex:rollout", "fallback"), "Favorite title");
-        assert_eq!(merge_zigshel_bundle(&mut store, &bundle), ImportMergeStats::default());
+        assert_eq!(
+            store.session_meta["vps hetzner:codex:rollout"]
+                .workspace_id
+                .as_deref(),
+            Some("general")
+        );
+        assert_eq!(
+            store.effective_title("vps hetzner:codex:rollout", "fallback"),
+            "Favorite title"
+        );
+        assert_eq!(
+            merge_zigshel_bundle(&mut store, &bundle),
+            ImportMergeStats::default()
+        );
     }
 
     #[test]
     fn imports_sessions_without_workspaces_and_deserializes_older_bundles() {
         let dir = unique_dir("sessions-only");
-        std::fs::write(dir.join("session.json"), r#"{"tabs":[
+        std::fs::write(
+            dir.join("session.json"),
+            r#"{"tabs":[
             {"csid":"ordinary", "name":"Named session", "favorite":false},
             {"csid":"untitled", "name":"   "},
             null, {"favorite":true}
-        ]}"#).unwrap();
+        ]}"#,
+        )
+        .unwrap();
         let bundle = import_zigshel_bundle_from_dir(&dir);
         assert_eq!(bundle.sessions.len(), 2);
         assert!(bundle.sessions[0].workspace_id.is_none());
         assert!(bundle.sessions[1].title.is_none());
         assert!(bundle.favorites.is_empty());
         let mut store = WorkspaceStore::new();
-        assert_eq!(merge_zigshel_bundle(&mut store, &bundle), ImportMergeStats::default());
+        assert_eq!(
+            merge_zigshel_bundle(&mut store, &bundle),
+            ImportMergeStats::default()
+        );
         assert_eq!(store.session_meta.len(), 2);
-        assert_eq!(store.effective_title("local:claude:ordinary", "fallback"), "Named session");
-        let old: ZigShellImportBundle = serde_json::from_str(r#"{
+        assert_eq!(
+            store.effective_title("local:claude:ordinary", "fallback"),
+            "Named session"
+        );
+        let old: ZigShellImportBundle = serde_json::from_str(
+            r#"{
             "hosts":[], "workspaces":[], "favorites":[], "favorite_keys":[], "source_files_read":[]
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         assert!(old.sessions.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1591,9 +1703,24 @@ mod tests {
 
         let bundle = import_zigshel_bundle_from_dir(&dir);
         assert_eq!(bundle.workspaces.len(), 3);
-        assert!(bundle.workspaces.iter().any(|w| w.id == "ws-main" && w.color.as_deref() == Some("#60A5FA")));
-        assert!(bundle.workspaces.iter().any(|w| w.id == "focus" && w.snoozed && w.color.as_deref() == Some("#F59E0B")));
-        assert!(bundle.workspaces.iter().any(|w| w.id == "ws-arch" && w.archived));
+        assert!(
+            bundle
+                .workspaces
+                .iter()
+                .any(|w| w.id == "ws-main" && w.color.as_deref() == Some("#60A5FA"))
+        );
+        assert!(
+            bundle
+                .workspaces
+                .iter()
+                .any(|w| w.id == "focus" && w.snoozed && w.color.as_deref() == Some("#F59E0B"))
+        );
+        assert!(
+            bundle
+                .workspaces
+                .iter()
+                .any(|w| w.id == "ws-arch" && w.archived)
+        );
         assert!(!bundle.workspaces.iter().any(|w| w.id == "decoy-ws"));
 
         assert_eq!(bundle.favorites.len(), 1);
@@ -1718,7 +1845,10 @@ mod tests {
 
         let snapshot = |root: &Path| -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
             let mut items = Vec::new();
-            for p in [root.join("session.json"), root.join("ssh-key").join("servers.txt")] {
+            for p in [
+                root.join("session.json"),
+                root.join("ssh-key").join("servers.txt"),
+            ] {
                 let bytes = std::fs::read(&p).unwrap();
                 let mtime = std::fs::metadata(&p).unwrap().modified().unwrap();
                 items.push((p, bytes, mtime));
@@ -1930,7 +2060,8 @@ mod tests {
     }
 
     #[test]
-    fn json_host_extraction_ignores_tabs_nested_decoys_and_zero_port_and_handles_uppercase_json_and_raw_favs() {
+    fn json_host_extraction_ignores_tabs_nested_decoys_and_zero_port_and_handles_uppercase_json_and_raw_favs()
+     {
         let dir = unique_dir("strict-json");
         std::fs::write(
             dir.join("SESSION.JSON"),
@@ -2080,7 +2211,11 @@ mod tests {
         symlink(&real_target, &symlink_root).unwrap();
 
         // Both without trailing slash and WITH trailing slash (and trailing /.) must be rejected
-        assert!(import_zigshel_bundle_from_dir(&symlink_root).hosts.is_empty());
+        assert!(
+            import_zigshel_bundle_from_dir(&symlink_root)
+                .hosts
+                .is_empty()
+        );
 
         let with_trailing_slash = PathBuf::from(format!("{}/", symlink_root.display()));
         assert!(

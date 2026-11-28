@@ -177,10 +177,13 @@ impl ChatOutbox {
     }
 
     pub fn mark_dispatched(&mut self, session_key: &str, entry_id: String) {
-        self.dispatching.insert(session_key.into(), OutboxDispatch {
-            entry_id,
-            seen_working: false,
-        });
+        self.dispatching.insert(
+            session_key.into(),
+            OutboxDispatch {
+                entry_id,
+                seen_working: false,
+            },
+        );
     }
 
     pub fn observe_working(&mut self, session_key: &str, working: bool) {
@@ -198,15 +201,31 @@ impl ChatOutbox {
     pub fn observe_server_event(&mut self, host: &str, event: &ServerEvent) {
         match event {
             ServerEvent::SessionUpdated { session } => {
-                self.observe_working(&Self::session_key(host, session.agent, &session.id), session.working);
+                self.observe_working(
+                    &Self::session_key(host, session.agent, &session.id),
+                    session.working,
+                );
             }
             ServerEvent::Sessions { sessions } => {
                 for session in sessions {
-                    self.observe_working(&Self::session_key(host, session.agent, &session.id), session.working);
+                    self.observe_working(
+                        &Self::session_key(host, session.agent, &session.id),
+                        session.working,
+                    );
                 }
             }
-            ServerEvent::HistoryAppend { session_id, working: Some(working), .. } => {
-                for agent in [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity, AgentKind::Pi, AgentKind::Cursor] {
+            ServerEvent::HistoryAppend {
+                session_id,
+                working: Some(working),
+                ..
+            } => {
+                for agent in [
+                    AgentKind::Claude,
+                    AgentKind::Codex,
+                    AgentKind::Antigravity,
+                    AgentKind::Pi,
+                    AgentKind::Cursor,
+                ] {
                     self.observe_working(&Self::session_key(host, agent, session_id), *working);
                 }
             }
@@ -214,7 +233,11 @@ impl ChatOutbox {
         }
     }
 
-    pub fn take_next_for_dispatch(&mut self, session_key: &str, working: bool) -> Option<OutboxEntry> {
+    pub fn take_next_for_dispatch(
+        &mut self,
+        session_key: &str,
+        working: bool,
+    ) -> Option<OutboxEntry> {
         if working || self.dispatching.contains_key(session_key) {
             return None;
         }
@@ -354,7 +377,10 @@ impl ChatOutbox {
             sanitized.push(entry);
         }
 
-        Self { entries: sanitized, ..Default::default() }
+        Self {
+            entries: sanitized,
+            ..Default::default()
+        }
     }
 }
 
@@ -372,8 +398,7 @@ fn write_outbox_atomic(target: &Path, bytes: &[u8]) -> Result<(), OutboxError> {
     let tmp_path = parent.join(format!(".{file_name}.tmp.{}.{seq}", std::process::id()));
 
     let write_res = (|| -> Result<(), OutboxError> {
-        let mut file =
-            File::create(&tmp_path).map_err(|err| OutboxError::Io(err.to_string()))?;
+        let mut file = File::create(&tmp_path).map_err(|err| OutboxError::Io(err.to_string()))?;
         file.write_all(bytes)
             .map_err(|err| OutboxError::Io(err.to_string()))?;
         file.flush()
@@ -423,20 +448,32 @@ mod tests {
 
     #[test]
     fn dispatch_waits_for_a_new_turn_and_duplicate_idle_events_do_not_drain_fifo() {
-        for agent in [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity, AgentKind::Pi, AgentKind::Cursor] {
+        for agent in [
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::Antigravity,
+            AgentKind::Pi,
+            AgentKind::Cursor,
+        ] {
             let mut outbox = ChatOutbox::default();
             let key = ChatOutbox::session_key("host", agent, "session");
             let first = outbox.enqueue(&key, "first", 1).unwrap();
             let second = outbox.enqueue(&key, "second", 2).unwrap();
             assert!(outbox.take_next_for_dispatch(&key, true).is_none());
-            assert_eq!(outbox.take_next_for_dispatch(&key, false).unwrap().id, first.id);
+            assert_eq!(
+                outbox.take_next_for_dispatch(&key, false).unwrap().id,
+                first.id
+            );
             for _ in 0..3 {
                 outbox.observe_working(&key, false);
                 assert!(outbox.take_next_for_dispatch(&key, false).is_none());
             }
             outbox.observe_working(&key, true);
             outbox.observe_working(&key, false);
-            assert_eq!(outbox.take_next_for_dispatch(&key, false).unwrap().id, second.id);
+            assert_eq!(
+                outbox.take_next_for_dispatch(&key, false).unwrap().id,
+                second.id
+            );
             assert!(outbox.take_next_for_dispatch(&key, false).is_none());
         }
     }
@@ -462,10 +499,8 @@ mod tests {
     impl TempDir {
         fn new(prefix: &str) -> Self {
             let n = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "multibot-{prefix}-{}-{n}",
-                std::process::id()
-            ));
+            let path =
+                std::env::temp_dir().join(format!("multibot-{prefix}-{}-{n}", std::process::id()));
             let _ = fs::remove_dir_all(&path);
             fs::create_dir_all(&path).unwrap();
             Self(path)
@@ -608,11 +643,7 @@ mod tests {
 
         // Wrong schema_version -> quarantined and returns empty.
         let wrong_ver = tmp.path().join("wrong-ver.json");
-        fs::write(
-            &wrong_ver,
-            r#"{"schema_version": 99, "entries": []}"#,
-        )
-        .unwrap();
+        fs::write(&wrong_ver, r#"{"schema_version": 99, "entries": []}"#).unwrap();
         assert!(ChatOutbox::load_from(&wrong_ver).is_empty());
         assert!(!wrong_ver.exists());
         assert!(tmp.path().join("wrong-ver.json.corrupt").exists());

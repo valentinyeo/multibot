@@ -44,7 +44,10 @@ pub fn sha256_file_prefix_12(path: &Path) -> Result<String> {
         .metadata()
         .with_context(|| format!("failed to stat daemon binary {}", path.display()))?;
     if !meta.is_file() {
-        bail!("daemon binary path is not a regular file: {}", path.display());
+        bail!(
+            "daemon binary path is not a regular file: {}",
+            path.display()
+        );
     }
     let mut reader = BufReader::with_capacity(64 * 1024, file);
     let mut hasher = Sha256::new();
@@ -283,7 +286,12 @@ pub fn hello_ack_needs_upgrade(
             daemon_version,
             binary_hash,
             ..
-        } => needs_remote_upgrade(daemon_version, binary_hash, expected_version, expected_sha12),
+        } => needs_remote_upgrade(
+            daemon_version,
+            binary_hash,
+            expected_version,
+            expected_sha12,
+        ),
         _ => false,
     }
 }
@@ -632,38 +640,92 @@ mod tests {
             remote_versioned_binary_path("0.1.5", &prefix),
             "~/.multibot/multibotd-0.1.5-2cf24dba5fb0"
         );
-        assert!(!needs_remote_upgrade("0.1.5", "2cf24dba5fb0", "0.1.5", "2cf24dba5fb0"));
-        assert!(needs_remote_upgrade("0.1.4", "2cf24dba5fb0", "0.1.5", "2cf24dba5fb0"));
-        assert!(needs_remote_upgrade("0.1.5", "aaaaaaaaaaaa", "0.1.5", "2cf24dba5fb0"));
+        assert!(!needs_remote_upgrade(
+            "0.1.5",
+            "2cf24dba5fb0",
+            "0.1.5",
+            "2cf24dba5fb0"
+        ));
+        assert!(needs_remote_upgrade(
+            "0.1.4",
+            "2cf24dba5fb0",
+            "0.1.5",
+            "2cf24dba5fb0"
+        ));
+        assert!(needs_remote_upgrade(
+            "0.1.5",
+            "aaaaaaaaaaaa",
+            "0.1.5",
+            "2cf24dba5fb0"
+        ));
         assert!(!needs_remote_upgrade("0.1.5", "", "0.1.5", ""));
     }
 
     #[test]
     fn newer_remote_daemon_is_not_downgraded() {
-        assert!(!needs_remote_upgrade("0.1.48", "aaaaaaaaaaaa", "0.1.47", "2cf24dba5fb0"));
+        assert!(!needs_remote_upgrade(
+            "0.1.48",
+            "aaaaaaaaaaaa",
+            "0.1.47",
+            "2cf24dba5fb0"
+        ));
     }
 
     #[test]
     fn older_remote_daemon_is_upgraded_even_with_matching_hash() {
-        assert!(needs_remote_upgrade("0.1.46", "2cf24dba5fb0", "0.1.47", "2cf24dba5fb0"));
-        assert!(needs_remote_upgrade("0.1.9", "2cf24dba5fb0", "0.1.47", "2cf24dba5fb0"));
+        assert!(needs_remote_upgrade(
+            "0.1.46",
+            "2cf24dba5fb0",
+            "0.1.47",
+            "2cf24dba5fb0"
+        ));
+        assert!(needs_remote_upgrade(
+            "0.1.9",
+            "2cf24dba5fb0",
+            "0.1.47",
+            "2cf24dba5fb0"
+        ));
     }
 
     #[test]
     fn same_version_daemon_is_refreshed_when_hash_differs() {
-        assert!(needs_remote_upgrade("0.1.47", "aaaaaaaaaaaa", "0.1.47", "2cf24dba5fb0"));
+        assert!(needs_remote_upgrade(
+            "0.1.47",
+            "aaaaaaaaaaaa",
+            "0.1.47",
+            "2cf24dba5fb0"
+        ));
     }
 
     #[test]
     fn same_version_daemon_is_kept_when_hash_matches() {
-        assert!(!needs_remote_upgrade("0.1.47", "2cf24dba5fb0", "0.1.47", "2cf24dba5fb0"));
+        assert!(!needs_remote_upgrade(
+            "0.1.47",
+            "2cf24dba5fb0",
+            "0.1.47",
+            "2cf24dba5fb0"
+        ));
     }
 
     #[test]
     fn invalid_versions_fall_back_to_hash_comparison() {
-        for (remote, expected) in [("invalid", "0.1.47"), ("0.1.47", "invalid"), ("invalid", "other")] {
-            assert!(needs_remote_upgrade(remote, "aaaaaaaaaaaa", expected, "2cf24dba5fb0"));
-            assert!(!needs_remote_upgrade(remote, "2cf24dba5fb0", expected, "2cf24dba5fb0"));
+        for (remote, expected) in [
+            ("invalid", "0.1.47"),
+            ("0.1.47", "invalid"),
+            ("invalid", "other"),
+        ] {
+            assert!(needs_remote_upgrade(
+                remote,
+                "aaaaaaaaaaaa",
+                expected,
+                "2cf24dba5fb0"
+            ));
+            assert!(!needs_remote_upgrade(
+                remote,
+                "2cf24dba5fb0",
+                expected,
+                "2cf24dba5fb0"
+            ));
             assert!(!needs_remote_upgrade(remote, "aaaaaaaaaaaa", expected, ""));
         }
     }
@@ -722,7 +784,10 @@ mod tests {
             "0123456789ag",
             "0123456;id #",
         ] {
-            assert!(validate_sha12(bad).is_err(), "expected invalid sha12: {bad:?}");
+            assert!(
+                validate_sha12(bad).is_err(),
+                "expected invalid sha12: {bad:?}"
+            );
         }
 
         // SSH host validation (valid DNS, IPv4, bracketed IPv6, valid/empty usernames)
@@ -995,11 +1060,27 @@ mod tests {
             binary_hash: hash.into(),
         };
 
-        assert!(!hello_ack_needs_upgrade(&ack("0.1.5", "0123456789ab"), "0.1.5", "0123456789ab"));
-        assert!(hello_ack_needs_upgrade(&ack("0.1.4", "0123456789ab"), "0.1.5", "0123456789ab"));
-        assert!(hello_ack_needs_upgrade(&ack("0.1.5", "ffffffffffff"), "0.1.5", "0123456789ab"));
+        assert!(!hello_ack_needs_upgrade(
+            &ack("0.1.5", "0123456789ab"),
+            "0.1.5",
+            "0123456789ab"
+        ));
+        assert!(hello_ack_needs_upgrade(
+            &ack("0.1.4", "0123456789ab"),
+            "0.1.5",
+            "0123456789ab"
+        ));
+        assert!(hello_ack_needs_upgrade(
+            &ack("0.1.5", "ffffffffffff"),
+            "0.1.5",
+            "0123456789ab"
+        ));
         // Older Slice 1 daemon with empty binary_hash upgrades when expected_sha12 is non-empty.
-        assert!(hello_ack_needs_upgrade(&ack("0.1.5", ""), "0.1.5", "0123456789ab"));
+        assert!(hello_ack_needs_upgrade(
+            &ack("0.1.5", ""),
+            "0.1.5",
+            "0123456789ab"
+        ));
         assert!(!hello_ack_needs_upgrade(&ack("0.1.5", ""), "0.1.5", ""));
         // Non-HelloAck events always return false.
         assert!(!hello_ack_needs_upgrade(
@@ -1087,8 +1168,14 @@ mod tests {
         let v1_target = remote_dir.join(remote_versioned_binary_name("0.1.1", &v1_sha));
         let symlink_path = remote_dir.join("multibotd");
 
-        assert_eq!(fs::metadata(&remote_dir).unwrap().permissions().mode() & 0o777, 0o700);
-        assert_eq!(fs::metadata(&v1_target).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            fs::metadata(&remote_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&v1_target).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         assert_eq!(fs::read(&v1_target).unwrap(), v1_bytes);
         assert_eq!(fs::read_link(&symlink_path).unwrap(), v1_target);
 
@@ -1111,8 +1198,7 @@ mod tests {
         assert!(v1_target.exists());
 
         // 4. Empty upload for v3 fails closed: v2 symlink untouched, v3 absent, zero .tmp.* left!
-        let spec_v3 =
-            DaemonDeploySpec::new(PathBuf::from("v3"), "0.1.3", "000000000000").unwrap();
+        let spec_v3 = DaemonDeploySpec::new(PathBuf::from("v3"), "0.1.3", "000000000000").unwrap();
         let upload_v3 = build_atomic_upload_command(&spec_v3).unwrap();
         assert!(!run_sh_with_stdin(&upload_v3, b"").success());
 

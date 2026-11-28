@@ -4,7 +4,9 @@ use crate::daemon_deploy::{
 };
 use crate::settings::SshHostConfig;
 use anyhow::{Context, Result, anyhow, bail};
-use multibot_proto::{AgentKind, ClientRequest, ServerEvent, build_version, decode_line, encode_line};
+use multibot_proto::{
+    AgentKind, ClientRequest, ServerEvent, build_version, decode_line, encode_line,
+};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -58,10 +60,7 @@ impl DaemonConnection {
                         format!("reading bundled daemon {}", local_bin.display())
                     })?;
                     if bytes.is_empty() {
-                        bail!(
-                            "bundled multibotd binary is empty: {}",
-                            local_bin.display()
-                        );
+                        bail!("bundled multibotd binary is empty: {}", local_bin.display());
                     }
                     let expected_version = build_version();
                     let expected_hash = sha256_prefix_12(&bytes);
@@ -308,11 +307,7 @@ impl DaemonConnection {
         })
     }
 
-    pub fn interrupt_session(
-        &self,
-        session_id: impl Into<String>,
-        agent: AgentKind,
-    ) -> Result<()> {
+    pub fn interrupt_session(&self, session_id: impl Into<String>, agent: AgentKind) -> Result<()> {
         self.send(ClientRequest::InterruptSession {
             session_id: session_id.into(),
             agent,
@@ -466,7 +461,10 @@ pub fn validate_ssh_host(host: &SshHostConfig) -> Result<()> {
         bail!("SSH port must be > 0");
     }
     if host.hostname.chars().any(char::is_control) {
-        bail!("SSH hostname contains control characters: {:?}", host.hostname);
+        bail!(
+            "SSH hostname contains control characters: {:?}",
+            host.hostname
+        );
     }
     if host.user.chars().any(char::is_control) {
         bail!("SSH user contains control characters: {:?}", host.user);
@@ -481,9 +479,10 @@ pub fn validate_ssh_host(host: &SshHostConfig) -> Result<()> {
     if hostname.contains('@') || hostname.contains("://") {
         bail!("SSH hostname must not contain '@' or URI scheme: {hostname:?}");
     }
-    if !hostname.bytes().all(|b| {
-        b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':' | b'[' | b']')
-    }) {
+    if !hostname
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':' | b'[' | b']'))
+    {
         bail!("SSH hostname contains disallowed characters: {hostname:?}");
     }
     let user = host.user.trim();
@@ -713,12 +712,9 @@ async fn ensure_remote_daemon_deployed(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     apply_no_window(&mut cmd);
-    let mut child = cmd.spawn().with_context(|| {
-        format!(
-            "spawning ssh upload for multibotd on {}",
-            host.ssh_target()
-        )
-    })?;
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("spawning ssh upload for multibotd on {}", host.ssh_target()))?;
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(bytes).await?;
@@ -811,32 +807,104 @@ mod tests {
         assert!(validate_ssh_host(&valid_with_key).is_ok());
 
         let bad_cases = [
-            SshHostConfig { port: 0, ..valid.clone() },
-            SshHostConfig { hostname: "".into(), ..valid.clone() },
-            SshHostConfig { hostname: "-oProxyCommand=evil".into(), ..valid.clone() },
-            SshHostConfig { user: "-oFoo".into(), ..valid.clone() },
-            SshHostConfig { hostname: "host name".into(), ..valid.clone() },
-            SshHostConfig { hostname: "host\nid".into(), ..valid.clone() },
-            SshHostConfig { user: "alice@bob".into(), ..valid.clone() },
-            SshHostConfig { hostname: "root@victim.com".into(), ..valid.clone() },
-            SshHostConfig { hostname: "ssh://attacker@host:9999".into(), ..valid.clone() },
-            SshHostConfig { hostname: "host;id".into(), ..valid.clone() },
-            SshHostConfig { hostname: "host$(id)".into(), ..valid.clone() },
-            SshHostConfig { hostname: "host`id`".into(), ..valid.clone() },
-            SshHostConfig { hostname: "host|cat".into(), ..valid.clone() },
-            SshHostConfig { hostname: "host&id".into(), ..valid.clone() },
-            SshHostConfig { user: "user'bad".into(), ..valid.clone() },
-            SshHostConfig { user: "user;id".into(), ..valid.clone() },
-            SshHostConfig { identity_file: Some("".into()), ..valid.clone() },
-            SshHostConfig { identity_file: Some("   ".into()), ..valid.clone() },
-            SshHostConfig { identity_file: Some("-oProxyCommand=evil".into()), ..valid.clone() },
-            SshHostConfig { identity_file: Some("/key\nProxyCommand=id".into()), ..valid.clone() },
-            SshHostConfig { identity_file: Some("/key\rfoo".into()), ..valid.clone() },
-            SshHostConfig { identity_file: Some("/key\0foo".into()), ..valid.clone() },
-            SshHostConfig { identity_file: Some("/key\tfoo".into()), ..valid.clone() },
+            SshHostConfig {
+                port: 0,
+                ..valid.clone()
+            },
+            SshHostConfig {
+                hostname: "".into(),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                hostname: "-oProxyCommand=evil".into(),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                user: "-oFoo".into(),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                hostname: "host name".into(),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                hostname: "host\nid".into(),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                user: "alice@bob".into(),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                hostname: "root@victim.com".into(),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                hostname: "ssh://attacker@host:9999".into(),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                hostname: "host;id".into(),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                hostname: "host$(id)".into(),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                hostname: "host`id`".into(),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                hostname: "host|cat".into(),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                hostname: "host&id".into(),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                user: "user'bad".into(),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                user: "user;id".into(),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                identity_file: Some("".into()),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                identity_file: Some("   ".into()),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                identity_file: Some("-oProxyCommand=evil".into()),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                identity_file: Some("/key\nProxyCommand=id".into()),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                identity_file: Some("/key\rfoo".into()),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                identity_file: Some("/key\0foo".into()),
+                ..valid.clone()
+            },
+            SshHostConfig {
+                identity_file: Some("/key\tfoo".into()),
+                ..valid.clone()
+            },
         ];
         for host in bad_cases {
-            assert!(validate_ssh_host(&host).is_err(), "expected rejection for {host:?}");
+            assert!(
+                validate_ssh_host(&host).is_err(),
+                "expected rejection for {host:?}"
+            );
         }
     }
 
@@ -856,16 +924,27 @@ mod tests {
         assert!(!exec_none.contains(&"-i".to_string()));
 
         let with_key = SshHostConfig {
-            identity_file: Some("  C:/Users/Example User/ZigShell/ssh-key/multibot_ed25519  ".into()),
+            identity_file: Some(
+                "  C:/Users/Example User/ZigShell/ssh-key/multibot_ed25519  ".into(),
+            ),
             ..base.clone()
         };
         for args in [
             build_ssh_daemon_args(&with_key).unwrap(),
             build_ssh_exec_args(&with_key, "true").unwrap(),
         ] {
-            let i_pos = args.iter().position(|a| a == "-i").expect("expected -i flag");
-            let dd_pos = args.iter().position(|a| a == "--").expect("expected -- delimiter");
-            assert!(i_pos + 1 < dd_pos, "-i <path> must appear before --: {args:?}");
+            let i_pos = args
+                .iter()
+                .position(|a| a == "-i")
+                .expect("expected -i flag");
+            let dd_pos = args
+                .iter()
+                .position(|a| a == "--")
+                .expect("expected -- delimiter");
+            assert!(
+                i_pos + 1 < dd_pos,
+                "-i <path> must appear before --: {args:?}"
+            );
             assert_eq!(
                 args[i_pos + 1],
                 "C:/Users/Example User/ZigShell/ssh-key/multibot_ed25519"
@@ -930,7 +1009,13 @@ mod tests {
                 .stderr(Stdio::null())
                 .spawn()
                 .unwrap();
-            trunc.stdin.take().unwrap().write_all(b"short").await.unwrap();
+            trunc
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"short")
+                .await
+                .unwrap();
             let trunc_st = trunc.wait().await.unwrap();
             assert!(!trunc_st.success());
             assert!(!fake_home.join(".multibot/multibotd").exists());
@@ -954,7 +1039,10 @@ mod tests {
                     .unwrap();
                 let hup_pid = hup_child.id().unwrap();
                 let mut hup_stdin = hup_child.stdin.take().unwrap();
-                hup_stdin.write_all(b"partial-bytes-before-hup").await.unwrap();
+                hup_stdin
+                    .write_all(b"partial-bytes-before-hup")
+                    .await
+                    .unwrap();
                 hup_stdin.flush().await.unwrap();
                 tokio::time::sleep(Duration::from_millis(60)).await;
                 let _ = Command::new("kill")
@@ -1043,7 +1131,11 @@ mod tests {
         assert_eq!(connects.load(Ordering::SeqCst), 1);
         assert_eq!(deploys.load(Ordering::SeqCst), 0);
         match conn.next_event().await.unwrap() {
-            ServerEvent::HelloAck { daemon_version, binary_hash, .. } => {
+            ServerEvent::HelloAck {
+                daemon_version,
+                binary_hash,
+                ..
+            } => {
                 assert_eq!(daemon_version, "0.1.5");
                 assert_eq!(binary_hash, "abcdef012345");
             }
@@ -1194,7 +1286,10 @@ mod tests {
         }
         assert_eq!(received.len(), 19);
         assert_eq!(received[0], ClientRequest::Ping { nonce: 42 });
-        assert_eq!(received[4], ClientRequest::UnwatchSession { session_id: None });
+        assert_eq!(
+            received[4],
+            ClientRequest::UnwatchSession { session_id: None }
+        );
         assert_eq!(received[6], ClientRequest::WatchDirectory);
         assert_eq!(received[7], ClientRequest::UnwatchDirectory);
         assert_eq!(

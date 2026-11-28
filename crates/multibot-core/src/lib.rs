@@ -8,8 +8,8 @@ pub mod daemon_deploy;
 pub mod footprint;
 pub mod outbox;
 pub mod settings;
-pub mod workspaces;
 pub mod voice;
+pub mod workspaces;
 pub mod zigshel_import;
 
 pub use daemon_client::{DaemonConnection, DaemonTarget};

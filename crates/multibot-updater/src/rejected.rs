@@ -62,7 +62,9 @@ pub fn is_version_rejected(updates_dir: &Path, version_or_tag: &str) -> Result<b
         return Ok(false);
     }
     let existing = read_rejected_versions(updates_dir)?;
-    Ok(existing.iter().any(|entry| canonical_entry(entry) == target))
+    Ok(existing
+        .iter()
+        .any(|entry| canonical_entry(entry) == target))
 }
 
 /// Persists `version_or_tag` (normalized SemVer without leading `v`) into `<updates_dir>/rejected.txt`

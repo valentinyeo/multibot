@@ -2,16 +2,16 @@ pub mod activity;
 pub mod antigravity;
 pub mod claude;
 pub mod codex;
-pub mod tmux;
 pub mod cursor;
 pub mod pi;
+pub mod tmux;
 
+use crate::server_workspaces::ServerWorkspaceIndex;
 use anyhow::Result;
 use multibot_proto::{
     AgentKind, ChatMessage, DiffBlock, EffortLevel, MessageBlock, MessageRole, PromptOption,
     PromptQuestion, SessionSummary, TodoItem, TodoStatus,
 };
-use crate::server_workspaces::ServerWorkspaceIndex;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -390,8 +390,8 @@ pub fn discover_all_sessions_with_ctx(
             // A daemon-owned history file is named after a hash, so the id it parses to is not
             // the session this daemon knows it by. Its exact path is the proof it is ours.
             // An archived chat is never shown by default, candidates or not.
-            let shown = !summary.archived
-                && (ctx.is_shown(&summary) || history_candidates.contains(&path));
+            let shown =
+                !summary.archived && (ctx.is_shown(&summary) || history_candidates.contains(&path));
             if !ctx.include_archived && !shown {
                 continue;
             }
@@ -426,8 +426,8 @@ pub fn discover_all_sessions_with_ctx(
                 .unwrap_or(meta.updated_at_ms);
             let provider = provider_for(agent);
             let summary = summarize_session(provider.as_ref(), path, mtime_ms, ctx);
-            let shown = !summary.archived
-                && (ctx.is_shown(&summary) || history_candidates.contains(path));
+            let shown =
+                !summary.archived && (ctx.is_shown(&summary) || history_candidates.contains(path));
             if !ctx.include_archived && !shown {
                 continue;
             }
@@ -538,7 +538,11 @@ pub fn discover_live_sessions_with_ctx(
     }
     shells.retain(|shell| ctx.include_archived || !shell.archived);
     // Prefer live tmux details to archive metadata for shells that can still be attached.
-    sessions.retain(|session| !shells.iter().any(|shell| shell.agent == session.agent && shell.id == session.id));
+    sessions.retain(|session| {
+        !shells
+            .iter()
+            .any(|shell| shell.agent == session.agent && shell.id == session.id)
+    });
     // The transcript limit must never hide a live terminal.
     sessions.extend(shells);
     sessions.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
@@ -553,8 +557,7 @@ impl DiscoveryContext<'_> {
 
     /// Archived by id alone, for ids whose transcript path is not known yet.
     fn is_archived_id(&self, session_id: &str) -> bool {
-        self.archive.is_archived(session_id)
-            || self.live.legacy_archived_ids.contains(session_id)
+        self.archive.is_archived(session_id) || self.live.legacy_archived_ids.contains(session_id)
     }
 
     /// Whether an already-summarized session belongs in the default list.
@@ -662,12 +665,24 @@ pub fn summarize_session(
         && let Some(home) = path.parent().and_then(Path::parent).and_then(Path::parent)
         && path.starts_with(home.join(".multibot/history"))
     {
-        resolved = antigravity::resolve_transcript(home, header.session_id_hint.as_deref().unwrap_or(""), path);
+        resolved = antigravity::resolve_transcript(
+            home,
+            header.session_id_hint.as_deref().unwrap_or(""),
+            path,
+        );
         resolved.as_path()
-    } else { path };
+    } else {
+        path
+    };
     let file_mtime_ms = if path != original_path {
-        path.metadata().ok().and_then(|m| m.modified().ok()).map(system_time_ms).unwrap_or(file_mtime_ms)
-    } else { file_mtime_ms };
+        path.metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(system_time_ms)
+            .unwrap_or(file_mtime_ms)
+    } else {
+        file_mtime_ms
+    };
     let tail = read_tail_slice_for_summary(provider, path);
 
     let stem = path
@@ -685,10 +700,18 @@ pub fn summarize_session(
         .unwrap_or(stem);
 
     let id = if provider.kind() == AgentKind::Antigravity {
-        ctx.metadata.sessions.iter().find(|(_, m)| m.agent == Some(AgentKind::Antigravity)
-            && m.native_session_id.as_deref() == Some(id.as_str()))
-            .map(|(sid, _)| sid.clone()).unwrap_or(id)
-    } else { id };
+        ctx.metadata
+            .sessions
+            .iter()
+            .find(|(_, m)| {
+                m.agent == Some(AgentKind::Antigravity)
+                    && m.native_session_id.as_deref() == Some(id.as_str())
+            })
+            .map(|(sid, _)| sid.clone())
+            .unwrap_or(id)
+    } else {
+        id
+    };
     let meta_entry = ctx.metadata.get(&id);
 
     let cwd = meta_entry
@@ -1087,13 +1110,19 @@ enum DataUriStage {
 enum ScrubState {
     Idle,
     /// Buffering `< 256` consecutive `[A-Za-z0-9+/]` (or `\/`) chars in `pending`.
-    RawCandidate { char_count: usize },
+    RawCandidate {
+        char_count: usize,
+    },
     /// Saw `data:` (case-insensitive); matching `image/<subtype>;base64,`.
     DataUriHeader(DataUriStage),
     /// Matched `data:image/<subtype>;base64,`; consuming `[A-Za-z0-9+/=_-]+`.
-    DataUriPayload { seen_payload: bool },
+    DataUriPayload {
+        seen_payload: bool,
+    },
     /// Matched `>= 256` raw base64 chars; consuming remaining body chars and up to 2 `=` padding bytes.
-    ConsumingRaw { eq_seen: u8 },
+    ConsumingRaw {
+        eq_seen: u8,
+    },
 }
 
 /// Bounded-memory two-layer byte-level FSM that scrubs `data:image/...;base64,...` URIs and
@@ -1753,7 +1782,8 @@ pub fn read_history_page(
             let has_oversized_inline = has_line_exceeding(complete_slice, MAX_HISTORY_LINE_BYTES);
             let rem_after_raw = scrubbed_budget_left.saturating_sub(complete_slice.len());
             let inspect_straddling_fast = raw_start > 0
-                && first_nl.is_some_and(|p| should_inspect_straddling_line(&buf[..=p], rem_after_raw));
+                && first_nl
+                    .is_some_and(|p| should_inspect_straddling_line(&buf[..=p], rem_after_raw));
 
             // ZERO-OVERHEAD FAST PATH (normal non-base64 pages: zero extra seeks or copies)
             if segments.is_empty() && !has_oversized_inline && !inspect_straddling_fast {
@@ -1796,8 +1826,13 @@ pub fn read_history_page(
                 let line_raw_end = cand_start + rel_end as u64;
                 let trimmed = &complete_slice[rel_start..trimmed_end];
                 if raw_line_len <= MAX_HISTORY_LINE_BYTES {
-                    if push_segment(&mut arena, &mut segments, trimmed, line_raw_start, line_raw_end)
-                    {
+                    if push_segment(
+                        &mut arena,
+                        &mut segments,
+                        trimmed,
+                        line_raw_start,
+                        line_raw_end,
+                    ) {
                         scrubbed_budget_left = scrubbed_budget_left.saturating_sub(raw_line_len);
                         oldest_offset = line_raw_start;
                     } else {
@@ -1824,8 +1859,9 @@ pub fn read_history_page(
             let inspect_straddling = raw_start > 0
                 && scrubbed_budget_left > 0
                 && raw_bytes_scanned < MAX_RAW_SCAN_BYTES_PER_PAGE
-                && first_nl
-                    .is_some_and(|p| should_inspect_straddling_line(&buf[..=p], scrubbed_budget_left));
+                && first_nl.is_some_and(|p| {
+                    should_inspect_straddling_line(&buf[..=p], scrubbed_budget_left)
+                });
             if !inspect_straddling {
                 break;
             }
@@ -2158,26 +2194,14 @@ pub fn read_history_delta(
 
     // Large pending delta (`> 64 KiB`): locate complete line boundaries using only 64 KiB chunks
     // before allocating a parse buffer (capped strictly at `MAX_HISTORY_LINE_BYTES = 256 KiB`).
-    let batch_end = prev_offset.saturating_add(DELTA_BATCH_MAX_BYTES).min(file_size);
-    let complete_end = if let Some(last_nl) =
-        find_last_newline_in_range(&mut file, prev_offset, batch_end)?
-    {
-        last_nl + 1
-    } else if batch_end == file_size {
-        // Incomplete trailing line `<= 256 KiB` with no '\n' yet.
-        let probe = match prev_probe {
-            Some(p) => p.to_string(),
-            None => compute_probe_sha256(&mut file, prev_offset)?,
-        };
-        return Ok(DeltaRead::Unchanged {
-            offset: prev_offset,
-            probe_sha256: probe,
-        });
-    } else {
-        // Single line starting at `prev_offset` already exceeds `MAX_HISTORY_LINE_BYTES` (256 KiB).
-        // Scan forward strictly in 64 KiB chunks to find its terminating '\n'.
-        let Some(nl_pos) = find_line_end_forward(&mut file, batch_end, file_size)? else {
-            // Partial trailing JSONL line (> 256 KiB) without '\n' — do not advance offset!
+    let batch_end = prev_offset
+        .saturating_add(DELTA_BATCH_MAX_BYTES)
+        .min(file_size);
+    let complete_end =
+        if let Some(last_nl) = find_last_newline_in_range(&mut file, prev_offset, batch_end)? {
+            last_nl + 1
+        } else if batch_end == file_size {
+            // Incomplete trailing line `<= 256 KiB` with no '\n' yet.
             let probe = match prev_probe {
                 Some(p) => p.to_string(),
                 None => compute_probe_sha256(&mut file, prev_offset)?,
@@ -2186,42 +2210,55 @@ pub fn read_history_delta(
                 offset: prev_offset,
                 probe_sha256: probe,
             });
-        };
-
-        // Single complete JSONL record exceeds MAX_HISTORY_LINE_BYTES: attempt bounded streaming
-        // base64 scrubbing before falling back to skipping cleanly past `\n`.
-        let line_end = nl_pos + 1;
-        let probe_sha256 = compute_probe_sha256(&mut file, line_end)?;
-        if let Some(scrubbed) = scrub_line_range_from_file(
-            &mut file,
-            prev_offset,
-            line_end,
-            MAX_HISTORY_LINE_BYTES - 1,
-        )? {
-            let line = LineSlice {
-                bytes: &scrubbed,
-                start_offset: prev_offset,
-                end_offset: line_end,
+        } else {
+            // Single line starting at `prev_offset` already exceeds `MAX_HISTORY_LINE_BYTES` (256 KiB).
+            // Scan forward strictly in 64 KiB chunks to find its terminating '\n'.
+            let Some(nl_pos) = find_line_end_forward(&mut file, batch_end, file_size)? else {
+                // Partial trailing JSONL line (> 256 KiB) without '\n' — do not advance offset!
+                let probe = match prev_probe {
+                    Some(p) => p.to_string(),
+                    None => compute_probe_sha256(&mut file, prev_offset)?,
+                };
+                return Ok(DeltaRead::Unchanged {
+                    offset: prev_offset,
+                    probe_sha256: probe,
+                });
             };
-            let parsed = provider.parse_lines(&[line]);
+
+            // Single complete JSONL record exceeds MAX_HISTORY_LINE_BYTES: attempt bounded streaming
+            // base64 scrubbing before falling back to skipping cleanly past `\n`.
+            let line_end = nl_pos + 1;
+            let probe_sha256 = compute_probe_sha256(&mut file, line_end)?;
+            if let Some(scrubbed) = scrub_line_range_from_file(
+                &mut file,
+                prev_offset,
+                line_end,
+                MAX_HISTORY_LINE_BYTES - 1,
+            )? {
+                let line = LineSlice {
+                    bytes: &scrubbed,
+                    start_offset: prev_offset,
+                    end_offset: line_end,
+                };
+                let parsed = provider.parse_lines(&[line]);
+                return Ok(DeltaRead::Appended {
+                    messages: parsed.messages,
+                    latest_offset: line_end,
+                    probe_sha256,
+                    todos: parsed.todos,
+                    tail_activity: parsed.tail_activity,
+                    has_pending_question: parsed.has_pending_question,
+                });
+            }
             return Ok(DeltaRead::Appended {
-                messages: parsed.messages,
+                messages: Vec::new(),
                 latest_offset: line_end,
                 probe_sha256,
-                todos: parsed.todos,
-                tail_activity: parsed.tail_activity,
-                has_pending_question: parsed.has_pending_question,
+                todos: Vec::new(),
+                tail_activity: TailActivity::Unknown,
+                has_pending_question: false,
             });
-        }
-        return Ok(DeltaRead::Appended {
-            messages: Vec::new(),
-            latest_offset: line_end,
-            probe_sha256,
-            todos: Vec::new(),
-            tail_activity: TailActivity::Unknown,
-            has_pending_question: false,
-        });
-    };
+        };
 
     let complete_len = (complete_end - prev_offset) as usize;
     file.seek(SeekFrom::Start(prev_offset))?;
@@ -2386,8 +2423,9 @@ pub fn basename_str(path: &str) -> &str {
 
 pub fn format_tool_summary(name: &str, raw_args: &Value) -> String {
     let parsed_args: Value = match raw_args {
-        Value::String(s) => serde_json::from_str::<Value>(s)
-            .unwrap_or_else(|_| json!({ "input": s })),
+        Value::String(s) => {
+            serde_json::from_str::<Value>(s).unwrap_or_else(|_| json!({ "input": s }))
+        }
         other => other.clone(),
     };
     let mut kind = name.rsplit('.').next().unwrap_or(name).to_ascii_lowercase();
@@ -2672,7 +2710,10 @@ pub fn extract_image_blocks(text: &str) -> Vec<MessageBlock> {
     };
 
     for cap in md_re.captures_iter(&scrubbed) {
-        let alt = cap.get(1).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
+        let alt = cap
+            .get(1)
+            .map(|m| m.as_str().trim().to_string())
+            .unwrap_or_default();
         let Some(target_m) = cap.get(2) else {
             continue;
         };
@@ -2789,10 +2830,7 @@ pub fn parse_prompt_questions(val: &Value) -> Vec<PromptQuestion> {
                             .unwrap_or("")
                             .trim(),
                     );
-                    options.push(PromptOption {
-                        label,
-                        description,
-                    });
+                    options.push(PromptOption { label, description });
                 }
             }
         }
@@ -2954,9 +2992,7 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let counter = ATOMIC_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp_name = format!(
         "{}.tmp.{}.{}",
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("state"),
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("state"),
         std::process::id(),
         counter
     );
@@ -3053,7 +3089,6 @@ mod tests {
         assert_eq!(claude.context_limit, None);
         fs::remove_dir_all(dir).unwrap();
     }
-
 
     #[test]
     fn missing_history_is_empty_for_every_agent_but_other_io_errors_survive() {
@@ -3259,7 +3294,10 @@ mod tests {
             "type": "image",
             "data": long_b64,
         });
-        assert_eq!(clean_tool_value(&obj), Value::String("[image omitted]".into()));
+        assert_eq!(
+            clean_tool_value(&obj),
+            Value::String("[image omitted]".into())
+        );
 
         let nested = json!({
             "base64": "should_drop",
@@ -3272,8 +3310,14 @@ mod tests {
 
     #[test]
     fn unified_diff_and_40_line_cap() {
-        let old = (1..=60).map(|i| format!("old_{i}")).collect::<Vec<_>>().join("\n");
-        let new = (1..=60).map(|i| format!("new_{i}")).collect::<Vec<_>>().join("\n");
+        let old = (1..=60)
+            .map(|i| format!("old_{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let new = (1..=60)
+            .map(|i| format!("new_{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let lines = compute_unified_diff_lines(&old, &new, 1);
         let diff = build_diff_block(Some("src/lib.rs".into()), lines).unwrap();
         assert_eq!(diff.added, 60);
@@ -3363,7 +3407,8 @@ mod tests {
         );
         fs::write(&path, format!("{line}\n")).unwrap();
 
-        let page = read_history_page(AgentKind::Claude, &path, None, Some(1024), None, None).unwrap();
+        let page =
+            read_history_page(AgentKind::Claude, &path, None, Some(1024), None, None).unwrap();
         assert_eq!(page.messages.len(), 1);
         assert_eq!(page.messages[0].id, "big1");
         assert_eq!(page.oldest_offset, 0);
@@ -3386,7 +3431,8 @@ mod tests {
 
         // Append partial line without '\n'
         let mut f = OpenOptions::new().append(true).open(&path).unwrap();
-        f.write_all(br#"{"type":"assistant","uuid":"a1","message":{"content":"sec"#).unwrap();
+        f.write_all(br#"{"type":"assistant","uuid":"a1","message":{"content":"sec"#)
+            .unwrap();
         f.flush().unwrap();
 
         let d1 = read_history_delta(AgentKind::Claude, &path, off1, Some(&probe1)).unwrap();
@@ -3669,7 +3715,10 @@ mod tests {
         assert!(shell.archived && shell.archive_kill_process);
         assert_eq!(shell.source_path, "tmux:dissolved-shell");
         let archived = discover_live_sessions_with_ctx(&home, 50, &ctx);
-        let killed_shell = archived.iter().find(|shell| shell.id == "dissolved-shell").unwrap();
+        let killed_shell = archived
+            .iter()
+            .find(|shell| shell.id == "dissolved-shell")
+            .unwrap();
         assert!(killed_shell.archived && killed_shell.shell_attached.is_none());
         append_archived_sessions(&ctx, &mut saved);
         assert_eq!(
@@ -3756,7 +3805,10 @@ mod tests {
         // Before archiving, both chats are listed.
         let before = discover_all_sessions_owned(&dir, 50, false);
         let ids: HashSet<&str> = before.iter().map(|s| s.id.as_str()).collect();
-        assert!(ids.contains(sid) && ids.contains(live), "both chats should list: {ids:?}");
+        assert!(
+            ids.contains(sid) && ids.contains(live),
+            "both chats should list: {ids:?}"
+        );
 
         // Archiving keeps `metadata.json`, so the id stays held open. It must still leave
         // the default list, and stay reachable only with `include_archived`.
@@ -3782,7 +3834,10 @@ mod tests {
             !ids.contains(sid),
             "an archived Multibot-hosted Antigravity chat leaked into the default list: {ids:?}"
         );
-        assert!(ids.contains(live), "the open chat must stay listed: {ids:?}");
+        assert!(
+            ids.contains(live),
+            "the open chat must stay listed: {ids:?}"
+        );
 
         let all = discover_all_sessions_owned(&dir, 50, true);
         let ids: HashSet<&str> = all.iter().map(|s| s.id.as_str()).collect();
@@ -3928,7 +3983,10 @@ mod tests {
         let sessions = discover_all_sessions_owned(&dir, 50, false);
         let ids: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
         assert!(ids.contains(live), "live Codex session missing: {ids:?}");
-        assert!(!ids.contains(dead), "an ended Codex session leaked: {ids:?}");
+        assert!(
+            !ids.contains(dead),
+            "an ended Codex session leaked: {ids:?}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -3941,7 +3999,11 @@ mod tests {
         write_live_chat(&dir, sid, "live-archive-me", 120);
 
         let sessions = discover_all_sessions_owned(&dir, 50, false);
-        assert_eq!(sessions.len(), 1, "live session must be listed: {sessions:?}");
+        assert_eq!(
+            sessions.len(),
+            1,
+            "live session must be listed: {sessions:?}"
+        );
 
         // Archiving through the daemon's own store drops it from the default list.
         let mut archive = ArchiveStore::default();
@@ -4064,11 +4126,31 @@ mod tests {
         // Hosted PID always overrides to working
         assert!(compute_semantic_working(true, TailActivity::Idle, 0, now));
         // Unanswered user/tool within 30s -> working; older than 30s -> stale false
-        assert!(compute_semantic_working(false, TailActivity::Working, now - 5_000, now));
-        assert!(!compute_semantic_working(false, TailActivity::Working, now - 40_000, now));
+        assert!(compute_semantic_working(
+            false,
+            TailActivity::Working,
+            now - 5_000,
+            now
+        ));
+        assert!(!compute_semantic_working(
+            false,
+            TailActivity::Working,
+            now - 40_000,
+            now
+        ));
         // Completed assistant or pending question -> not working
-        assert!(!compute_semantic_working(false, TailActivity::Idle, now - 500, now));
-        assert!(!compute_semantic_working(false, TailActivity::AwaitingUserInput, now - 500, now));
+        assert!(!compute_semantic_working(
+            false,
+            TailActivity::Idle,
+            now - 500,
+            now
+        ));
+        assert!(!compute_semantic_working(
+            false,
+            TailActivity::AwaitingUserInput,
+            now - 500,
+            now
+        ));
     }
 
     #[test]
@@ -4116,19 +4198,31 @@ mod tests {
     fn extract_image_blocks_does_not_emit_bogus_local_path_for_http_urls() {
         let text = "See https://example.com/screen.png and https://cdn.example.io:8080/shot.png and /tmp/local.png";
         let blocks = extract_image_blocks(text);
-        assert_eq!(blocks.len(), 3, "expected 2 URL blocks + 1 local block, got {blocks:?}");
+        assert_eq!(
+            blocks.len(),
+            3,
+            "expected 2 URL blocks + 1 local block, got {blocks:?}"
+        );
 
         let urls: Vec<&str> = blocks
             .iter()
             .filter_map(|b| match b {
-                MessageBlock::Image { url: Some(u), local_path: None, .. } => Some(u.as_str()),
+                MessageBlock::Image {
+                    url: Some(u),
+                    local_path: None,
+                    ..
+                } => Some(u.as_str()),
                 _ => None,
             })
             .collect();
         let locals: Vec<&str> = blocks
             .iter()
             .filter_map(|b| match b {
-                MessageBlock::Image { url: None, local_path: Some(p), .. } => Some(p.as_str()),
+                MessageBlock::Image {
+                    url: None,
+                    local_path: Some(p),
+                    ..
+                } => Some(p.as_str()),
                 _ => None,
             })
             .collect();
@@ -4158,12 +4252,10 @@ mod tests {
 
     #[test]
     fn strip_system_reminders_preserves_text_between_multiple_tags() {
-        let same_line =
-            "<system-reminder>rem1</system-reminder> KEEP_SAME_LINE <system-reminder>rem2</system-reminder>\n";
+        let same_line = "<system-reminder>rem1</system-reminder> KEEP_SAME_LINE <system-reminder>rem2</system-reminder>\n";
         assert_eq!(strip_system_reminders(same_line).trim(), "KEEP_SAME_LINE");
 
-        let multi_line =
-            "<system-reminder>rem1</system-reminder> KEEP_LINE_1\nKEEP_LINE_2\n<system-reminder>rem2</system-reminder>\n";
+        let multi_line = "<system-reminder>rem1</system-reminder> KEEP_LINE_1\nKEEP_LINE_2\n<system-reminder>rem2</system-reminder>\n";
         assert_eq!(
             strip_system_reminders(multi_line).trim(),
             "KEEP_LINE_1\nKEEP_LINE_2"
@@ -4178,7 +4270,8 @@ mod tests {
         let dir = unique_temp_dir("giant-5mb");
         let path = dir.join("giant5m.jsonl");
 
-        let line1 = "{\"type\":\"user\",\"uuid\":\"small1\",\"message\":{\"content\":\"before giant\"}}\n";
+        let line1 =
+            "{\"type\":\"user\",\"uuid\":\"small1\",\"message\":{\"content\":\"before giant\"}}\n";
         assert_eq!(line1.len(), 69);
 
         // ~5.2 MiB line (> HARD_HISTORY_MAX_BYTES = 4 MiB)
@@ -4277,8 +4370,7 @@ mod tests {
         // (b) Complete the 4.5 MiB line with '\n' and append a normal follow-up line
         let giant_suffix = "\"}}\n";
         let followup = "{\"type\":\"assistant\",\"uuid\":\"follow1\",\"message\":{\"content\":\"FOLLOW_UP_AFTER_GIANT\"}}\n";
-        let expected_after_giant =
-            prev_offset + (giant_body.len() + giant_suffix.len()) as u64;
+        let expected_after_giant = prev_offset + (giant_body.len() + giant_suffix.len()) as u64;
         {
             let mut f = OpenOptions::new().append(true).open(&path).unwrap();
             f.write_all(giant_suffix.as_bytes()).unwrap();
@@ -4492,9 +4584,12 @@ mod tests {
         }
         giant_4m.push_str(suffix);
 
-        let small_b = "{\"type\":\"user\",\"uuid\":\"s-before\",\"message\":{\"content\":\"BEFORE\"}}\n";
-        let small_m = "{\"type\":\"assistant\",\"uuid\":\"s-mid\",\"message\":{\"content\":\"MID\"}}\n";
-        let small_a = "{\"type\":\"assistant\",\"uuid\":\"s-after\",\"message\":{\"content\":\"AFTER\"}}\n";
+        let small_b =
+            "{\"type\":\"user\",\"uuid\":\"s-before\",\"message\":{\"content\":\"BEFORE\"}}\n";
+        let small_m =
+            "{\"type\":\"assistant\",\"uuid\":\"s-mid\",\"message\":{\"content\":\"MID\"}}\n";
+        let small_a =
+            "{\"type\":\"assistant\",\"uuid\":\"s-after\",\"message\":{\"content\":\"AFTER\"}}\n";
 
         {
             let mut f = File::create(&path).unwrap();
@@ -4585,7 +4680,8 @@ mod tests {
         // 2. A 300 KiB single line (> 256 KiB MAX_HISTORY_LINE_BYTES, < 512 KiB page) surrounded
         //    by normal messages is skipped cleanly by `iter_complete_lines` without losing neighbors.
         let inline_path = dir.join("inline_300k.jsonl");
-        let before = "{\"type\":\"user\",\"uuid\":\"u-pre\",\"message\":{\"content\":\"before 300k\"}}\n";
+        let before =
+            "{\"type\":\"user\",\"uuid\":\"u-pre\",\"message\":{\"content\":\"before 300k\"}}\n";
         let mid_prefix = r#"{"type":"assistant","uuid":"a-300k","message":{"content":""#;
         let mid_suffix = "\"}}\n";
         let mut mid_300k = String::with_capacity(300 * 1024 + 64);
@@ -4621,7 +4717,8 @@ mod tests {
         let path = dir.join("multi_giant.jsonl");
 
         let line1 = "{\"type\":\"user\",\"uuid\":\"u1\",\"message\":{\"content\":\"first\"}}\n";
-        let line2 = "{\"type\":\"assistant\",\"uuid\":\"a2\",\"message\":{\"content\":\"middle\"}}\n";
+        let line2 =
+            "{\"type\":\"assistant\",\"uuid\":\"a2\",\"message\":{\"content\":\"middle\"}}\n";
 
         let giant_prefix = r#"{"type":"assistant","uuid":"g","message":{"content":""#;
         let giant_suffix = "\"}}\n";
@@ -4744,9 +4841,7 @@ mod tests {
                     "scrubber overflowed unexpectedly at chunk_size={chunk_size}"
                 );
             }
-            let out = scrubber
-                .finish()
-                .expect("scrubber finish should succeed");
+            let out = scrubber.finish().expect("scrubber finish should succeed");
             let parsed: Value = serde_json::from_slice(&out).unwrap_or_else(|e| {
                 panic!(
                     "invalid JSON at chunk_size={chunk_size}: {e}\noutput={}",
@@ -4759,7 +4854,10 @@ mod tests {
             assert_eq!(parsed["mixed"], "[image omitted]");
             assert_eq!(parsed["escaped_slash"], "[image omitted]");
             assert_eq!(parsed["unicode_guard"], "🚀日本語 A[image omitted] done");
-            assert_eq!(parsed["escapes"], "quote:\" back:\\ both:\\\" [image omitted]");
+            assert_eq!(
+                parsed["escapes"],
+                "quote:\" back:\\ both:\\\" [image omitted]"
+            );
             assert_eq!(parsed["false1"], "data:text/plain,hi");
             assert_eq!(parsed["false2"], "data:[image omitted]");
             assert_eq!(parsed["empty_uri"], "data:image/png;base64,");
@@ -4786,7 +4884,8 @@ mod tests {
         // (a) 300 KiB inline data:image/png;base64,... between u-pre and a-post
         {
             let path = dir.join("inline_300k_b64.jsonl");
-            let l0 = "{\"type\":\"user\",\"uuid\":\"u-pre\",\"message\":{\"content\":\"before\"}}\n";
+            let l0 =
+                "{\"type\":\"user\",\"uuid\":\"u-pre\",\"message\":{\"content\":\"before\"}}\n";
             let b64_300k = "A".repeat(300 * 1024);
             let l1 = format!(
                 "{{\"type\":\"user\",\"uuid\":\"u-b64\",\"message\":{{\"content\":\"data:image/png;base64,{b64_300k}==\"}}}}\n"
@@ -4816,7 +4915,10 @@ mod tests {
             assert_eq!(page.latest_offset, total);
             assert!(!page.has_more);
             let mut f = File::open(&path).unwrap();
-            assert_eq!(page.probe_sha256, compute_probe_sha256(&mut f, total).unwrap());
+            assert_eq!(
+                page.probe_sha256,
+                compute_probe_sha256(&mut f, total).unwrap()
+            );
         }
 
         // (b) Exact T2-DMN-06 layout (520 KiB tool_result with 512000 'A's + 20000 'X's + trailing a-b64-2)
@@ -4855,7 +4957,10 @@ mod tests {
             assert_eq!(page.latest_offset, total);
             assert!(!page.has_more);
             let mut f = File::open(&path).unwrap();
-            assert_eq!(page.probe_sha256, compute_probe_sha256(&mut f, total).unwrap());
+            assert_eq!(
+                page.probe_sha256,
+                compute_probe_sha256(&mut f, total).unwrap()
+            );
 
             let mut saw_omitted = false;
             for blk in &page.messages[1].blocks {
@@ -4932,7 +5037,10 @@ mod tests {
             assert_eq!(page.latest_offset, total);
             assert!(!page.has_more);
             let mut f = File::open(&path).unwrap();
-            assert_eq!(page.probe_sha256, compute_probe_sha256(&mut f, total).unwrap());
+            assert_eq!(
+                page.probe_sha256,
+                compute_probe_sha256(&mut f, total).unwrap()
+            );
         }
 
         let _ = fs::remove_dir_all(&dir);
@@ -5060,7 +5168,10 @@ mod tests {
                 assert_eq!(messages[0].source_byte_range, Some((off0, expected_off1)));
                 assert_eq!(latest_offset, expected_off1);
                 let mut f = File::open(&path).unwrap();
-                assert_eq!(probe_sha256, compute_probe_sha256(&mut f, expected_off1).unwrap());
+                assert_eq!(
+                    probe_sha256,
+                    compute_probe_sha256(&mut f, expected_off1).unwrap()
+                );
                 (latest_offset, probe_sha256)
             }
             other => panic!("expected Appended for 400 KiB b64 line, got {other:?}"),
@@ -5071,7 +5182,8 @@ mod tests {
         let l2 = format!(
             "{{\"type\":\"user\",\"uuid\":\"u-1_5m\",\"message\":{{\"content\":[{{\"type\":\"image\",\"source\":{{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"{b64_1_5m}\"}}}}]}}}}\n"
         );
-        let l3 = "{\"type\":\"assistant\",\"uuid\":\"a-tail\",\"message\":{\"content\":\"done\"}}\n";
+        let l3 =
+            "{\"type\":\"assistant\",\"uuid\":\"a-tail\",\"message\":{\"content\":\"done\"}}\n";
         let expected_off2 = off1 + l2.len() as u64;
         let expected_off3 = expected_off2 + l3.len() as u64;
         {
@@ -5256,16 +5368,21 @@ mod tests {
     #[test]
     fn pathological_20mib_non_base64_spaced_and_unspaced_skip_cleanly_in_page_and_delta() {
         let dir = unique_temp_dir("giant-20mib");
-        let l_before = "{\"type\":\"user\",\"uuid\":\"u-before\",\"message\":{\"content\":\"before 20m\"}}\n";
+        let l_before =
+            "{\"type\":\"user\",\"uuid\":\"u-before\",\"message\":{\"content\":\"before 20m\"}}\n";
         let l_after = "{\"type\":\"assistant\",\"uuid\":\"a-after\",\"message\":{\"content\":\"after 20m\"}}\n";
 
-        for (label, chunk_pattern) in [("spaced", "x ".repeat(32 * 1024)), ("unspaced", "z".repeat(64 * 1024))] {
+        for (label, chunk_pattern) in [
+            ("spaced", "x ".repeat(32 * 1024)),
+            ("unspaced", "z".repeat(64 * 1024)),
+        ] {
             let path = dir.join(format!("giant_20m_{label}.jsonl"));
             let off_before_giant = l_before.len() as u64;
             {
                 let mut f = File::create(&path).unwrap();
                 f.write_all(l_before.as_bytes()).unwrap();
-                f.write_all(br#"{"type":"assistant","uuid":"g20","message":{"content":""#).unwrap();
+                f.write_all(br#"{"type":"assistant","uuid":"g20","message":{"content":""#)
+                    .unwrap();
                 // Write 20 MiB (> MAX_SCRUB_RAW_LINE_BYTES = 16 MiB)
                 for _ in 0..320 {
                     f.write_all(chunk_pattern.as_bytes()).unwrap();
@@ -5320,7 +5437,9 @@ mod tests {
             let mut ids = Vec::new();
             let mut skipped = 0usize;
             while offset < total_size {
-                match read_history_delta(AgentKind::Claude, &path, offset, probe.as_deref()).unwrap() {
+                match read_history_delta(AgentKind::Claude, &path, offset, probe.as_deref())
+                    .unwrap()
+                {
                     DeltaRead::Appended {
                         messages,
                         latest_offset,
@@ -5558,7 +5677,10 @@ mod tests {
         )
         .unwrap();
         let s_a = summarize_session(&ClaudeProvider, &p_a, now - 1_000, &ctx);
-        assert!(!s_a.working, "completed 2 MiB assistant + snapshot must report working=false");
+        assert!(
+            !s_a.working,
+            "completed 2 MiB assistant + snapshot must report working=false"
+        );
         assert_eq!(s_a.last_assistant_id.as_deref(), Some("a-img"));
         let prev_a = s_a.last_assistant_preview.as_deref().unwrap_or("");
         assert!(prev_a.contains("Final answer text"), "prev_a={prev_a}");
@@ -5577,7 +5699,10 @@ mod tests {
         )
         .unwrap();
         let s_b = summarize_session(&ClaudeProvider, &p_b, now - 15_000, &ctx);
-        assert!(s_b.working, "2 MiB user screenshot + progress/isSidechain must report working=true");
+        assert!(
+            s_b.working,
+            "2 MiB user screenshot + progress/isSidechain must report working=true"
+        );
 
         // (c) Claude 2 MiB user screenshot (mtime = now - 15s) + trailing [Request interrupted by user]
         let p_c = dir.join("case_c.jsonl");
@@ -5590,7 +5715,10 @@ mod tests {
         )
         .unwrap();
         let s_c = summarize_session(&ClaudeProvider, &p_c, now - 15_000, &ctx);
-        assert!(!s_c.working, "trailing interrupt must override straddling user turn to working=false");
+        assert!(
+            !s_c.working,
+            "trailing interrupt must override straddling user turn to working=false"
+        );
 
         // (d) Claude 2 MiB assistant screenshot + trailing custom-title
         let p_d = dir.join("case_d.jsonl");
@@ -5605,10 +5733,11 @@ mod tests {
         let s_d = summarize_session(&ClaudeProvider, &p_d, now - 1_000, &ctx);
         assert!(!s_d.working);
         assert_eq!(s_d.title, "Renamed Session");
-        assert!(s_d
-            .last_assistant_preview
-            .as_deref()
-            .is_some_and(|p| p.contains("Done answer")));
+        assert!(
+            s_d.last_assistant_preview
+                .as_deref()
+                .is_some_and(|p| p.contains("Done answer"))
+        );
 
         // (e) Antigravity 2 MiB assistant screenshot + trailing multibot_turn_end
         let p_e = dir.join("case_e.history.jsonl");
@@ -5624,10 +5753,11 @@ mod tests {
         let s_e = summarize_session(&AntigravityProvider, &p_e, now - 1_000, &ctx);
         assert!(!s_e.working);
         assert_eq!(s_e.last_assistant_id.as_deref(), Some("a-agy"));
-        assert!(s_e
-            .last_assistant_preview
-            .as_deref()
-            .is_some_and(|p| p.contains("Agy done") && !p.contains("TTTT")));
+        assert!(
+            s_e.last_assistant_preview
+                .as_deref()
+                .is_some_and(|p| p.contains("Agy done") && !p.contains("TTTT"))
+        );
 
         // (f) Claude 2 MiB earlier screenshot + normal <64 KiB assistant message + file-history-snapshot (fast path)
         let p_f = dir.join("case_f.jsonl");
@@ -5643,7 +5773,10 @@ mod tests {
         let s_f = summarize_session(&ClaudeProvider, &p_f, now - 1_000, &ctx);
         assert!(!s_f.working);
         assert_eq!(s_f.last_assistant_id.as_deref(), Some("a-new"));
-        assert_eq!(s_f.last_assistant_preview.as_deref(), Some("Fresh short reply"));
+        assert_eq!(
+            s_f.last_assistant_preview.as_deref(),
+            Some("Fresh short reply")
+        );
 
         // (g) Claude 20 MiB spaced non-base64 + trailing file-history-snapshot (zero extra seeks)
         let p_g = dir.join("case_g.jsonl");
@@ -5669,9 +5802,12 @@ mod tests {
         let raw_b64 = "A".repeat(300);
 
         // 1. format_tool_summary scrubs base64 BEFORE 60-char truncation
-        let summary = format_tool_summary("Bash", &serde_json::json!({
-            "command": format!("echo {raw_b64}")
-        }));
+        let summary = format_tool_summary(
+            "Bash",
+            &serde_json::json!({
+                "command": format!("echo {raw_b64}")
+            }),
+        );
         assert_eq!(summary, "Ran echo [image omitted]");
         assert!(!summary.contains("AAAA"));
 
@@ -5691,7 +5827,9 @@ mod tests {
 
         // 3. sanitize_todo_content scrubs before MAX_TODO_CONTENT_CHARS (200)
         assert_eq!(
-            sanitize_todo_content(&format!("Verify data:image/png;base64,iVBORw0KGgo= {raw_b64}")),
+            sanitize_todo_content(&format!(
+                "Verify data:image/png;base64,iVBORw0KGgo= {raw_b64}"
+            )),
             "Verify [image omitted] [image omitted]"
         );
 
@@ -5737,7 +5875,9 @@ mod tests {
 
         // 6. process::sanitize_title scrubs base64 before 63-char cap
         assert_eq!(
-            crate::process::sanitize_title(&format!("Note data:image/png;base64,iVBORw0KGgo= {raw_b64}")),
+            crate::process::sanitize_title(&format!(
+                "Note data:image/png;base64,iVBORw0KGgo= {raw_b64}"
+            )),
             Some("Note [image omitted] [image omitted]".to_string())
         );
 

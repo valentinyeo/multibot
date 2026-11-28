@@ -129,12 +129,20 @@ mod tests {
     use super::*;
     #[test]
     fn shell_inventory_keeps_attachment_and_command_details() {
-        let shells = parse_tmux_sessions_output("first\t1\tbtop\t/srv/projects\t0\tBTOP\nsecond\t2\tagy\t/srv/multibot\t2\tagy");
+        let shells = parse_tmux_sessions_output(
+            "first\t1\tbtop\t/srv/projects\t0\tBTOP\nsecond\t2\tagy\t/srv/multibot\t2\tagy",
+        );
         assert_eq!(shells.len(), 2);
         assert_eq!(shells[0].shell_attached, Some(false));
-        assert_eq!(shells[0].last_assistant_preview.as_deref(), Some("btop · projects"));
+        assert_eq!(
+            shells[0].last_assistant_preview.as_deref(),
+            Some("btop · projects")
+        );
         assert_eq!(shells[1].shell_attached, Some(true));
-        assert_eq!(shells[1].last_assistant_preview.as_deref(), Some("agy · multibot"));
+        assert_eq!(
+            shells[1].last_assistant_preview.as_deref(),
+            Some("agy · multibot")
+        );
     }
 
     #[test]

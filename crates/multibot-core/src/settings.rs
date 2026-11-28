@@ -267,7 +267,8 @@ mod tests {
 
     #[test]
     fn settings_roundtrip_and_default_is_auto_integrated() {
-        let dir = std::env::temp_dir().join(format!("multibot-settings-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("multibot-settings-test-{}", std::process::id()));
         let path = dir.join("settings.json");
 
         let mut settings = MultibotSettings::default();

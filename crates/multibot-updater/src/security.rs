@@ -40,8 +40,8 @@ pub(crate) fn format_sha256_digest(digest: &[u8]) -> String {
 
 /// Streams a regular file in 64 KiB chunks and returns its lowercase 64-hex SHA-256 digest.
 pub fn sha256_file(path: &Path) -> Result<String> {
-    let file =
-        File::open(path).with_context(|| format!("failed to open file for SHA-256: {}", path.display()))?;
+    let file = File::open(path)
+        .with_context(|| format!("failed to open file for SHA-256: {}", path.display()))?;
     let meta = file
         .metadata()
         .with_context(|| format!("failed to stat file for SHA-256: {}", path.display()))?;

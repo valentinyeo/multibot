@@ -251,13 +251,23 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                 let shift = GetAsyncKeyState(0x10) < 0;
                 let foreground = GetForegroundWindow();
                 let root = GetAncestor(foreground, GA_ROOT) as usize;
-                let confirming = VISIBLE.with(|v| v.borrow().get(&root).is_some_and(|shell| shell.confirming_kill));
+                let confirming = VISIBLE.with(|v| {
+                    v.borrow()
+                        .get(&root)
+                        .is_some_and(|shell| shell.confirming_kill)
+                });
                 let shortcut = if key == 0x1B && !ctrl && !alt && !shift && confirming {
                     Some(ShellShortcut::Forward("escape"))
-                } else { shell_shortcut(key, ctrl, alt, shift) };
+                } else {
+                    shell_shortcut(key, ctrl, alt, shift)
+                };
                 if let Some(shortcut) = shortcut {
                     // A held key is not the second confirmation press; key-up rearms it.
-                    if key == 0x57 && ctrl && shift && FORWARDED.with(|v| v.borrow().contains_key(&key)) {
+                    if key == 0x57
+                        && ctrl
+                        && shift
+                        && FORWARDED.with(|v| v.borrow().contains_key(&key))
+                    {
                         return 1;
                     }
                     let parent = VISIBLE.with(|v| {

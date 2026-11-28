@@ -101,10 +101,7 @@ pub struct GpuSelectionPlan {
 ///
 /// Hard guarantee: in `AutoIntegrated` and `SoftwareOnly` modes, NVIDIA
 /// (`0x10DE`) adapters are NEVER included — not even as a fallback.
-pub fn plan_adapter_order(
-    adapters: &[GpuAdapterInfo],
-    pref: &GpuPreference,
-) -> GpuSelectionPlan {
+pub fn plan_adapter_order(adapters: &[GpuAdapterInfo], pref: &GpuPreference) -> GpuSelectionPlan {
     let mut order = Vec::new();
 
     match pref {

@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::providers::read_history_page;
 use std::fs;

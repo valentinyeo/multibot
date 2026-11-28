@@ -95,7 +95,9 @@ impl ServerWorkspaceIndex {
         static CACHE: OnceLock<Mutex<Option<CachedIndex>>> = OnceLock::new();
         let cache = CACHE.get_or_init(|| Mutex::new(None));
         let stamp = StateStamp::capture(default_state_dir().as_deref());
-        let mut guard = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some((cached, index)) = guard.as_ref()
             && *cached == stamp
         {
@@ -505,9 +507,15 @@ mod tests {
             Some("HT Product")
         );
         // A chat with no recorded workspace stays unresolved instead of landing in a bucket.
-        assert_eq!(index.workspace_for("6f353a80-d3df-4e44-88aa-edcc6c2b8999"), None);
+        assert_eq!(
+            index.workspace_for("6f353a80-d3df-4e44-88aa-edcc6c2b8999"),
+            None
+        );
         // The `@agents` tmux -> agent-id map is not a chat, so it must not create assignments.
-        assert_eq!(index.workspace_for("2f26726a-ab85-4e39-954c-1f1634227bb6"), None);
+        assert_eq!(
+            index.workspace_for("2f26726a-ab85-4e39-954c-1f1634227bb6"),
+            None
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -568,7 +576,10 @@ mod tests {
     #[test]
     fn missing_corrupt_or_symlinked_state_yields_an_empty_index() {
         let missing = PathBuf::from("/nonexistent/multibot-server-ws-state");
-        assert_eq!(ServerWorkspaceIndex::load_from_state_dir(&missing), ServerWorkspaceIndex::default());
+        assert_eq!(
+            ServerWorkspaceIndex::load_from_state_dir(&missing),
+            ServerWorkspaceIndex::default()
+        );
 
         let dir = temp_state_dir("corrupt");
         write(&dir.join("chat-names.json"), "{not json");
@@ -639,7 +650,8 @@ mod tests {
             r#"{"sid": "9738e6e1-a533-4db7-823d-3e04af268ccb", "native_session": "01a213db-1d2a-7783-8245-01b6e818b48a", "tmux": "live-4b135e3"}"#,
         );
         let before = fs::read(dir.join("chat-names.json")).unwrap();
-        let host_before = fs::read(dir.join("agent-host/e2f2f8d3b2de2c172927d3beef065f6d.state.json")).unwrap();
+        let host_before =
+            fs::read(dir.join("agent-host/e2f2f8d3b2de2c172927d3beef065f6d.state.json")).unwrap();
 
         let index = ServerWorkspaceIndex::load_from_state_dir(&dir);
         // Claude `sid`.

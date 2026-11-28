@@ -52,8 +52,10 @@ pub fn codex_discovery_roots(home: &Path) -> Vec<PathBuf> {
 fn extract_uuid_from_rollout_stem(stem: &str) -> Option<String> {
     static UUID_TAIL_RE: OnceLock<Regex> = OnceLock::new();
     let re = UUID_TAIL_RE.get_or_init(|| {
-        Regex::new(r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$")
-            .expect("valid uuid regex")
+        Regex::new(
+            r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$",
+        )
+        .expect("valid uuid regex")
     });
     re.captures(stem)
         .and_then(|c| c.get(1))
@@ -63,7 +65,8 @@ fn extract_uuid_from_rollout_stem(stem: &str) -> Option<String> {
 fn extract_codex_apply_patch_diff(args: &Value) -> Option<DiffBlock> {
     static PATCH_HDR_RE: OnceLock<Regex> = OnceLock::new();
     let re = PATCH_HDR_RE.get_or_init(|| {
-        Regex::new(r"\*\*\* (Update|Add|Delete) File: ([^\r\n]+)").expect("valid patch header regex")
+        Regex::new(r"\*\*\* (Update|Add|Delete) File: ([^\r\n]+)")
+            .expect("valid patch header regex")
     });
     let patch_str = args
         .get("input")
@@ -261,7 +264,11 @@ fn is_duplicate_adjacent(
     if last.text.trim() != text.trim() {
         return false;
     }
-    if last.blocks.iter().any(|b| matches!(b, MessageBlock::ToolUse { .. })) {
+    if last
+        .blocks
+        .iter()
+        .any(|b| matches!(b, MessageBlock::ToolUse { .. }))
+    {
         return false;
     }
     match (last.timestamp_ms, timestamp_ms) {
@@ -648,14 +655,13 @@ impl AgentProvider for CodexProvider {
                             else {
                                 continue;
                             };
-                            let name = payload
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or(if ptype == "local_shell_call" {
+                            let name = payload.get("name").and_then(Value::as_str).unwrap_or(
+                                if ptype == "local_shell_call" {
                                     "local_shell"
                                 } else {
                                     "Tool"
-                                });
+                                },
+                            );
                             let raw_args = payload
                                 .get("arguments")
                                 .or_else(|| payload.get("input"))
@@ -915,21 +921,38 @@ mod tests {
         assert_eq!(assistant.role, MessageRole::Assistant);
 
         // apply_patch diff + Completed
-        let patch_blk = assistant.blocks.iter().find_map(|b| match b {
-            MessageBlock::ToolUse { call_id, summary, status, diff, .. } if call_id == "p1" => {
-                Some((summary, status, diff))
-            }
-            _ => None,
-        }).unwrap();
+        let patch_blk = assistant
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                MessageBlock::ToolUse {
+                    call_id,
+                    summary,
+                    status,
+                    diff,
+                    ..
+                } if call_id == "p1" => Some((summary, status, diff)),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(patch_blk.0, "Edited app.rs +1 -1");
         assert_eq!(*patch_blk.1, ToolStatus::Completed);
-        assert_eq!(patch_blk.2.as_ref().unwrap().path.as_deref(), Some("src/app.rs"));
+        assert_eq!(
+            patch_blk.2.as_ref().unwrap().path.as_deref(),
+            Some("src/app.rs")
+        );
 
         // local_shell_call failed
-        let shell_status = assistant.blocks.iter().find_map(|b| match b {
-            MessageBlock::ToolUse { call_id, status, .. } if call_id == "sh1" => Some(*status),
-            _ => None,
-        }).unwrap();
+        let shell_status = assistant
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                MessageBlock::ToolUse {
+                    call_id, status, ..
+                } if call_id == "sh1" => Some(*status),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(shell_status, ToolStatus::Error);
 
         // update_plan todos
@@ -949,10 +972,7 @@ mod tests {
 
     #[test]
     fn codex_discovers_nested_rollout_and_session_meta() {
-        let dir = std::env::temp_dir().join(format!(
-            "multibotd-codex-disc-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("multibotd-codex-disc-{}", std::process::id()));
         let nested = dir.join(".codex/sessions/2026/11/26");
         fs::create_dir_all(&nested).unwrap();
         let path = nested.join("rollout-2026-11-26-11111111-2222-3333-4444-555555555555.jsonl");
@@ -972,7 +992,10 @@ mod tests {
         assert_eq!(sessions[0].agent, AgentKind::Codex);
         assert_eq!(sessions[0].id, "11111111-2222-3333-4444-555555555555");
         assert_eq!(sessions[0].cwd.as_deref(), Some("/work/api"));
-        assert_eq!(sessions[0].last_assistant_preview.as_deref(), Some("codex ready"));
+        assert_eq!(
+            sessions[0].last_assistant_preview.as_deref(),
+            Some("codex ready")
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1024,10 +1047,8 @@ mod tests {
             json!({"type":"event_msg","timestamp":"2026-11-26T10:00:03Z","payload":{"type":"user_message","message":"Do something else"}}),
             json!({"type":"event_msg","timestamp":"2026-11-26T10:00:04Z","payload":{"type":"agent_message","message":"All finished"}})
         );
-        let dir = std::env::temp_dir().join(format!(
-            "multibotd-codex-stale-q-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("multibotd-codex-stale-q-{}", std::process::id()));
         let nested = dir.join(".codex/sessions/2026/11/26");
         fs::create_dir_all(&nested).unwrap();
         fs::write(nested.join("rollout-stale.jsonl"), &superseded_payload).unwrap();
@@ -1050,10 +1071,8 @@ mod tests {
 
     #[test]
     fn codex_extract_header_meta_scrubs_base64_in_event_msg_and_response_item_titles() {
-        let dir = std::env::temp_dir().join(format!(
-            "multibotd-codex-title-b64-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("multibotd-codex-title-b64-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let nested = dir.join(".codex/sessions/2026/11/27");
         fs::create_dir_all(&nested).unwrap();
@@ -1080,12 +1099,18 @@ mod tests {
         let sessions = discover_all_sessions(&dir, 10);
         assert_eq!(sessions.len(), 2);
 
-        let s1 = sessions.iter().find(|s| s.id == "codex-title-event").unwrap();
+        let s1 = sessions
+            .iter()
+            .find(|s| s.id == "codex-title-event")
+            .unwrap();
         assert_eq!(s1.title, "Look [image omitted] and [image omitted] please");
         assert!(!s1.title.contains("data:image"));
         assert!(!s1.title.contains("QQQQ"));
 
-        let s2 = sessions.iter().find(|s| s.id == "codex-title-resp").unwrap();
+        let s2 = sessions
+            .iter()
+            .find(|s| s.id == "codex-title-resp")
+            .unwrap();
         assert_eq!(s2.title, "See [image omitted]");
         assert!(!s2.title.contains("data:image"));
         assert!(!s2.title.contains("UklGR"));
@@ -1098,7 +1123,12 @@ mod tests {
         let parsed_img = CodexProvider.parse_slice(bare_img_payload.as_bytes(), 0);
         assert_eq!(parsed_img.messages.len(), 1);
         assert_eq!(parsed_img.messages[0].text, "[image omitted]");
-        assert!(!parsed_img.messages[0].blocks.iter().any(|b| matches!(b, MessageBlock::Image { .. })));
+        assert!(
+            !parsed_img.messages[0]
+                .blocks
+                .iter()
+                .any(|b| matches!(b, MessageBlock::Image { .. }))
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

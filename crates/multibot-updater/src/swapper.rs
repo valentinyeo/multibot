@@ -88,7 +88,8 @@ pub fn signal_update_ready(exe_path: &Path) -> Result<()> {
     }
     if let Err(err) = fs::rename(&tmp, &marker) {
         let _ = fs::remove_file(&tmp);
-        return Err(err).with_context(|| format!("failed writing readiness marker {}", marker.display()));
+        return Err(err)
+            .with_context(|| format!("failed writing readiness marker {}", marker.display()));
     }
     Ok(())
 }
@@ -437,7 +438,11 @@ impl AtomicSwapper {
     ) -> Result<ApplyResult> {
         // TOCTOU defense: re-verify staged binary SHA-256 digests immediately before touching live files.
         let exe_hash = sha256_file(&staged.multibot_exe_path)?;
-        verify_sha256_hex(&exe_hash, &staged.multibot_exe_sha256, "staged multibot.exe")?;
+        verify_sha256_hex(
+            &exe_hash,
+            &staged.multibot_exe_sha256,
+            "staged multibot.exe",
+        )?;
 
         let daemon_hash = sha256_file(&staged.multibotd_linux_path)?;
         verify_sha256_hex(
@@ -481,8 +486,9 @@ impl AtomicSwapper {
                         "failed launching updated binary ({spawn_err:#}); rollback also failed: {rb_err:#}"
                     );
                 }
-                return Err(spawn_err)
-                    .context("failed launching updated binary; rolled back and recorded rejected version");
+                return Err(spawn_err).context(
+                    "failed launching updated binary; rolled back and recorded rejected version",
+                );
             }
         };
 

@@ -39,11 +39,7 @@ pub struct CacheKey {
 pub type ChatCacheKey = CacheKey;
 
 impl CacheKey {
-    pub fn new(
-        host: impl Into<String>,
-        agent: AgentKind,
-        session_id: impl Into<String>,
-    ) -> Self {
+    pub fn new(host: impl Into<String>, agent: AgentKind, session_id: impl Into<String>) -> Self {
         Self {
             host: host.into(),
             agent,
@@ -257,8 +253,7 @@ impl ChatCache {
     }
 
     pub fn is_token_current(&self, token: &SwitchToken) -> bool {
-        self.active_generation == token.generation
-            && self.active_key.as_ref() == Some(&token.key)
+        self.active_generation == token.generation && self.active_key.as_ref() == Some(&token.key)
     }
 
     /// Read-only O(1) Tier 1 in-memory lookup (zero disk I/O).
@@ -980,10 +975,8 @@ mod tests {
     impl TempDir {
         fn new(prefix: &str) -> Self {
             let n = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "multibot-{prefix}-{}-{n}",
-                std::process::id()
-            ));
+            let path =
+                std::env::temp_dir().join(format!("multibot-{prefix}-{}-{n}", std::process::id()));
             let _ = fs::remove_dir_all(&path);
             fs::create_dir_all(&path).unwrap();
             Self(path)
@@ -1235,7 +1228,9 @@ mod tests {
         assert!(disk_bytes.ends_with(b"\n"));
 
         cache.clear_memory();
-        let loaded = cache.get_or_load(&key).expect("trimmed cache loads cleanly");
+        let loaded = cache
+            .get_or_load(&key)
+            .expect("trimmed cache loads cleanly");
         assert!(loaded.has_more);
         assert!(!loaded.messages.is_empty());
         assert!(loaded.messages.len() < 1000);
@@ -1354,7 +1349,11 @@ mod tests {
             }
         ));
         assert!(!p1.exists());
-        assert!(tmp.path().join(format!("{}.corrupt", k1.disk_filename())).exists());
+        assert!(
+            tmp.path()
+                .join(format!("{}.corrupt", k1.disk_filename()))
+                .exists()
+        );
 
         // 2. Corrupt message JSON on line 2
         let k2 = CacheKey::new("h", AgentKind::Claude, "corrupt-msg");
@@ -1810,9 +1809,7 @@ mod tests {
 
         for bad_sid in ["", "   \t\n"] {
             let key = CacheKey::new("vps", AgentKind::Claude, bad_sid);
-            assert!(
-                ChatCache::encode_session_jsonl(&key, &sess, MAX_SESSION_CACHE_BYTES).is_err()
-            );
+            assert!(ChatCache::encode_session_jsonl(&key, &sess, MAX_SESSION_CACHE_BYTES).is_err());
             assert!(cache.save_to_disk(&key, &sess).is_err());
             assert!(!key.disk_path(tmp.path()).exists());
         }

@@ -5,8 +5,8 @@ mod continuity;
 mod process;
 mod providers;
 mod search;
-mod sessions;
 mod server_workspaces;
+mod sessions;
 mod shell_watch;
 mod watcher;
 
@@ -36,7 +36,10 @@ fn main() -> Result<()> {
             return browser_bridge::cli(&args[1..]);
         }
     }
-    if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
+    if std::env::args()
+        .skip(1)
+        .any(|a| a == "--version" || a == "-V")
+    {
         println!("multibotd {}", build_version());
         return Ok(());
     }
@@ -141,7 +144,9 @@ async fn async_main(
         };
 
         match req {
-            request @ (ClientRequest::BrowserBind { .. } | ClientRequest::BrowserUnbind { .. } | ClientRequest::BrowserResult { .. }) => {
+            request @ (ClientRequest::BrowserBind { .. }
+            | ClientRequest::BrowserUnbind { .. }
+            | ClientRequest::BrowserResult { .. }) => {
                 #[cfg(unix)]
                 browser_bridge.handle(request);
                 #[cfg(not(unix))]
@@ -298,10 +303,27 @@ async fn async_main(
             } => {
                 process_mgr.switch_shell_client(client_id, session_id).await;
             }
-            ClientRequest::SendCrossSession { from_session_id, target_session_id, text } => {
-                match sessions.send(&from_session_id, &target_session_id, &text).await {
-                    Ok(detail) => { let _ = out_tx.send(ServerEvent::SendAccepted { session_id: target_session_id, detail }); }
-                    Err(err) => { let _ = out_tx.send(ServerEvent::Error { code: "cross_session_failed".into(), message: err.to_string() }); }
+            ClientRequest::SendCrossSession {
+                from_session_id,
+                target_session_id,
+                text,
+            } => {
+                match sessions
+                    .send(&from_session_id, &target_session_id, &text)
+                    .await
+                {
+                    Ok(detail) => {
+                        let _ = out_tx.send(ServerEvent::SendAccepted {
+                            session_id: target_session_id,
+                            detail,
+                        });
+                    }
+                    Err(err) => {
+                        let _ = out_tx.send(ServerEvent::Error {
+                            code: "cross_session_failed".into(),
+                            message: err.to_string(),
+                        });
+                    }
                 }
             }
             ClientRequest::InterruptSession { session_id, agent } => {

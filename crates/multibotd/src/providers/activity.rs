@@ -66,7 +66,11 @@ impl LiveActivity {
             return activity.clone();
         }
         let activity = Self::load(home);
-        *slot = Some((home.to_path_buf(), std::time::Instant::now(), activity.clone()));
+        *slot = Some((
+            home.to_path_buf(),
+            std::time::Instant::now(),
+            activity.clone(),
+        ));
         activity
     }
 
