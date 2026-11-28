@@ -1,4 +1,114 @@
 use super::*;
+use gpui_kit::base::TestTextExt;
+use gpui_kit::component::{
+    highlighter::HighlightTheme,
+    text::{
+        InlineElement, InlineRenderContext, MarkdownExtensions, MarkdownNode, MarkdownParseContext,
+        MarkdownPlugin, TextViewStyle, markdown_ast,
+    },
+};
+use gpui_kit::{App, ClickEvent, FontWeight, HighlightStyle, StyleRefinement, WeakEntity};
+
+struct ChatTokenPlugin {
+    view: WeakEntity<MultibotView>,
+}
+
+impl MarkdownPlugin for ChatTokenPlugin {
+    fn name(&self) -> &str {
+        "multibot-chat-token"
+    }
+
+    fn parse(
+        &self,
+        node: &markdown_ast::Node,
+        context: &MarkdownParseContext<'_>,
+    ) -> Option<MarkdownNode> {
+        let markdown_ast::Node::Link(link) = node else {
+            return None;
+        };
+        if !link.url.starts_with("multibot-skill://")
+            && !link.url.starts_with("multibot-session://")
+        {
+            return None;
+        }
+        let label = link
+            .children
+            .iter()
+            .map(|child| child.to_string())
+            .collect::<String>();
+        Some(
+            MarkdownNode::new("multibot-chat-token", link.url.clone())
+                .text(label)
+                .markdown(context.node_source(node).unwrap_or_default().to_string()),
+        )
+    }
+
+    fn render_inline(
+        &self,
+        node: &MarkdownNode,
+        context: &InlineRenderContext,
+        window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<InlineElement> {
+        let url = node.data::<String>()?;
+        let label = SharedString::from(node.as_text().to_string());
+        let element = if url.starts_with("multibot-skill://") {
+            div()
+                .id(SharedString::from(format!(
+                    "chat-skill-{}",
+                    node.source_range().map_or(0, |r| r.start)
+                )))
+                .test_support()
+                .h(context.line_height())
+                .line_height(context.line_height())
+                .text_size(context.font_size())
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::accent_blue())
+                .child(label.clone())
+                .test_text(label)
+                .into_any_element()
+        } else {
+            let key = crate::mention_picker::key_from_url(url)?;
+            let weak = self.view.clone();
+            let url = url.clone();
+            crate::mention_picker::bare_mention(label, &key, context.line_height())
+                .id(SharedString::from(url.clone()))
+                .role(Role::Link)
+                .aria_label(node.as_text().to_string())
+                .test_support()
+                .cursor_pointer()
+                .on_click(move |event, _, cx| {
+                    if !event.standard_click() || event.click_count() != 1 {
+                        return;
+                    }
+                    if let ClickEvent::Mouse(mouse) = event {
+                        if (mouse.up.position - mouse.down.position).magnitude()
+                            > f64::from(DOUBLE_CLICK_DRAG_THRESHOLD_PX)
+                        {
+                            return;
+                        }
+                    }
+                    cx.stop_propagation();
+                    let _ = weak.update(cx, |this, cx| {
+                        this.jump_mention_url(&url, cx);
+                    });
+                })
+                .text_size(context.font_size())
+                .into_any_element()
+        };
+        // Match TextView's shaped-line baseline, including native signed-descent differences.
+        let style = context.text_style();
+        let shaped = window.text_system().shape_line(
+            "M".into(),
+            context.font_size(),
+            &[style.to_run(1)],
+            None,
+        );
+        let baseline =
+            (context.line_height() - shaped.ascent - shaped.descent) / 2. + shaped.ascent;
+        Some(InlineElement::new(element).with_baseline(baseline))
+    }
+}
 
 impl MultibotView {
     pub(super) fn render_tool_cluster(
@@ -73,8 +183,37 @@ impl MultibotView {
 
         let targets = self.mention_targets();
         let text = crate::mention_picker::render_mentions(&text, &targets);
+        let text = crate::slash_picker::render_skills(&text);
         let weak_mention = cx.entity().downgrade();
+        let style = TextViewStyle {
+            highlight_theme: HighlightTheme::default_dark(),
+            is_dark: true,
+            ..Default::default()
+        }
+        .inline_code(HighlightStyle {
+            color: Some(rgb(0xE5E5E5).into()),
+            background_color: Some(theme::bg_surface()),
+            ..Default::default()
+        })
+        .code_block(
+            StyleRefinement::default()
+                .bg(rgb(0x111111))
+                .border_1()
+                .border_color(theme::border_subtle())
+                .rounded(RADIUS_ROW)
+                .font_family("monospace")
+                .text_color(rgb(0xE5E5E5)),
+        );
         let md_view = TextView::markdown(id.clone(), text)
+            .style(style)
+            .inline_code_style(
+                StyleRefinement::default()
+                    .border_0()
+                    .font_family("monospace"),
+            )
+            .markdown_extensions(MarkdownExtensions::default().plugin(ChatTokenPlugin {
+                view: cx.entity().downgrade(),
+            }))
             .link(|link, _| {
                 (crate::external_url::is_http_url(&link.url)
                     || link.url.starts_with("multibot-session://"))
@@ -114,7 +253,8 @@ impl MultibotView {
                                 .bg(theme::bg_hover())
                                 .text_xs()
                                 .text_color(theme::text_muted())
-                                .child(lang),
+                                .child(lang.clone())
+                                .test_text(lang),
                         )
                     })
                     .child(

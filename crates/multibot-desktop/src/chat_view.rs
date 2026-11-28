@@ -470,6 +470,12 @@ impl MultibotView {
                                                             &display_text,
                                                         )
                                                         .is_empty()
+                                                        && !display_text.contains(['@', '`'])
+                                                        && !display_text.contains("~~~")
+                                                        && crate::slash_picker::skill_ranges(
+                                                            &display_text,
+                                                        )
+                                                        .is_empty()
                                                     {
                                                         display_text.into_any_element()
                                                     } else {
@@ -596,6 +602,10 @@ impl MultibotView {
                                     )
                                     .is_empty()
                                         && crate::external_url::url_ranges(&display_text).is_empty()
+                                        && !display_text.contains(['@', '`'])
+                                        && !display_text.contains("~~~")
+                                        && crate::slash_picker::skill_ranges(&display_text)
+                                            .is_empty()
                                     {
                                         display_text.into_any_element()
                                     } else {

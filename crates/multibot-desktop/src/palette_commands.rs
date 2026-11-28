@@ -87,10 +87,16 @@ impl MultibotView {
                 .selection
                 .selected_session
                 .as_ref()
-                .is_some_and(|s| !matches!(s.agent, AgentKind::Claude | AgentKind::Codex))
+                .is_some_and(|s| {
+                    !matches!(
+                        s.agent,
+                        AgentKind::Claude | AgentKind::Codex | AgentKind::Antigravity
+                    )
+                })
             {
-                self.notice =
-                    Some("Permission overrides are supported by Claude and Codex.".into());
+                self.notice = Some(
+                    "Permission overrides are supported by Claude, Codex, and Antigravity.".into(),
+                );
                 self.active_modal = ActiveModal::None;
                 cx.notify();
                 return;
@@ -303,13 +309,14 @@ impl MultibotView {
                 let reactivate = self
                     .find_session_by_key(&session_key)
                     .is_some_and(|session| {
+                        let store = &self.sidebar_state.workspace_store;
                         session.agent == AgentKind::Shell
                             || session.archived
-                            || self.sidebar_state.workspace_store.session_lifecycle(
-                                &session_key,
-                                &session,
-                                now_ms,
-                            ) != multibot_core::workspaces::SessionLifecycle::Active
+                            || store.session_lifecycle(&session_key, &session, now_ms)
+                                != multibot_core::workspaces::SessionLifecycle::Active
+                            || store
+                                .workspace_by_id(&store.effective_workspace_id(&session_key))
+                                .is_some_and(|ws| ws.is_snoozed_at(now_ms))
                     });
                 if !reactivate || self.reactivate_session_key(&session_key, cx) {
                     self.open_session_key_with_tracking(&session_key, false, cx);

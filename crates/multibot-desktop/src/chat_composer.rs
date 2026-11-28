@@ -1,4 +1,5 @@
 use super::*;
+use gpui_kit::base::TestTextExt;
 
 impl MultibotView {
     pub(crate) fn composer_options_for(&self, session: &SessionSummary) -> Option<SessionOptions> {
@@ -17,7 +18,10 @@ impl MultibotView {
             None => None,
         };
         options.filter(|options| {
-            matches!(agent, AgentKind::Claude | AgentKind::Codex) && !options.is_default()
+            matches!(
+                agent,
+                AgentKind::Claude | AgentKind::Codex | AgentKind::Antigravity
+            ) && !options.is_default()
         })
     }
 
@@ -56,7 +60,10 @@ impl MultibotView {
             .as_ref()
             .map_or(AgentKind::Claude, |s| s.agent);
         let options = self.active_composer_options();
-        let supported = matches!(agent, AgentKind::Claude | AgentKind::Codex);
+        let supported = matches!(
+            agent,
+            AgentKind::Claude | AgentKind::Codex | AgentKind::Antigravity
+        );
         let mut menu = v_flex()
             .id("composer-options")
             .test_support()
@@ -95,14 +102,25 @@ impl MultibotView {
             ],
             AgentKind::Codex => &[
                 ("Default", None),
+                ("GPT-6.1 Sol", Some("gpt-6.1-sol")),
                 ("GPT-5.4", Some("gpt-5.4")),
                 ("Codex", Some("gpt-5.3-codex")),
             ],
-            AgentKind::Antigravity | AgentKind::Shell | AgentKind::Pi | AgentKind::Cursor => {
-                &[("Default", None)]
-            }
+            AgentKind::Antigravity => &[
+                ("Default", None),
+                ("Gemini 4 Neon", Some("gemini-4-neon")),
+                ("Gemini 4 Carbon", Some("gemini-4-carbon")),
+                ("Gemini 4 Argon", Some("gemini-4-argon")),
+                ("Gemini 4 Hydrogen", Some("gemini-4-hydrogen")),
+                ("Gemini 3.8 Flash", Some("gemini-3.8-flash")),
+                ("Opus 5.5", Some("claude-opus-5-5")),
+                ("Sonnet 5.5", Some("claude-sonnet-5-5")),
+                ("Orchestrator", Some("gemini-pro-orchestrator-neon")),
+                ("GPT-OSS 120B", Some("gpt-oss-120b-medium")),
+            ],
+            AgentKind::Shell | AgentKind::Pi | AgentKind::Cursor => &[("Default", None)],
         };
-        let mut row = h_flex().gap_1();
+        let mut row = h_flex().flex_wrap().gap_1();
         for (index, &(label, model)) in models.iter().enumerate() {
             let selected = options.model.as_deref() == model;
             let model = model.map(String::from);
@@ -126,18 +144,27 @@ impl MultibotView {
                 .text_color(theme::text_secondary())
                 .child("Effort level"),
         );
-        let mut row = h_flex().gap_1();
+        let mut row = h_flex().flex_wrap().gap_1();
         for (index, (label, effort)) in [
             ("Default", None),
             ("Low", Some(EffortLevel::Low)),
             ("Medium", Some(EffortLevel::Medium)),
             ("High", Some(EffortLevel::High)),
-            ("Max", Some(EffortLevel::Max)),
+            (
+                if agent == AgentKind::Antigravity {
+                    "XHigh"
+                } else {
+                    "Max"
+                },
+                Some(EffortLevel::Max),
+            ),
         ]
         .into_iter()
         .enumerate()
         {
-            if effort == Some(EffortLevel::Max) && agent != AgentKind::Codex {
+            if effort == Some(EffortLevel::Max)
+                && !matches!(agent, AgentKind::Codex | AgentKind::Antigravity)
+            {
                 continue;
             }
             let selected = options.effort == effort;
@@ -161,7 +188,7 @@ impl MultibotView {
                 .text_color(theme::text_secondary())
                 .child("Permission level"),
         );
-        let mut row = h_flex().gap_1();
+        let mut row = h_flex().flex_wrap().gap_1();
         for (index, (label, permission)) in [
             ("Full access", None),
             ("Ask", Some(PermissionLevel::Ask)),
@@ -194,7 +221,7 @@ impl MultibotView {
                     .text_xs()
                     .text_color(theme::text_muted())
                     .child(if !supported {
-                        "Antigravity uses agent defaults; overrides are not supported."
+                        "This agent uses defaults; overrides are not supported."
                     } else if options.permission.is_none()
                         || options.permission == Some(PermissionLevel::FullAccess)
                     {
@@ -621,13 +648,25 @@ impl MultibotView {
                             div().id("prompt-input").test_support().flex_1().min_w_0().child(
                                 Textarea::new(&self.inputs.prompt_input)
                                     .appearance(false)
-                                    .token(|token_ctx, _, _| {
-                                        div().px_1().rounded(px(4.0))
-                                            .text_color(theme::accent_blue())
-                                            .when(token_ctx.token().id().starts_with(QUOTE_TOKEN_PREFIX), |el| {
-                                                el.bg(if token_ctx.is_selected() { rgba(0x3B82F644) } else { rgba(0x3B82F622) })
-                                            })
-                                            .child(token_ctx.token().label().clone())
+                                    .token(|ctx, _, _| {
+                                        let token = ctx.token();
+                                        let element = if token.id().starts_with(QUOTE_TOKEN_PREFIX) {
+                                            div().h(ctx.line_height()).line_height(ctx.line_height())
+                                                .px_1().rounded(px(4.0))
+                                                .text_color(theme::accent_blue())
+                                                .bg(if ctx.is_selected() { rgba(0x3B82F644) } else { rgba(0x3B82F622) })
+                                                .child(div().child(token.label().clone()).test_text(token.label().clone()))
+                                        } else if !token.id().starts_with("skill:") && multibot_core::workspaces::parse_session_key(token.id()).is_some() {
+                                            crate::mention_picker::bare_mention(token.label().clone(), token.id(), ctx.line_height())
+                                        } else {
+                                            div().h(ctx.line_height()).line_height(ctx.line_height())
+                                                .when(token.id().starts_with("skill:"), |el| el
+                                                    .text_color(theme::accent_blue())
+                                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD))
+                                                .child(div().child(token.label().clone()).test_text(token.label().clone()))
+                                        };
+                                        element.when(ctx.is_selected() && !token.id().starts_with(QUOTE_TOKEN_PREFIX), |el| el.bg(rgba(0x60A5FA24)))
+
                                     }),
                             ),
                         )

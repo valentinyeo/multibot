@@ -36,6 +36,51 @@ const INBOX_BORDERLESS_LEAD_PADDING: f32 = INBOX_LEAD_PADDING + INBOX_BORDER_WID
 /// and status dots to its left, so timestamps never shift when a dot appears.
 const INBOX_TIMESTAMP_COLUMN: f32 = 40.0;
 
+pub(crate) fn clean_inbox_preview(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    for line in text.lines() {
+        let mut line = line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            continue;
+        }
+        while let Some(quote) = line.strip_prefix('>') {
+            line = quote.trim_start();
+        }
+        line = line.trim_start_matches('#').trim_start();
+        while let Some(start) = line.find('[') {
+            plain.push_str(&line[..start]);
+            line = &line[start..];
+            if let Some(label_end) = line.find("](") {
+                let url_start = label_end + 2;
+                let mut depth = 1;
+                let url_end = line[url_start..].char_indices().find_map(|(i, ch)| {
+                    match ch {
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
+                    (depth == 0).then_some(url_start + i)
+                });
+                if let Some(end) = url_end {
+                    plain.push_str(&line[1..label_end]);
+                    line = &line[end + 1..];
+                    continue;
+                }
+            }
+            plain.push('[');
+            line = &line[1..];
+        }
+        plain.push_str(line);
+        plain.push(' ');
+    }
+    plain
+        .replace(['`', '*'], "")
+        .replace("__", "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct InboxState {
     pub active_split: InboxSplit,
@@ -1228,7 +1273,7 @@ impl MultibotView {
         });
 
         // 3. Session Rows
-        let mut rows_el = v_flex().gap_1p5();
+        let mut rows_el = v_flex().gap_0p5();
         if filtered_rows.is_empty() {
             rows_el = rows_el.child(
                 div()
@@ -1298,7 +1343,12 @@ impl MultibotView {
                 let preview_text = row
                     .reminder_note
                     .clone()
-                    .or_else(|| row.preview.clone())
+                    .or_else(|| {
+                        row.preview
+                            .as_deref()
+                            .map(clean_inbox_preview)
+                            .filter(|preview| !preview.is_empty())
+                    })
                     .or_else(|| row.cwd.clone())
                     .unwrap_or_else(|| row.agent.label().to_string());
 
@@ -1314,15 +1364,15 @@ impl MultibotView {
                         .bg(if is_selected {
                             theme::bg_active_row()
                         } else {
-                            theme::bg_surface()
+                            gpui_kit::transparent_black()
                         })
                         .border_1()
                         .border_color(if is_selected {
-                            theme::text_secondary()
-                        } else {
                             theme::border_subtle()
+                        } else {
+                            gpui_kit::transparent_black()
                         })
-                        .hover(|s| s.bg(theme::bg_hover()))
+                        .hover(|s| s.bg(theme::bg_surface()))
                         .cursor_pointer()
                         .on_mouse_down(
                             MouseButton::Left,
@@ -1400,15 +1450,20 @@ impl MultibotView {
                                                                 .child(row.title)
                                                                 .into_any_element()
                                                         })
-                                                        .child(
-                                                            div()
-                                                                .px_2()
-                                                                .py_0p5()
-                                                                .rounded(RADIUS_CHIP)
-                                                                .bg(theme::bg_canvas())
-                                                                .text_xs()
-                                                                .text_color(theme::text_muted())
-                                                                .child(row.workspace_name),
+                                                        .when(
+                                                            !matches!(self.inbox_state.active_split, InboxSplit::Workspace(_)),
+                                                            |el| el.child(
+                                                                div()
+                                                                    .id(SharedString::from(format!("inbox-row-workspace-{idx}")))
+                                                                    .test_support()
+                                                                    .px_2()
+                                                                    .py_0p5()
+                                                                    .rounded(RADIUS_CHIP)
+                                                                    .bg(theme::bg_canvas())
+                                                                    .text_xs()
+                                                                    .text_color(theme::text_muted())
+                                                                    .child(row.workspace_name),
+                                                            ),
                                                         ),
                                                 )
                                                 .child(
@@ -1490,6 +1545,8 @@ impl MultibotView {
                                         )
                                         .child(
                                             div()
+                                                .id(SharedString::from(format!("inbox-row-preview-{idx}")))
+                                                .test_support()
                                                 .text_xs()
                                                 .text_color(if row.unread {
                                                     theme::accent_blue()
@@ -1497,7 +1554,7 @@ impl MultibotView {
                                                     theme::text_muted()
                                                 })
                                                 .truncate()
-                                                .child(preview_text),
+                                                .child(preview_text.clone().test_text(preview_text)),
                                         ),
                                 ),
                         ),
@@ -1548,18 +1605,25 @@ impl MultibotView {
                 this.handle_inbox_keydown(ev, window, cx);
             }))
             .child(
-                div().id("inbox-scroll").flex_1().overflow_y_scroll().child(
-                    v_flex()
-                        .w_full()
-                        .max_w(px(800.0))
-                        .mx_auto()
-                        .p_5()
-                        .gap_3()
-                        .child(lifecycle_tabs)
-                        .child(split_row)
-                        .when_some(filter_bar, |el, bar| el.child(bar))
-                        .child(rows_el),
-                ),
+                div()
+                    .id("inbox-scroll")
+                    .test_support()
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .child(
+                        v_flex()
+                            .id("inbox-content")
+                            .test_support()
+                            .w_full()
+                            .max_w(px(960.0))
+                            .mx_auto()
+                            .p_5()
+                            .gap_3()
+                            .child(lifecycle_tabs)
+                            .child(split_row)
+                            .when_some(filter_bar, |el, bar| el.child(bar))
+                            .child(rows_el),
+                    ),
             )
     }
 }

@@ -403,8 +403,8 @@ pub(crate) fn compose_snippet_quotes(content: &InputContent, snippets: &[QuotedS
                 );
                 text.replace_range(start..end, &replacement);
             }
-        } else if let Some((_, _, sid)) =
-            multibot_core::workspaces::parse_session_key(span.token().id())
+        } else if !span.token().id().starts_with("skill:")
+            && let Some((_, _, sid)) = multibot_core::workspaces::parse_session_key(span.token().id())
         {
             text.replace_range(span.range(), &format!("{}{{{sid}}}", span.token().text()));
         }

@@ -76,6 +76,7 @@ pub fn apply_multibot_dark_theme(cx: &mut App) {
     theme.input = border_subtle();
     theme.foreground = text_primary();
     theme.muted_foreground = text_muted();
+    theme.link = accent_blue();
     theme.radius = px(12.0);
     theme.radius_lg = px(18.0);
 }

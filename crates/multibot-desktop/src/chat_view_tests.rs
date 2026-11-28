@@ -1463,7 +1463,7 @@ fn composer_options_are_session_and_host_scoped_and_reset_to_defaults(cx: &mut T
         window.render_frame(cx);
         window.click("attach-file-btn", cx);
         for id in [
-            "composer-model-2",
+            "composer-model-3",
             "composer-effort-4",
             "composer-permission-1",
         ] {
@@ -1529,7 +1529,7 @@ fn composer_options_without_a_session_apply_to_new_claude_chats(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
-fn composer_options_offline_snapshot_and_unsupported_provider(cx: &mut TestAppContext) {
+fn composer_options_offline_snapshot_and_antigravity_controls(cx: &mut TestAppContext) {
     let (handle, view) = open_test_chat_window(cx);
     let session = SessionSummary {
         id: "offline-controls".into(),
@@ -1557,7 +1557,7 @@ fn composer_options_offline_snapshot_and_unsupported_provider(cx: &mut TestAppCo
         window.click("attach-file-btn", cx);
         window.render_frame(cx);
         for id in ["composer-model-0", "composer-effort-1", "composer-permission-1"] {
-            assert_eq!(window.find(id).disabled(), Some(true));
+            assert_ne!(window.find(id).disabled(), Some(true));
         }
         view.update(cx, |v, _| assert!(v.active_composer_options().is_default()));
     }).unwrap();
@@ -5181,6 +5181,177 @@ fn chat_column_and_bubbles_keep_their_approved_widths(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn chat_tokens_render_for_both_roles_and_keep_copy_and_mention_actions(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        let source = SessionSummary { id: "source".into(), title: "Source".into(), ..Default::default() };
+        let bot = SessionSummary { id: "bot".into(), title: "Helper".into(), agent: AgentKind::Codex, ..Default::default() };
+        let mention_url = crate::mention_picker::mention_url(&canonical_session_key("host-b", bot.agent, &bot.id));
+        let code = "let answer = 42; // /plan @Helper";
+        let text = format!("https://example.com/foo/bar\n\nUse /poteto-mode with @Helper and `inline_code`.\n\n```rust\n{code}\n```");
+        for role in [MessageRole::User, MessageRole::Assistant] {
+            for with_blocks in [false, true] {
+                view.update(cx, |v, cx| {
+                    v.connection.host_sessions = vec![("host-a".into(), source.clone()), ("host-b".into(), bot.clone())];
+                    v.selection.selected_session = Some(source.clone());
+                    v.selection.selected_session_host = Some("host-a".into());
+                    v.history.messages = vec![ChatMessage {
+                        id: format!("tokens-{role:?}-{with_blocks}"), role, text: text.clone(),
+                        blocks: if with_blocks { vec![MessageBlock::Text { text: text.clone() }] } else { vec![] },
+                        ..Default::default()
+                    }];
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                let painted = gpui_kit::base::test_support::texts(window);
+                for expected in ["https://example.com/foo/bar", "/poteto-mode", "@Helper", "inline_code", code, "rust"] {
+                    assert!(painted.iter().any(|t| t.text().contains(expected)), "missing {expected}, {role:?}, blocks={with_blocks}");
+                }
+                assert!(!painted.iter().any(|t| t.text().contains("multibot-skill://")));
+                let copy_id = format!("copy-code-0-{:016x}", fnv1a_64(code.as_bytes()));
+                window.click(copy_id, cx);
+                assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some(code));
+                assert_eq!(view.read(cx).notice.as_deref(), Some("Copied code block."));
+                let bounds = window.find(SharedString::from(mention_url.clone())).bounds();
+                window.drag(bounds.center(), bounds.center() + gpui_kit::point(px(32.0), px(0.0)), cx);
+                assert_eq!(view.read(cx).selection.selected_session.as_ref().unwrap().id, "source");
+                window.render_frame(cx);
+                window.click(SharedString::from(mention_url.clone()), cx);
+                assert_eq!(view.read(cx).selection.selected_session.as_ref().unwrap().id, "bot");
+                assert_eq!(view.read(cx).active_session_host(), "host-b");
+            }
+        }
+    }).unwrap();
+}
+
+#[gpui_kit::test]
+fn standalone_chat_skill_and_code_tokens_use_rich_text_without_a_url(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        for role in [MessageRole::User, MessageRole::Assistant] {
+            for with_blocks in [false, true] {
+                for text in ["/foo_bar", "`inline_code`", "```rust\nlet x = 1;\n```"] {
+                    view.update(cx, |v, cx| {
+                        v.history.messages = vec![ChatMessage {
+                            id: format!("standalone-{role:?}-{with_blocks}-{text}"),
+                            role,
+                            text: text.into(),
+                            blocks: if with_blocks {
+                                vec![MessageBlock::Text { text: text.into() }]
+                            } else {
+                                vec![]
+                            },
+                            ..Default::default()
+                        }];
+                        cx.notify();
+                    });
+                    window.render_frame(cx);
+                    if text.starts_with('/') {
+                        assert!(window.find("chat-skill-0").visible());
+                    } else if text.starts_with("```") {
+                        window.click(format!("copy-code-0-{:016x}", fnv1a_64(b"let x = 1;")), cx);
+                        assert_eq!(
+                            cx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+                            Some("let x = 1;")
+                        );
+                    } else {
+                        let painted = gpui_kit::base::test_support::texts(window);
+                        assert!(painted.iter().any(|t| t.text() == "inline_code"));
+                        assert!(!painted.iter().any(|t| t.text().contains('`')));
+                    }
+                }
+            }
+        }
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn composer_skill_tokens_preserve_text_mentions_arguments_and_selection(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
+                input.set_value("@Helper /pl argument", window, cx);
+                input
+                    .replace_range_with_token(
+                        0..7,
+                        input::InlineToken::new("host:codex:bot", "@Helper"),
+                        window,
+                        cx,
+                    )
+                    .unwrap();
+            });
+            let trigger =
+                crate::slash_picker::detect_trigger("@Helper /pl argument", 11, AgentKind::Claude)
+                    .unwrap();
+            v.accept_slash_command_with_trigger(
+                multibot_proto::SlashCommandItem {
+                    name: "plan".into(),
+                    trigger: "/".into(),
+                    description: String::new(),
+                    source: "builtin".into(),
+                    opens_in_terminal: false,
+                },
+                Some(trigger),
+                window,
+                cx,
+            );
+            let input = v.inputs.prompt_input.read(cx);
+            assert_eq!(input.value().as_ref(), "@Helper /plan argument");
+            assert_eq!(input.tokens().len(), 2);
+            assert_eq!(input.tokens()[1].token().id().as_ref(), "skill:plan");
+            assert_eq!(v.bound_mention_prompt(cx), "@Helper{bot} /plan argument");
+            cx.notify();
+        });
+        window.render_frame(cx);
+        let painted = gpui_kit::base::test_support::texts(window);
+        assert!(painted.iter().any(|t| t.text() == "@Helper"));
+        assert!(painted.iter().any(|t| t.text() == "/plan"));
+        view.update(cx, |v, cx| {
+            v.inputs
+                .prompt_input
+                .update(cx, |input, cx| input.select_all(window, cx))
+        });
+        window.render_frame(cx);
+        window.press("ctrl-z", cx);
+        window.press("ctrl-y", cx);
+        window.render_frame(cx);
+        assert_eq!(
+            view.read(cx).bound_mention_prompt(cx),
+            "@Helper{bot} /plan argument"
+        );
+        for (current, name, trigger, expected) in [
+            ("hello", "foo_bar", "/", "hello /foo_bar "),
+            ("", "plugin:plan", "/", "/plugin:plan "),
+            ("", "verify", "$", "$verify "),
+        ] {
+            view.update(cx, |v, cx| {
+                v.inputs
+                    .prompt_input
+                    .update(cx, |input, cx| input.set_value(current, window, cx));
+                v.accept_slash_command_with_trigger(
+                    multibot_proto::SlashCommandItem {
+                        name: name.into(),
+                        trigger: trigger.into(),
+                        description: String::new(),
+                        source: "skill".into(),
+                        opens_in_terminal: false,
+                    },
+                    None,
+                    window,
+                    cx,
+                );
+                assert_eq!(v.inputs.prompt_input.read(cx).value().as_ref(), expected);
+                assert_eq!(v.bound_mention_prompt(cx), expected);
+            });
+            window.render_frame(cx);
+        }
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn session_mentions_route_to_each_target_host_and_keep_same_host_sender_id(
     cx: &mut TestAppContext,
 ) {
@@ -7090,6 +7261,70 @@ fn image_viewer_fits_inline_images_and_closes_on_backdrop_or_session_switch(
 }
 
 #[gpui_kit::test]
+fn antigravity_composer_chips_and_palette_forward_options(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let session = SessionSummary {
+        id: "agy-switch-controls".into(),
+        agent: AgentKind::Antigravity,
+        ..Default::default()
+    };
+    let expected = SessionOptions {
+        model: Some("gemini-4-neon".into()),
+        effort: Some(EffortLevel::Max),
+        permission: Some(PermissionLevel::Auto),
+    };
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.connection.daemon_tx = Some(tx);
+            v.connection.sessions = vec![session.clone()];
+            v.selection.selected_session = Some(session);
+            v.inputs.prompt_input.update(cx, |input, cx| input.set_value("use these settings", window, cx));
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.click("attach-file-btn", cx);
+        window.render_frame(cx);
+        for (prefix, count) in [("model", 10), ("effort", 5), ("permission", 3)] {
+            for index in 0..count {
+                let chip = window.find(format!("composer-{prefix}-{index}"));
+                assert_ne!(chip.disabled(), Some(true));
+                let menu = window.find("composer-options").bounds();
+                assert!(chip.bounds().left() >= menu.left());
+                assert!(chip.bounds().right() <= menu.right());
+            }
+        }
+        for id in ["composer-model-1", "composer-effort-4", "composer-permission-2"] {
+            window.click(id, cx);
+            window.render_frame(cx);
+            assert_eq!(window.find(id).checked(), Some(true));
+        }
+        view.update(cx, |v, _| {
+            assert_eq!(v.active_composer_options(), expected);
+            assert_eq!(v.spawn_composer_options(AgentKind::Antigravity), Some(expected.clone()));
+        });
+        window.click("attach-file-btn", cx);
+        window.click("send-prompt", cx);
+        assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { options: Some(ref o), .. }) if o == &expected));
+        window.press("ctrl-k", cx);
+        window.input("Change permission mode", cx);
+        window.render_frame(cx);
+        assert!(window.find("pal-cmd-permission-mode").visible());
+        window.press("enter", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).palette_state.permission_picker);
+        window.click("pal-permission-ask", cx);
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).active_composer_options().permission, Some(PermissionLevel::Ask));
+        window.press("ctrl-k", cx);
+        window.press("escape", cx);
+        window.click("attach-file-btn", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("composer-permission-1").checked(), Some(true));
+    }).unwrap();
+}
+
+#[gpui_kit::test]
 fn scrolling_near_top_loads_once_and_preserves_reading_anchor(cx: &mut TestAppContext) {
     use multibot_core::cache::{CacheKey, CachedSession};
     use multibot_proto::{ClientRequest, ServerEvent};
@@ -7126,7 +7361,10 @@ fn scrolling_near_top_loads_once_and_preserves_reading_anchor(cx: &mut TestAppCo
         );
         window.scroll(
             "chat-scroll",
-            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.0), scroll.max_offset().y - px(150.0))),
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
+                px(0.0),
+                scroll.max_offset().y - px(150.0),
+            )),
             cx,
         );
         window.render_frame(cx);
