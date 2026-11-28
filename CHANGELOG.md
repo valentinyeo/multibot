@@ -7,6 +7,7 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 - Separate chat replies from background workers, deliver Antigravity messages without interrupt drops, and show unconfirmed delivery with a resend option.
+- Open Google sign-in in plain stock Chrome without extra software GPU or automation flags.
 - Keep Done and Hibernated sessions searchable in Ctrl+K (excluding only Dissolved sessions) with Done and Hibernated labels (MBRU-142).
 - Widen Inbox, quiet row borders, hide repeated workspace badges, and show preview text without Markdown formatting (MBRU-143).
 - Format chat URLs, /skills, @bot mentions, inline code, and code blocks with clean, borderless tokens and clickable links (MBRU-126).
