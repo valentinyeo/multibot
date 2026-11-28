@@ -1090,3 +1090,168 @@ fn inbox_split_bar_hides_zero_count_splits_and_tab_skips_them(cx: &mut TestAppCo
     })
     .unwrap();
 }
+
+/// Opens an Inbox window holding one session per supplied `(id, title, age_ms)`
+/// triple, so leading-edge and timestamp-column assertions run against the real
+/// rendered layout instead of a hand-built approximation of it. `prepare` marks
+/// favorites and unread state before the first frame.
+fn render_inbox_rows(
+    cx: &mut TestAppContext,
+    sessions: &[(&str, &str, i64)],
+    prepare: impl FnOnce(&mut MultibotView),
+) -> (gpui_kit::AnyWindowHandle, Entity<MultibotView>) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::theme::apply_multibot_dark_theme(cx);
+        crate::bind_multibot_keys(cx);
+        crate::state::SharedAppStore::init(cx, multibot_core::MultibotSettings::default());
+    });
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
+    let (handle, view): (gpui_kit::AnyWindowHandle, Entity<MultibotView>) = cx.update(|cx| {
+        gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
+            cx.new(|cx| MultibotView::new(rt, window, cx))
+        })
+        .unwrap()
+    });
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let now = now_unix_ms();
+            v.main_surface = MainSurface::Inbox;
+            v.inbox_state.lifecycle = SessionLifecycle::Active;
+            v.inbox_state.active_split = InboxSplit::All;
+            v.inbox_state.selected_row = 0;
+            v.connection.sessions = sessions
+                .iter()
+                .map(|(id, title, age_ms)| SessionSummary {
+                    id: (*id).into(),
+                    agent: AgentKind::Claude,
+                    title: (*title).into(),
+                    cwd: Some("/srv/app".into()),
+                    source_path: format!("/tmp/{id}.jsonl"),
+                    updated_at_ms: now - age_ms,
+                    ..Default::default()
+                })
+                .collect();
+            prepare(v);
+            cx.notify();
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    (handle, view)
+}
+
+/// Left edge of the Inbox text that reads exactly `needle`.
+fn inbox_text_lead(window: &gpui_kit::Window, needle: &str) -> gpui_kit::Pixels {
+    let root = gpui_kit::ElementId::from("inbox-root");
+    gpui_kit::base::test_support::texts(window)
+        .into_iter()
+        .find(|text| text.visible() && text.text() == needle && text.path().contains(&root))
+        .unwrap_or_else(|| panic!("missing Inbox text {needle:?}"))
+        .bounds()
+        .origin
+        .x
+}
+
+/// Left edge of the Inbox element `id`, registered with `.test_support()`.
+fn inbox_element_left(window: &gpui_kit::Window, id: &'static str) -> gpui_kit::Pixels {
+    window.find(id).bounds().origin.x
+}
+
+/// The Inbox has one leading edge. The label that opens the lifecycle tab row
+/// (`Inbox`), the label that opens the split chip row (`Frequent`), and the agent
+/// icon of every session card all start on the same vertical line, so no header
+/// label sits a pixel or two off the line its own cards are built on.
+#[gpui_kit::test]
+fn inbox_tab_chip_and_card_show_one_leading_edge(cx: &mut TestAppContext) {
+    let (handle, _view) = render_inbox_rows(
+        cx,
+        &[("lead-s1", "Leading Session", 2_000)],
+        |v| {
+            let key = v.session_key_for(&v.connection.sessions[0]);
+            v.sidebar_state.workspace_store.toggle_favorite(&key);
+            v.sidebar_state.workspace_store.record_session_input(&key, now_unix_ms());
+        },
+    );
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let icon_lead = inbox_element_left(window, "inbox-row-agent-0");
+        // Only the opening label of each header row can sit on the shared line;
+        // the rest of the row continues to its right.
+        assert_eq!(
+            inbox_text_lead(window, "Inbox"),
+            icon_lead,
+            "the Inbox tab label must start on the session card leading line"
+        );
+        // `Frequent` opens the split row and carries no leading star icon.
+        assert_eq!(
+            inbox_text_lead(window, "Frequent  1"),
+            icon_lead,
+            "the Frequent chip label must start on the session card leading line"
+        );
+    })
+    .unwrap();
+}
+
+/// Every Inbox card right-aligns its age in one fixed column. A favorite star,
+/// a working dot, and an unread dot all render left of the age, so a bare card,
+/// a favorited card, and a working + unread card share one timestamp right edge
+/// and the ages never shift when a status marker appears.
+#[gpui_kit::test]
+fn inbox_row_timestamps_share_one_fixed_right_aligned_column(cx: &mut TestAppContext) {
+    let (handle, _view) = render_inbox_rows(
+        cx,
+        &[
+            ("col-plain", "Plain Card", 9 * 60_000),
+            ("col-fav", "Favorited Card", 3 * 60_000),
+            ("col-busy", "Working Unread Card", 2 * 60_000),
+            ("col-now", "Fresh Card", 0),
+        ],
+        |v| {
+            let fav = v.session_key_for(&v.connection.sessions[1]);
+            v.sidebar_state.workspace_store.toggle_favorite(&fav);
+            let busy_session = v.connection.sessions[2].clone();
+            let busy = v.session_key_for(&busy_session);
+            v.sidebar_state
+                .workspace_store
+                .toggle_session_unread(&busy, &busy_session);
+            v.connection.sessions[2].working = true;
+        },
+    );
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+
+        // Newest first: `now`, then 2m, 3m, and the plain 9m card.
+        let ages = ["now", "2m", "3m", "9m"];
+        let mut column_edges = Vec::new();
+        for (idx, age) in ages.iter().enumerate() {
+            let column = window.find(format!("inbox-row-age-{idx}"));
+            let column_id = gpui_kit::ElementId::from(format!("inbox-row-age-{idx}"));
+            let text = gpui_kit::base::test_support::texts(window)
+                .into_iter()
+                .find(|t| t.visible() && t.text() == *age && t.path().contains(&column_id))
+                .unwrap_or_else(|| panic!("missing rendered age {age:?} in row {idx}"));
+            assert!(
+                column.bounds().size.width >= px(INBOX_TIMESTAMP_COLUMN),
+                "row {idx} must reserve the fixed timestamp column, got {:?}",
+                column.bounds().size.width
+            );
+            assert_eq!(
+                text.bounds().right(),
+                column.bounds().right(),
+                "row {idx} age {age:?} must sit flush right in its timestamp column"
+            );
+            column_edges.push(column.bounds().right());
+        }
+        assert!(
+            column_edges.windows(2).all(|pair| pair[0] == pair[1]),
+            "every Inbox card must end its timestamp column on one line: {column_edges:?}"
+        );
+    })
+    .unwrap();
+}
