@@ -666,7 +666,6 @@ impl MultibotView {
                                                 .child(div().child(token.label().clone()).test_text(token.label().clone()))
                                         };
                                         element.when(ctx.is_selected() && !token.id().starts_with(QUOTE_TOKEN_PREFIX), |el| el.bg(rgba(0x60A5FA24)))
-
                                     }),
                             ),
                         )

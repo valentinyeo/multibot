@@ -11,6 +11,7 @@ use gpui_kit::{
     prelude::FluentBuilder,
     px,
 };
+use multibot_core::workspaces::parse_session_key;
 use multibot_proto::AgentKind;
 use std::ops::Range;
 
