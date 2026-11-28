@@ -296,7 +296,7 @@ pub(crate) fn bare_mention(
                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .child(initial),
         )
-        .child(label)
+        .child(div().child(label.clone()).test_text(label))
 }
 
 impl MultibotView {

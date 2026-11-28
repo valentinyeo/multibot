@@ -63,7 +63,8 @@ impl MarkdownPlugin for ChatTokenPlugin {
                 .text_size(context.font_size())
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::accent_blue())
-                .child(label)
+                .child(label.clone())
+                .test_text(label)
                 .into_any_element()
         } else {
             let key = crate::mention_picker::key_from_url(url)?;

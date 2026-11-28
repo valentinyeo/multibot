@@ -684,7 +684,7 @@ impl MultibotView {
                                                 .when(token.id().starts_with("skill:"), |el| el
                                                     .text_color(theme::accent_blue())
                                                     .font_weight(gpui_kit::FontWeight::SEMIBOLD))
-                                                .child(token.label().clone())
+                                                .child(div().child(token.label().clone()).test_text(token.label().clone()))
                                         };
                                         element.when(ctx.is_selected(), |el| el.bg(rgba(0x60A5FA24)))
                                     }),
