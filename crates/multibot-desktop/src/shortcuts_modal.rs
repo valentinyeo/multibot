@@ -78,6 +78,8 @@ impl MultibotView {
                                 Button::new("close-changelog")
                                     .xsmall()
                                     .label("Esc")
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.active_modal = ActiveModal::None;
                                         this.focus_active_surface_default(window, cx);
@@ -175,7 +177,7 @@ impl MultibotView {
                                 .rounded(RADIUS_CHIP)
                                 .bg(theme::bg_hover())
                                 .text_xs()
-                                .text_color(theme::accent_blue())
+                                .text_color(theme::text_muted())
                                 .child(spec.display),
                         ),
                 );
@@ -235,6 +237,7 @@ impl MultibotView {
                             .child(
                                 div()
                                     .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(theme::text_primary())
                                     .child("Keyboard Shortcuts (Preserved Multibot Contract)"),
                             )
@@ -242,6 +245,8 @@ impl MultibotView {
                                 Button::new("close-shortcuts")
                                     .xsmall()
                                     .label("Esc")
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.active_modal = ActiveModal::None;
                                         this.focus_active_surface_default(window, cx);

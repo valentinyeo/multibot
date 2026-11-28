@@ -1226,8 +1226,8 @@ fn lifecycle_done_hibernate_modes_peek_reply_and_timer(cx: &mut TestAppContext) 
         for wake in [false, true] {
             window.press("ctrl-h", cx);
             window.render_frame(cx);
-            assert!(view.read(cx).palette_state.hibernate_wake_on_reply);
-            if !wake {
+            assert!(!view.read(cx).palette_state.hibernate_wake_on_reply);
+            if wake {
                 window.press("tab", cx);
                 window.render_frame(cx);
             }
@@ -2394,7 +2394,7 @@ fn dev_stats_start_compact_and_toggle_by_click_and_escape_in_both_sidebar_modes(
             window.render_frame(cx);
             assert!(!view.read(cx).sidebar_state.dev_stats_expanded);
             assert!(window.try_find("dev-stats-details").is_none());
-            assert!(window.find("gpu-status-card").bounds().size.height <= px(24.0));
+            assert!(window.find("gpu-status-card").bounds().size.height <= px(26.0));
             window.click("gpu-status-card", cx);
             window.render_frame(cx);
             for id in ["dev-stats-details", "dev-stats-gpu", "dev-stats-footprint", "dev-stats-connection"] {

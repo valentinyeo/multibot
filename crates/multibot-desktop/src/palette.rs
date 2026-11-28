@@ -19,6 +19,7 @@ use gpui_kit::{
         button::Button,
         h_flex,
         input::{self, Input, InputEvent},
+        label::Label,
         v_flex,
     },
     div, hsla,
@@ -31,7 +32,28 @@ use multibot_core::workspaces::{
     PaletteStats, STARRED_WORKSPACE_ID, now_unix_ms, rank_palette,
 };
 use multibot_keys::{ALL_CATEGORIES, by_category};
-use multibot_proto::{AgentKind, ClientRequest};
+use multibot_proto::{AgentKind, ClientRequest, PermissionLevel};
+
+const PERMISSION_CHOICES: [(&str, &str, Option<PermissionLevel>, &str); 3] = [
+    (
+        "pal-permission-full-access",
+        "Full access (default)",
+        None,
+        "Bypass all approvals",
+    ),
+    (
+        "pal-permission-auto",
+        "Auto",
+        Some(PermissionLevel::Auto),
+        "Auto-approve safe edits",
+    ),
+    (
+        "pal-permission-ask",
+        "Ask",
+        Some(PermissionLevel::Ask),
+        "Require approval",
+    ),
+];
 
 pub(crate) struct SessionDirectoryPicker {
     agent: AgentKind,
@@ -54,6 +76,7 @@ pub(crate) struct PaletteState {
     pub directory_picker: Option<SessionDirectoryPicker>,
     pub dissolve_workspace_id: Option<String>,
     pub provider_picker: bool,
+    pub permission_picker: bool,
     pub selected_index: usize,
     pub mode: PaletteMode,
     pub input_sub: Option<Subscription>,
@@ -70,6 +93,7 @@ impl MultibotView {
         self.hide_browser_pane();
         self.active_modal = ActiveModal::Palette;
         self.palette_state.provider_picker = false;
+        self.palette_state.permission_picker = false;
         self.palette_state.mode = PaletteMode::Global;
         self.palette_state.server_shells = false;
         self.palette_state.shell_kill_target = None;
@@ -130,6 +154,7 @@ impl MultibotView {
         self.hide_browser_pane();
         self.active_modal = ActiveModal::Palette;
         self.palette_state.provider_picker = false;
+        self.palette_state.permission_picker = false;
         self.palette_state.reminder_target = None;
         self.palette_state.directory_picker = None;
         self.palette_state.dissolve_workspace_id = None;
@@ -173,7 +198,7 @@ impl MultibotView {
             target => target,
         };
         self.open_palette(window, cx);
-        self.palette_state.hibernate_wake_on_reply = true;
+        self.palette_state.hibernate_wake_on_reply = false;
         self.palette_state.reminder_target = Some(target);
         self.palette_state.directory_picker = None;
         self.palette_state.dissolve_workspace_id = None;
@@ -215,6 +240,30 @@ impl MultibotView {
     pub(crate) fn build_palette_rows(&self, query: &str, now_ms: i64) -> Vec<PaletteRow> {
         if self.palette_state.provider_picker {
             return self.provider_picker_rows(query);
+        }
+        if self.palette_state.permission_picker {
+            let query = query.trim().to_lowercase();
+            let active = self
+                .active_composer_options()
+                .permission
+                .filter(|p| *p != PermissionLevel::FullAccess);
+            return PERMISSION_CHOICES
+                .into_iter()
+                .filter(|(_, label, _, description)| {
+                    format!("{label} {description}")
+                        .to_lowercase()
+                        .contains(&query)
+                })
+                .map(|(id, label, permission, description)| PaletteRow::Command {
+                    id: id.into(),
+                    label: format!("{label} — {description}"),
+                    chord: if active == permission { "Active" } else { "" }.into(),
+                    category: PaletteCategory::Sessions,
+                    destructive: false,
+                    match_rank: 0,
+                    frecency: 0,
+                })
+                .collect();
         }
         if self.palette_state.shell_kill_target.is_some() {
             return [
@@ -419,10 +468,18 @@ impl MultibotView {
         let query = self.inputs.palette_input.read(cx).value().to_string();
         if query.is_empty()
             && (self.palette_state.provider_picker
+                || self.palette_state.permission_picker
+                || self.palette_state.server_shells
+                || self.palette_state.reminder_target.is_some()
+                || self.palette_state.directory_picker.is_some()
+                || self.palette_state.dissolve_workspace_id.is_some()
                 || self.palette_state.mode != PaletteMode::Global)
         {
             self.palette_state.provider_picker = false;
+            self.palette_state.permission_picker = false;
             self.palette_state.mode = PaletteMode::Global;
+            self.palette_state.server_shells = false;
+            self.palette_state.shell_kill_target = None;
             self.palette_state.reminder_target = None;
             self.palette_state.directory_picker = None;
             self.palette_state.dissolve_workspace_id = None;
@@ -820,7 +877,50 @@ impl MultibotView {
             }
         }
 
-        let context_banner = self.palette_state.mode.target_session_key().map(|key| {
+        let hibernate = matches!(
+            self.palette_state.reminder_target,
+            Some(ReminderTarget::Session(_))
+        );
+        let (title, hint): (String, &str) = if self.palette_state.permission_picker {
+            ("Permission mode".into(), "Up/Down · Enter · Backspace")
+        } else if self.palette_state.provider_picker {
+            (
+                "Switch provider / harness".into(),
+                "Up/Down · Enter · Backspace",
+            )
+        } else if self.palette_state.shell_kill_target.is_some() {
+            (
+                "End server shell permanently? Running work will stop.".into(),
+                "Enter · Esc",
+            )
+        } else if self.palette_state.server_shells {
+            ("Server shells".into(), "Enter to attach · End to kill")
+        } else if let Some(id) = &self.palette_state.dissolve_workspace_id {
+            let name = self
+                .sidebar_state
+                .workspace_store
+                .workspace_by_id(id)
+                .map(|w| w.name.as_str())
+                .unwrap_or("workspace");
+            (
+                format!(
+                    "Dissolve {name}? Stop {} live agents; keep chat logs.",
+                    self.workspace_live_session_keys(id).len()
+                ),
+                "Enter · Esc",
+            )
+        } else if let Some(picker) = &self.palette_state.directory_picker {
+            (
+                format!("New {} session directory", picker.agent.label()),
+                "Up/Down · Enter · Backspace",
+            )
+        } else if hibernate {
+            ("Hibernate".into(), "Tab toggles · Up/Down · Enter")
+        } else if self.palette_state.reminder_target.is_some() {
+            ("Snooze workspace".into(), "Up/Down · Enter · Backspace")
+        } else if self.palette_state.mode == PaletteMode::Workspaces {
+            ("Workspaces".into(), "Up/Down · Enter · Backspace")
+        } else if let Some(key) = self.palette_state.mode.target_session_key() {
             let title = self
                 .find_session_by_key(key)
                 .map(|s| {
@@ -830,63 +930,9 @@ impl MultibotView {
                         .to_string()
                 })
                 .unwrap_or_else(|| key.to_string());
-            format!("Session actions: {title}  (Backspace to exit)")
-        });
-        let context_banner = if self.palette_state.mode == PaletteMode::Workspaces {
-            Some("Workspaces · Up/Down then Enter · Backspace to return".into())
+            (format!("Session actions: {title}"), "Backspace to return")
         } else {
-            context_banner
-        };
-        let context_banner = match &self.palette_state.reminder_target {
-            Some(ReminderTarget::Session(_)) => Some(format!(
-                "Hibernate · {} · Tab toggles · optional note · Up/Down Enter",
-                if self.palette_state.hibernate_wake_on_reply {
-                    "Wake on reply"
-                } else {
-                    "Stay hidden"
-                }
-            )),
-            Some(ReminderTarget::Workspace(_)) => {
-                Some("Snooze workspace · Up/Down then Enter".into())
-            }
-            None => context_banner,
-        };
-
-        let context_banner = if self.palette_state.provider_picker {
-            Some("Switch provider / harness · Up/Down then Enter".into())
-        } else {
-            context_banner
-        };
-        let context_banner = if let Some(picker) = &self.palette_state.directory_picker {
-            Some(format!(
-                "New {} session · Choose a directory · Up/Down then Enter",
-                picker.agent.label()
-            ))
-        } else {
-            context_banner
-        };
-
-        let context_banner = if let Some(id) = &self.palette_state.dissolve_workspace_id {
-            let name = self
-                .sidebar_state
-                .workspace_store
-                .workspace_by_id(id)
-                .map(|w| w.name.as_str())
-                .unwrap_or("workspace");
-            Some(format!(
-                "Dissolve {name} and stop {} live agents? Chat logs stay in Dissolved.",
-                self.workspace_live_session_keys(id).len()
-            ))
-        } else {
-            context_banner
-        };
-
-        let context_banner = if self.palette_state.shell_kill_target.is_some() {
-            Some("End this server shell permanently? Running work will stop.".into())
-        } else if self.palette_state.server_shells {
-            Some("Server shells · Enter to attach · End to kill".into())
-        } else {
-            context_banner
+            ("Command palette".into(), "Up/Down · Enter · Esc")
         };
 
         div()
@@ -1010,20 +1056,79 @@ impl MultibotView {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
-                    .when_some(context_banner, |el, banner| {
-                        el.child(
-                            div()
-                                .id("palette-context-banner")
-                                .test_support()
-                                .px_3()
-                                .py_1p5()
-                                .border_b_1()
-                                .border_color(theme::border_subtle())
-                                .text_xs()
-                                .text_color(theme::accent_blue())
-                                .child(banner),
-                        )
-                    })
+                    .child(
+                        h_flex()
+                            .id("palette-context-banner")
+                            .test_support()
+                            .justify_between()
+                            .items_center()
+                            .gap_3()
+                            .px_4()
+                            .pt_3()
+                            .pb_2()
+                            .border_b_1()
+                            .border_color(theme::border_subtle())
+                            .child(
+                                h_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .id("palette-title")
+                                            .test_support()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme::text_primary())
+                                            .child(title),
+                                    )
+                                    .when(hibernate, |el| {
+                                        el.child(
+                                            div()
+                                                .id("hibernate-wake-mode")
+                                                .test_support()
+                                                .role(Role::Button)
+                                                .flex_shrink_0()
+                                                .whitespace_nowrap()
+                                                .px_2p5()
+                                                .py_1()
+                                                .rounded(RADIUS_CHIP)
+                                                .bg(theme::bg_active_row())
+                                                .border_1()
+                                                .border_color(theme::accent_blue())
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(theme::text_primary())
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(theme::bg_hover()))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.palette_state.hibernate_wake_on_reply =
+                                                        !this.palette_state.hibernate_wake_on_reply;
+                                                    cx.notify();
+                                                }))
+                                                .child(Label::new(
+                                                    if self.palette_state.hibernate_wake_on_reply {
+                                                        "Wake on reply"
+                                                    } else {
+                                                        "Stay hidden"
+                                                    },
+                                                )),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("palette-keyboard-hint")
+                                    .test_support()
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .child(hint),
+                            ),
+                    )
                     .child(
                         div()
                             .px_3()

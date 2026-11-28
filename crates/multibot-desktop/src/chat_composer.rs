@@ -35,7 +35,7 @@ impl MultibotView {
             })
     }
 
-    pub(super) fn update_composer_options(
+    pub(crate) fn update_composer_options(
         &mut self,
         update: impl FnOnce(&mut SessionOptions),
         cx: &mut Context<Self>,
@@ -163,15 +163,17 @@ impl MultibotView {
         );
         let mut row = h_flex().gap_1();
         for (index, (label, permission)) in [
-            ("Default", None),
+            ("Full access", None),
             ("Ask", Some(PermissionLevel::Ask)),
             ("Auto", Some(PermissionLevel::Auto)),
-            ("Full access", Some(PermissionLevel::FullAccess)),
         ]
         .into_iter()
         .enumerate()
         {
-            let selected = options.permission == permission;
+            let selected = options
+                .permission
+                .filter(|p| *p != PermissionLevel::FullAccess)
+                == permission;
             row = row.child(
                 Button::new(format!("composer-permission-{index}"))
                     .small()
@@ -193,8 +195,10 @@ impl MultibotView {
                     .text_color(theme::text_muted())
                     .child(if !supported {
                         "Antigravity uses agent defaults; overrides are not supported."
-                    } else if options.permission == Some(PermissionLevel::FullAccess) {
-                        "Full access bypasses approval checks. Applies on the next turn."
+                    } else if options.permission.is_none()
+                        || options.permission == Some(PermissionLevel::FullAccess)
+                    {
+                        "Full access (default) bypasses approval checks."
                     } else {
                         "Applies on the next turn. Auto allows workspace edits."
                     }),
@@ -558,8 +562,9 @@ impl MultibotView {
                                 .id("attach-file-btn")
                                 .role(Role::Button)
                                 .test_support()
-                                .w(px(28.0))
-                                .h(px(28.0))
+                                .w(px(32.0))
+                                .h(px(32.0))
+                                .flex_shrink_0()
                                 .rounded(RADIUS_CHIP)
                                 .bg(theme::bg_hover())
                                 .hover(|s| s.bg(theme::bg_active_row()))
@@ -589,6 +594,18 @@ impl MultibotView {
                                     .appearance(false),
                             ),
                         )
+                        .when(self.voice.phase != multibot_core::voice::DictationPhase::Off || self.voice.error.is_some(), |el| {
+                            el.child(div().px_2().py_1().child(
+                                h_flex().id("dictation-status").test_support().gap(px(6.0)).items_center().text_xs()
+                                    .text_color(rgb(0xF5F5F5))
+                                    .when(self.voice.phase == multibot_core::voice::DictationPhase::Listening, |el| el
+                                        .child(div().id("dictation-stop").test_support().size(px(9.0)).rounded(px(2.0)).bg(rgb(0xF5F5F5)))
+                                        .child(div().id("dictation-timer").test_support().font_family("monospace").child(Label::new(self.voice.elapsed_label()).text_color(rgb(0xF5F5F5))))
+                                        .child(div().child(Label::new("·····").text_color(rgb(0x737373)))))
+                                    .when(self.voice.phase == multibot_core::voice::DictationPhase::Finishing, |el| el.child("Transcribing..."))
+                                    .when(self.voice.error.is_some(), |el| el.text_color(theme::accent_amber()).child("Mic unavailable")),
+                            ))
+                        })
                         .child(
                             Button::new("composer-voice")
                                 .small()
@@ -600,21 +617,9 @@ impl MultibotView {
                                 .text_color(rgb(0xA3A3A3))
                                 .accessibility_label("Voice dictation")
                                 .tooltip(self.voice.error.clone().unwrap_or_else(|| "Start / stop dictation · Ctrl+D / Ctrl+Shift+Space · Esc cancels".into()))
-                                .when(self.voice.phase == multibot_core::voice::DictationPhase::Off && self.voice.error.is_none(), |el| {
-                                    el.w(px(32.0)).icon(lucide_icon(icons::MIC, 16.0))
-                                })
-                                .when(self.voice.phase != multibot_core::voice::DictationPhase::Off || self.voice.error.is_some(), |el| {
-                                    el.px_3().py_1().child(
-                                        h_flex().id("dictation-status").test_support().gap(px(6.0)).items_center().text_xs()
-                                            .text_color(rgb(0xF5F5F5))
-                                            .when(self.voice.phase == multibot_core::voice::DictationPhase::Listening, |el| el
-                                                .child(div().id("dictation-stop").test_support().size(px(9.0)).rounded(px(2.0)).bg(rgb(0xF5F5F5)))
-                                                .child(div().id("dictation-timer").test_support().font_family("monospace").child(Label::new(self.voice.elapsed_label()).text_color(rgb(0xF5F5F5))))
-                                                .child(div().child(Label::new("·····").text_color(rgb(0x737373)))))
-                                            .when(self.voice.phase == multibot_core::voice::DictationPhase::Finishing, |el| el.child("Transcribing..."))
-                                            .when(self.voice.error.is_some(), |el| el.text_color(theme::accent_amber()).child("Mic unavailable")),
-                                    )
-                                })
+                                .w(px(32.0))
+                                .flex_shrink_0()
+                                .icon(lucide_icon(icons::MIC, 16.0))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.toggle_dictation(window, cx);
                                 })),
@@ -628,7 +633,7 @@ impl MultibotView {
                                 .rounded(RADIUS_CHIP)
                                 .bg(rgb(0xC83E3B))
                                 .text_color(rgb(0xFFFFFF))
-                                .icon(lucide_icon(icons::SQUARE_FILLED, 14.0))
+                                .icon(lucide_icon(icons::SQUARE_FILLED, 16.0))
                                 .accessibility_label("Stop response")
                                 .tooltip("Stop response")
                                 .on_click(cx.listener(|this, _, _, cx| { this.interrupt_active_session(cx); })),

@@ -1459,14 +1459,14 @@ fn composer_options_are_session_and_host_scoped_and_reset_to_defaults(cx: &mut T
         for id in [
             "composer-model-2",
             "composer-effort-4",
-            "composer-permission-3",
+            "composer-permission-1",
         ] {
             window.click(id, cx);
         }
         let selected = SessionOptions {
             model: Some("gpt-5.3-codex".into()),
             effort: Some(EffortLevel::Max),
-            permission: Some(PermissionLevel::FullAccess),
+            permission: Some(PermissionLevel::Ask),
         };
         view.update(cx, |v, cx| {
             assert_eq!(v.active_composer_options(), selected);
@@ -1550,7 +1550,7 @@ fn composer_options_offline_snapshot_and_unsupported_provider(cx: &mut TestAppCo
         window.render_frame(cx);
         window.click("attach-file-btn", cx);
         window.render_frame(cx);
-        for id in ["composer-model-0", "composer-effort-1", "composer-permission-3"] {
+        for id in ["composer-model-0", "composer-effort-1", "composer-permission-1"] {
             assert_eq!(window.find(id).disabled(), Some(true));
         }
         view.update(cx, |v, _| assert!(v.active_composer_options().is_default()));
@@ -4823,4 +4823,147 @@ fn failed_upload_restores_prompt_quote_and_attachments_safely(cx: &mut TestAppCo
         });
     })
     .unwrap();
+}
+
+#[gpui_kit::test]
+fn empty_chat_has_uniform_floating_chrome_without_welcome_or_inbox_dot(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let session = SessionSummary {
+                id: "empty-chrome".into(),
+                title: "Empty chat".into(),
+                agent: AgentKind::Claude,
+                last_assistant_id: Some("unread".into()),
+                last_assistant_ms: Some(now_unix_ms()),
+                ..Default::default()
+            };
+            v.connection.sessions = vec![session.clone()];
+            v.selection.selected_session = Some(session);
+            v.set_sidebar_mode_synced(multibot_core::SidebarMode::Open, cx);
+            cx.notify();
+        });
+        window.render_frame(cx);
+        for id in [
+            "toggle-inbox",
+            "chat-menu",
+            "attach-file-btn",
+            "composer-voice",
+            "send-prompt",
+        ] {
+            assert_eq!(
+                window.find(id).bounds().size,
+                gpui_kit::size(px(32.0), px(32.0)),
+                "{id}"
+            );
+        }
+        let text = gpui_kit::base::test_support::texts(window);
+        assert!(
+            !text
+                .iter()
+                .any(|t| t.text().contains("Obsidian Dark GPUI Shell"))
+        );
+        assert!(!text.iter().any(|t| t.path().contains(&"welcome-md".into())));
+        assert!(window.try_find("msg-bubble-0").is_none());
+        assert!(window.try_find("chat-busy-dots").is_none());
+        let inbox = window.find("toggle-inbox").bounds();
+        let menu = window.find("chat-menu").bounds();
+        assert_eq!(menu.left() - inbox.right(), px(6.0));
+        assert!(!window.painted_quads().iter().any(|q| {
+            q.bounds.size == gpui_kit::size(px(5.0), px(5.0)).scale(window.scale_factor())
+                && q.background == gpui_kit::Background::from(theme::accent_blue())
+        }));
+        let panel = window.find("chat-panel-root").bounds();
+        let scroll = view.read(cx).chat_state.scroll_handle.bounds();
+        assert_eq!(scroll.top(), panel.top());
+        assert_eq!(scroll.bottom(), panel.bottom());
+        let title = window.find("header-title-pill").bounds();
+        assert!((f32::from(title.center().x - panel.center().x)).abs() <= 1.0);
+        for id in ["chat-top-overlay", "chat-composer-overlay"] {
+            let bounds = window.find(id).bounds().scale(window.scale_factor());
+            assert!(
+                !window.painted_quads().iter().any(|q| q.bounds == bounds),
+                "{id} must have no painted background"
+            );
+        }
+        let sidebar = window.find("sidebar-open").bounds();
+        let sessions = window.find("sessions-scroll").bounds();
+        assert_eq!(sidebar.top(), sessions.top());
+        assert_eq!(sidebar.bottom(), sessions.bottom());
+        let version = window.find("gpu-status-card").bounds();
+        assert_eq!(version.size.height, px(26.0));
+        assert!(version.size.width < sidebar.size.width / 2.0);
+        view.update(cx, |v, cx| {
+            v.selection.selected_session.as_mut().unwrap().working = true;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.find("chat-busy-dots").visible());
+        assert_eq!(
+            window.find("stop-agent").bounds().size,
+            gpui_kit::size(px(32.0), px(32.0))
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn session_mentions_route_to_each_target_host_and_keep_same_host_sender_id(
+    cx: &mut TestAppContext,
+) {
+    let (handle, view) = open_test_chat_window(cx);
+    let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+    let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+    cx.update_window(handle, |_, _, cx| {
+        view.update(cx, |v, cx| {
+            let session = |id: &str, title: &str| SessionSummary {
+                id: id.into(), title: title.into(), agent: AgentKind::Claude, ..Default::default()
+            };
+            let source = session("shared-id", "Valentin");
+            let local = session("local", "Local");
+            // Daemon-local IDs can coincide across hosts, including the sender's ID.
+            let remote = session("shared-id", "Inne");
+            let remote_local = session("local", "Remote Local");
+            v.connection.host_sessions = vec![
+                ("valentin@contabo".into(), source.clone()),
+                ("valentin@contabo".into(), local),
+                ("inne@contabo".into(), remote.clone()),
+                ("inne@contabo".into(), remote_local),
+            ];
+            v.connection.host_txs.insert("valentin@contabo".into(), tx_a);
+            v.connection.host_txs.insert("inne@contabo".into(), tx_b);
+            v.selection.selected_session = Some(source.clone());
+            v.selection.selected_session_host = Some("valentin@contabo".into());
+            let targets = v.mention_targets();
+            assert_eq!(targets.len(), 4);
+            assert!(targets.iter().any(|t| t.name == "Inne" && t.detail.contains("inne@contabo")));
+            let text = "@Inne @Inne @Local @Remote Local\n> @Valentin\n`@Valentin`";
+            v.dispatch_text_prompt_for_session("valentin@contabo", source, text.into(), None, cx);
+            let mut deliveries_a = Vec::new();
+            while let Ok(request) = rx_a.try_recv() {
+                if let ClientRequest::SendCrossSession { from_session_id, target_session_id, text: body } = request {
+                    deliveries_a.push((from_session_id, target_session_id));
+                    assert_eq!(body, text);
+                }
+            }
+            assert_eq!(deliveries_a, vec![("shared-id".into(), "local".into())]);
+            let mut deliveries_b = Vec::new();
+            while let Ok(request) = rx_b.try_recv() {
+                if let ClientRequest::SendCrossSession { from_session_id, target_session_id, text: body } = request {
+                    deliveries_b.push((from_session_id, target_session_id));
+                    assert_eq!(body, text);
+                }
+            }
+            assert_eq!(deliveries_b, vec![
+                ("valentin@contabo:shared-id".into(), "shared-id".into()),
+                ("valentin@contabo:shared-id".into(), "local".into()),
+            ]);
+            v.selection.selected_session = Some(remote.clone());
+            v.selection.selected_session_host = Some("inne@contabo".into());
+            v.dispatch_text_prompt_for_session("inne@contabo", remote, "@Valentin hello".into(), None, cx);
+            assert!(matches!(rx_a.try_recv(), Ok(ClientRequest::SendCrossSession { from_session_id, target_session_id, .. })
+                if from_session_id == "inne@contabo:shared-id" && target_session_id == "shared-id"));
+            assert!(!std::iter::from_fn(|| rx_b.try_recv().ok()).any(|r| matches!(r, ClientRequest::SendCrossSession { .. })));
+        });
+    }).unwrap();
 }

@@ -149,7 +149,13 @@ impl MultibotView {
                         h_flex()
                             .items_center()
                             .justify_between()
-                            .child(div().text_lg().child("Chat Info"))
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .text_color(theme::text_primary())
+                                    .child("Chat Info"),
+                            )
                             .child(
                                 Button::new("close-chat-info")
                                     .xsmall()

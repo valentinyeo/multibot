@@ -120,15 +120,17 @@ impl MultibotView {
                 continue;
             }
             if let Some(target) = mention.target
-                && target.session_id != session.id
-                && self
-                    .host_for_session_key(&target.session_key)
-                    .is_some_and(|(target_host, _)| target_host == host)
-                && delivered.insert(target.session_id.clone())
-                && let Some(tx) = self.tx_for_host(host)
+                && target.session_key != key
+                && let Some((target_host, _)) = self.host_for_session_key(&target.session_key)
+                && delivered.insert(target.session_key.clone())
+                && let Some(tx) = self.tx_for_host(&target_host)
             {
                 let _ = tx.send(ClientRequest::SendCrossSession {
-                    from_session_id: session.id.clone(),
+                    from_session_id: if target_host == host {
+                        session.id.clone()
+                    } else {
+                        format!("{host}:{}", session.id)
+                    },
                     target_session_id: target.session_id,
                     text: text.clone(),
                 });

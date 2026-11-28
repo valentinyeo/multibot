@@ -1146,6 +1146,7 @@ impl MultibotView {
                                         .child(
                                             div()
                                                 .text_sm()
+                                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                                 .text_color(theme::text_primary())
                                                 .child(self.table_modal_state.title.clone()),
                                         )

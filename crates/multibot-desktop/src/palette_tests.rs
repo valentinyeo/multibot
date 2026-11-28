@@ -249,6 +249,19 @@ fn hibernate_displays_alt_h_and_accepts_ctrl_h_fallback(cx: &mut TestAppContext)
             window.press(chord, cx);
             window.render_frame(cx);
             assert!(window.find("pal-reminder-0").visible());
+            assert!(!view.read(cx).palette_state.hibernate_wake_on_reply);
+            let title = window.find("palette-title").bounds();
+            let hint = window.find("palette-keyboard-hint").bounds();
+            assert!(title.size.height > hint.size.height);
+            assert!(hint.left() > window.find("hibernate-wake-mode").bounds().right());
+            let text = gpui_kit::base::test_support::texts(window);
+            assert!(text.iter().any(|t| t.text() == "Stay hidden"));
+            window.press("tab", cx);
+            window.render_frame(cx);
+            assert!(view.read(cx).palette_state.hibernate_wake_on_reply);
+            window.click("hibernate-wake-mode", cx);
+            window.render_frame(cx);
+            assert!(!view.read(cx).palette_state.hibernate_wake_on_reply);
             window.press("escape", cx);
             window.render_frame(cx);
         }
@@ -1026,6 +1039,91 @@ fn palette_real_keypress_arrows_backspace_enter_focus_and_copy_id(cx: &mut TestA
             1,
             "Enter on Open Cross-workspace Inbox in Ctrl+K must focus Inbox immediately"
         );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn permission_picker_changes_only_active_session_and_defaults_to_full_access(
+    cx: &mut TestAppContext,
+) {
+    let (handle, view) = open_view(cx);
+    cx.update_window(handle, |_, window, cx| {
+        let session = SessionSummary {
+            id: "permissions".into(),
+            agent: AgentKind::Claude,
+            ..Default::default()
+        };
+        view.update(cx, |v, _| {
+            v.connection.sessions = vec![session.clone()];
+            v.selection.selected_session = Some(session.clone());
+            let key = v.session_key_for(&session);
+            v.chat_state.composer_options.entry(key).or_default().model = Some("opus".into());
+        });
+        window.render_frame(cx);
+        window.click("attach-file-btn", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("composer-permission-0").checked(), Some(true));
+        assert_eq!(
+            window.find("composer-permission-0").label(),
+            Some("Full access")
+        );
+        window.click("attach-file-btn", cx);
+        for (id, expected) in [
+            ("pal-permission-auto", Some(PermissionLevel::Auto)),
+            ("pal-permission-ask", Some(PermissionLevel::Ask)),
+            ("pal-permission-full-access", None),
+        ] {
+            window.press("ctrl-k", cx);
+            window.input("Change permission mode", cx);
+            window.render_frame(cx);
+            assert!(window.find("pal-cmd-permission-mode").visible());
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert!(view.read(cx).palette_state.permission_picker);
+            assert!(window.find(id).visible());
+            window.click(id, cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::None);
+            let options = view.read(cx).active_composer_options();
+            assert_eq!(options.permission, expected);
+            assert_eq!(options.model.as_deref(), Some("opus"));
+            assert!(
+                view.read(cx)
+                    .notice
+                    .as_ref()
+                    .unwrap()
+                    .contains("Permission mode:")
+            );
+        }
+        window.press("ctrl-k", cx);
+        window.input("yolo", cx);
+        window.press("enter", cx);
+        window.render_frame(cx);
+        window.press("backspace", cx);
+        window.render_frame(cx);
+        assert!(!view.read(cx).palette_state.permission_picker);
+        assert!(window.find("pal-cmd-permission-mode").visible());
+        window.press("escape", cx);
+        view.update(cx, |v, cx| {
+            let key = v.session_key_for(&session);
+            v.chat_state
+                .composer_options
+                .get_mut(&key)
+                .unwrap()
+                .permission = Some(PermissionLevel::FullAccess);
+            cx.notify();
+        });
+        window.click("attach-file-btn", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("composer-permission-0").checked(), Some(true));
+        window.click("composer-permission-1", cx);
+        assert_eq!(
+            view.read(cx).active_composer_options().permission,
+            Some(PermissionLevel::Ask)
+        );
+        window.click("composer-permission-0", cx);
+        assert_eq!(view.read(cx).active_composer_options().permission, None);
     })
     .unwrap();
 }

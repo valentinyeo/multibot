@@ -300,41 +300,13 @@ impl MultibotView {
             .min_h_0()
             .w_full()
             .gap_3()
-            .py_4()
+            .pt(px(72.0))
+            .pb(px(120.0))
             .px_4()
             .overflow_y_scroll()
             .track_scroll(&self.chat_state.scroll_handle);
 
-        if visible_messages.is_empty() {
-            msg_col = msg_col.child(
-                v_flex()
-                    .w_full()
-                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
-                    .mx_auto()
-                    .p_5()
-                    .gap_2()
-                    .rounded(RADIUS_BUBBLE)
-                    .bg(theme::bg_surface())
-                    .border_1()
-                    .border_color(theme::border_subtle())
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme::text_primary())
-                            .child("Multibot — Obsidian Dark GPUI Shell"),
-                    )
-                    .child(
-                        TextView::markdown(
-                            "welcome-md",
-                            "- **Ctrl+K / Ctrl+Shift+K** — Open Command Palette\n\
-                             - **Alt+I / Ctrl+Shift+I** — Open Cross-workspace Inbox\n\
-                             - **Ctrl+,** — GPU Picker (0% NVIDIA verified) & VPS SSH hosts\n\
-                             - **Ctrl+Shift+B** — Toggle sidebar · **F1** — All shortcuts",
-                        )
-                        .text_size(px(self.effective_font_size_pt() as f32)),
-                    ),
-            );
-        } else {
+        if !visible_messages.is_empty() {
             let last_visible_orig_idx = visible_messages.last().map(|v| v.original_index);
             let latest_visible_assistant_orig_idx = visible_messages
                 .iter()
@@ -884,64 +856,84 @@ impl MultibotView {
             .flex_1()
             .h_full()
             .min_w_0();
-        let panel = self.register_chat_actions(panel, cx);
-        let panel = panel
-            .when(self.top_floating_bar_rendered(), |el| {
-                el.child(self.render_top_floating_bar(header_title, cx))
-            })
-            .when_some(self.render_todo_header_and_drawer(cx), |el, todo_ui| {
-                el.child(todo_ui)
-            })
-            .when_some(self.render_find_bar(cx), |el, bar| el.child(bar))
-            .child(
-                v_flex()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(msg_col)
-                    .when_some(self.render_message_action_menu(cx), |el, menu| {
-                        el.child(menu)
-                    })
-                    .when(
-                        !self.history.messages.is_empty()
-                            && (self.chat_state.scroll.scrolled_up
-                                || self.chat_state.scroll.new_messages_while_scrolled_up > 0),
-                        |el| {
-                            let count = self.chat_state.scroll.new_messages_while_scrolled_up;
-                            el.child(
-                                div()
-                                    .id("chat-jump-to-bottom-btn")
-                                    .role(Role::Button)
-                                    .test_support()
-                                    .absolute()
-                                    .bottom_4()
-                                    .right_6()
-                                    .rounded(RADIUS_CHIP)
-                                    .bg(theme::bg_surface())
-                                    .border_1()
-                                    .border_color(theme::border_subtle())
-                                    .px_3()
-                                    .py_2()
-                                    .text_sm()
-                                    .text_color(if count > 0 {
-                                        theme::accent_blue()
-                                    } else {
-                                        theme::text_primary()
-                                    })
-                                    .hover(|s| s.bg(theme::bg_hover()))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|this, _, _, cx| this.jump_to_newest(cx)))
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(lucide_icon(icons::ARROW_DOWN, 14.0))
-                                    .when(count > 0, |el| el.child(format!("{count} new"))),
-                            )
-                        },
-                    ),
-            );
-        self.render_composer(panel, cx)
+        let panel = self.register_chat_actions(panel, cx).test_support();
+        let panel = panel.child(
+            v_flex()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .child(msg_col)
+                .child(
+                    v_flex()
+                        .id("chat-top-overlay")
+                        .test_support()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .when(self.top_floating_bar_rendered(), |el| {
+                            el.child(self.render_top_floating_bar(header_title, cx))
+                        })
+                        .when_some(self.render_todo_header_and_drawer(cx), |el, todo_ui| {
+                            el.child(todo_ui)
+                        })
+                        .when_some(self.render_find_bar(cx), |el, bar| el.child(bar)),
+                )
+                .child(
+                    self.render_composer(
+                        v_flex()
+                            .id("chat-composer-overlay")
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .right_0(),
+                        cx,
+                    )
+                    .test_support(),
+                )
+                .when_some(self.render_message_action_menu(cx), |el, menu| {
+                    el.child(menu)
+                })
+                .when(
+                    !self.history.messages.is_empty()
+                        && (self.chat_state.scroll.scrolled_up
+                            || self.chat_state.scroll.new_messages_while_scrolled_up > 0),
+                    |el| {
+                        let count = self.chat_state.scroll.new_messages_while_scrolled_up;
+                        el.child(
+                            div()
+                                .id("chat-jump-to-bottom-btn")
+                                .role(Role::Button)
+                                .test_support()
+                                .absolute()
+                                .bottom(px(96.0))
+                                .right_6()
+                                .rounded(RADIUS_CHIP)
+                                .bg(theme::bg_surface())
+                                .border_1()
+                                .border_color(theme::border_subtle())
+                                .px_3()
+                                .py_2()
+                                .text_sm()
+                                .text_color(if count > 0 {
+                                    theme::accent_blue()
+                                } else {
+                                    theme::text_primary()
+                                })
+                                .hover(|s| s.bg(theme::bg_hover()))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| this.jump_to_newest(cx)))
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(lucide_icon(icons::ARROW_DOWN, 14.0))
+                                .when(count > 0, |el| el.child(format!("{count} new"))),
+                        )
+                    },
+                ),
+        );
+        panel
             // Slice 5 — built-in terminal pane splits the chat column; the pane is mounted
             // only while open, so a closed pane adds no layout node and no PTY.
             .when_some(self.render_terminal_pane(cx), |el, pane| el.child(pane))

@@ -606,6 +606,7 @@ impl MultibotView {
         };
         let ws_strip = Button::new("workspace-switcher")
             .w_full()
+            .bg(theme::bg_surface())
             .rounded(RADIUS_CHIP)
             .label(active_label.to_string())
             .tooltip("Switch workspace (Alt+Shift+W)")
@@ -616,7 +617,22 @@ impl MultibotView {
             }));
 
         // Sessions scroll contents: Pinned Grid -> Groups -> Recents
-        let mut sessions_content = v_flex().gap_2();
+        let update_card = self.render_update_card(false, cx);
+        let mut sessions_content = v_flex()
+            .gap_2()
+            .px_3()
+            .pt(px(56.0
+                + if self.sidebar_state.new_workspace_draft.is_some() {
+                    48.0
+                } else {
+                    0.0
+                }
+                + if self.sidebar_state.unread_only {
+                    36.0
+                } else {
+                    0.0
+                }))
+            .pb(px(if update_card.is_some() { 220.0 } else { 52.0 }));
 
         // 1. Pinned avatar tile grid
         if !layout.pinned_tiles.is_empty() {
@@ -927,13 +943,13 @@ impl MultibotView {
         v_flex()
             .id("sidebar-open")
             .test_support()
+            .relative()
+            .overflow_hidden()
             .w(px(280.0))
             .h_full()
             .bg(theme::bg_sidebar())
             .border_r_1()
             .border_color(theme::border_subtle())
-            .p_3()
-            .gap_2p5()
             .when_some(self.sidebar_state.focus_handle.as_ref(), |el, fh| {
                 el.track_focus(fh)
             })
@@ -973,62 +989,80 @@ impl MultibotView {
                     this.focus_active_surface_default(window, cx);
                 }
             }))
-            .child(ws_strip)
-            .when_some(
-                self.sidebar_state.new_workspace_draft.as_ref(),
-                |el, draft| {
-                    el.child(
-                        div()
-                            .id("workspace-name-draft")
-                            .test_support()
-                            .p_2()
-                            .rounded(RADIUS_ROW)
-                            .bg(theme::bg_surface())
-                            .text_sm()
-                            .child(format!("Workspace name: {draft}|")),
-                    )
-                },
-            )
-            .when(self.sidebar_state.unread_only, |el| {
-                el.child(
-                    div()
-                        .id("sidebar-unread-only-pill")
-                        .role(Role::Button)
-                        .test_support()
-                        .px_2p5()
-                        .py_1()
-                        .rounded(RADIUS_CHIP)
-                        .bg(theme::bg_surface())
-                        .border_1()
-                        .border_color(theme::accent_blue())
-                        .text_xs()
-                        .text_color(theme::accent_blue())
-                        .cursor_pointer()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.toggle_unread_only(cx);
-                            }),
-                        )
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child("UNREAD ONLY")
-                        .child(lucide_icon(icons::X, 12.0)),
-                )
-            })
             .child(
                 div()
                     .id("sessions-scroll")
+                    .test_support()
                     .flex_1()
+                    .h_full()
                     .min_h_0()
                     .overflow_y_scroll()
                     .child(sessions_content),
             )
-            .when_some(self.render_update_card(false, cx), |el, card| {
-                el.child(card)
+            .child(
+                v_flex()
+                    .id("sidebar-top-overlay")
+                    .test_support()
+                    .absolute()
+                    .top_3()
+                    .left_3()
+                    .right_3()
+                    .gap_2()
+                    .child(ws_strip)
+                    .when_some(
+                        self.sidebar_state.new_workspace_draft.as_ref(),
+                        |el, draft| {
+                            el.child(
+                                div()
+                                    .id("workspace-name-draft")
+                                    .test_support()
+                                    .p_2()
+                                    .rounded(RADIUS_ROW)
+                                    .bg(theme::bg_surface())
+                                    .text_sm()
+                                    .child(format!("Workspace name: {draft}|")),
+                            )
+                        },
+                    )
+                    .when(self.sidebar_state.unread_only, |el| {
+                        el.child(
+                            div()
+                                .id("sidebar-unread-only-pill")
+                                .role(Role::Button)
+                                .test_support()
+                                .px_2p5()
+                                .py_1()
+                                .rounded(RADIUS_CHIP)
+                                .bg(theme::bg_surface())
+                                .border_1()
+                                .border_color(theme::accent_blue())
+                                .text_xs()
+                                .text_color(theme::accent_blue())
+                                .cursor_pointer()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.toggle_unread_only(cx);
+                                    }),
+                                )
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child("UNREAD ONLY")
+                                .child(lucide_icon(icons::X, 12.0)),
+                        )
+                    }),
+            )
+            .when_some(update_card, |el, card| {
+                el.child(div().absolute().bottom_12().left_3().right_3().child(card))
             })
-            .child(self.render_dev_stats_indicator(false, cx))
+            .child(
+                div()
+                    .absolute()
+                    .bottom_3()
+                    .left_3()
+                    .child(self.render_dev_stats_indicator(false, cx)),
+            )
             .into_any_element()
     }
 }

@@ -22,6 +22,7 @@ impl MultibotView {
         }
         self.active_modal = ActiveModal::Palette;
         self.palette_state.provider_picker = false;
+        self.palette_state.permission_picker = false;
         self.palette_state.directory_picker = Some(SessionDirectoryPicker { agent, directories });
         self.palette_state.selected_index = 0;
         self.palette_state.scroll_handle.scroll_to_item(0);
@@ -63,6 +64,46 @@ impl MultibotView {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        if self.palette_state.permission_picker {
+            if let PaletteRow::Command { id, .. } = row
+                && let Some((_, label, permission, _)) = PERMISSION_CHOICES
+                    .iter()
+                    .find(|(choice, _, _, _)| *choice == id)
+            {
+                self.update_composer_options(|options| options.permission = *permission, cx);
+                self.notice = Some(format!(
+                    "Permission mode: {label}. Applies on the next turn."
+                ));
+            }
+            self.palette_state.permission_picker = false;
+            self.active_modal = ActiveModal::None;
+            cx.notify();
+            return;
+        }
+        if matches!(row, PaletteRow::Command { ref id, .. } if id == "pal-cmd-permission-mode") {
+            if self
+                .selection
+                .selected_session
+                .as_ref()
+                .is_some_and(|s| !matches!(s.agent, AgentKind::Claude | AgentKind::Codex))
+            {
+                self.notice =
+                    Some("Permission overrides are supported by Claude and Codex.".into());
+                self.active_modal = ActiveModal::None;
+                cx.notify();
+                return;
+            }
+            self.chat_state.composer_menu_open = false;
+            if let Some(window) = window {
+                self.open_palette(window, cx);
+            }
+            self.palette_state.permission_picker = true;
+            self.palette_state.selected_index = 0;
+            self.palette_state.scroll_handle.scroll_to_item(0);
+            self.active_modal = ActiveModal::Palette;
+            cx.notify();
+            return;
+        }
         if self.palette_state.provider_picker {
             if let PaletteRow::Command { id, .. } = row {
                 if let Some(index) = id

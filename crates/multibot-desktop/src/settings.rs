@@ -368,7 +368,7 @@ impl MultibotView {
                 content = content.child(v_flex().gap_3().p_4().rounded(RADIUS_BUBBLE)
                     .bg(theme::bg_surface()).border_1().border_color(theme::border_subtle())
                     .child(div().text_sm().child("Voice dictation · Deepgram"))
-                    .child(div().text_xs().text_color(theme::text_secondary())
+                    .child(div().text_xs().text_color(theme::text_muted())
                         .child("Dictation sends audio to Deepgram. Ctrl+D or Ctrl+Shift+Space toggles the mic; Esc cancels."))
                     .child(div().text_xs().child("API key override (optional, stored only in Multibot)"))
                     .child(Input::new(&self.inputs.deepgram_key_input).mask_toggle().id("deepgram-api-key"))
@@ -410,7 +410,7 @@ impl MultibotView {
                 content = content.child(v_flex().gap_3().p_4().rounded(RADIUS_BUBBLE)
                     .bg(theme::bg_surface()).border_1().border_color(theme::border_subtle())
                     .child(div().text_sm().child("Input box"))
-                    .child(div().id("composer-send-help").test_support().text_xs().text_color(theme::text_secondary()).child("Ctrl+Enter sends a message. Enter or Shift+Enter adds a new line."))
+                    .child(div().id("composer-send-help").test_support().text_xs().text_color(theme::text_muted()).child("Ctrl+Enter sends a message. Enter or Shift+Enter adds a new line."))
                     .child(div().text_sm().child("Queued messages"))
                     .child(div().text_xs().text_color(theme::text_secondary())
                         .child("Messages queue while the agent works. Use Send now beside a queued message to interrupt and send it immediately. Offline messages wait for reconnecting.")));
@@ -657,11 +657,7 @@ impl MultibotView {
                                 .gap_3()
                                 .text_xs()
                                 .child(div().flex_1().child(spec.description))
-                                .child(
-                                    div()
-                                        .text_color(theme::text_secondary())
-                                        .child(spec.display),
-                                ),
+                                .child(div().text_color(theme::text_muted()).child(spec.display)),
                         );
                         index += 1;
                     }
@@ -776,7 +772,13 @@ impl MultibotView {
                                     .child(
                                         v_flex()
                                             .gap_2()
-                                            .child(div().text_lg().child(self.settings_tab.title()))
+                                            .child(
+                                                div()
+                                                    .text_lg()
+                                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                    .text_color(theme::text_primary())
+                                                    .child(self.settings_tab.title()),
+                                            )
                                             .child(
                                                 div()
                                                     .text_xs()

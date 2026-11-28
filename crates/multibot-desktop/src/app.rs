@@ -60,7 +60,7 @@ use gpui_kit::{
     Window, WindowBounds, WindowOptions, actions,
     component::{
         Sizable,
-        button::Button,
+        button::{Button, ButtonCustomVariant, ButtonVariants},
         h_flex,
         input::{InputEvent, InputState, TextareaState},
     },
@@ -559,7 +559,7 @@ impl MultibotView {
             .pb_2()
             .items_center()
             .justify_between()
-            .child(div().w(px(76.0)).flex_shrink_0())
+            .child(div().w(px(80.0)).flex_shrink_0())
             .child(
                 gpui_kit::component::v_flex()
                     .flex_1()
@@ -626,14 +626,23 @@ impl MultibotView {
             )
             .child(
                 h_flex()
-                    .w(px(76.0))
+                    .w(px(80.0))
                     .flex_shrink_0()
                     .justify_end()
                     .items_center()
                     .gap_1p5()
                     .child({
                         Button::new("toggle-inbox")
-                            .xsmall()
+                            .small()
+                            .size(px(32.0))
+                            .rounded(RADIUS_CHIP)
+                            .custom(
+                                ButtonCustomVariant::new(cx)
+                                    .color(theme::bg_surface())
+                                    .foreground(theme::text_primary())
+                                    .hover(theme::bg_hover())
+                                    .active(theme::bg_active_row()),
+                            )
                             .icon(lucide_icon(icons::INBOX, 16.0))
                             .accessibility_label("Inbox")
                             .tooltip("Inbox · Alt+I")
@@ -648,24 +657,18 @@ impl MultibotView {
                                 cx.notify();
                             }))
                     })
-                    .when(
-                        self.sidebar_state
-                            .workspace_store
-                            .inbox_unread_count_at(&self.session_inputs(), now_unix_ms())
-                            > 0,
-                        |el| {
-                            el.child(
-                                div()
-                                    .w(px(5.0))
-                                    .h(px(5.0))
-                                    .rounded(RADIUS_CHIP)
-                                    .bg(theme::accent_blue()),
-                            )
-                        },
-                    )
                     .child(
                         Button::new("chat-menu")
-                            .xsmall()
+                            .small()
+                            .size(px(32.0))
+                            .rounded(RADIUS_CHIP)
+                            .custom(
+                                ButtonCustomVariant::new(cx)
+                                    .color(theme::bg_surface())
+                                    .foreground(theme::text_primary())
+                                    .hover(theme::bg_hover())
+                                    .active(theme::bg_active_row()),
+                            )
                             .icon(lucide_icon(icons::MORE_HORIZONTAL, 16.0))
                             .accessibility_label("Chat menu")
                             .tooltip("Chat menu")

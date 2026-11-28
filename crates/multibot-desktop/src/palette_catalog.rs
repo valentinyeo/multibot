@@ -6,6 +6,19 @@ impl MultibotView {
             // Sessions — `"pal-cmd-inbox"` MUST remain first safe item so empty-query open
             // keeps it at the top of the 520px palette viewport (`app.rs` headless test contract).
             PaletteCommandSpec {
+                id: "pal-cmd-permission-mode".into(),
+                label: "Session: Change permission mode".into(),
+                chord: String::new(),
+                category: PaletteCategory::Sessions,
+                destructive: false,
+                aliases: ["permission", "yolo", "bypass", "full access", "approval"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                tab_context: true,
+                global: true,
+            },
+            PaletteCommandSpec {
                 id: "pal-cmd-inbox".into(),
                 label: "View: Inbox".into(),
                 chord: "Alt+I".into(),
