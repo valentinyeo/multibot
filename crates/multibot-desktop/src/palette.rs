@@ -23,7 +23,9 @@ use multibot_core::workspaces::{
     DEFAULT_WORKSPACE_NAME, STARRED_WORKSPACE_ID, now_unix_ms, rank_palette,
 };
 use multibot_keys::{ALL_CATEGORIES, by_category};
-use multibot_proto::{AgentKind, ClientRequest};
+use multibot_proto::AgentKind;
+#[cfg(test)]
+use multibot_proto::ClientRequest;
 
 pub(crate) struct SessionDirectoryPicker {
     agent: AgentKind,

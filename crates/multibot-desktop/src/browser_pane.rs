@@ -15,8 +15,8 @@ mod windows {
         theme,
     };
     use gpui_kit::{
-        AnyElement, AppContext, Entity, InteractiveElement, IntoElement, Keystroke, ParentElement,
-        Styled, Subscription, Task,
+        AnyElement, AppContext, Entity, Focusable, InteractiveElement, IntoElement, Keystroke,
+        ParentElement, Styled, Subscription, Task,
         component::{
             Sizable,
             button::Button,
