@@ -60,6 +60,7 @@ impl MultibotView {
         self.chat_state.scroll.open_visit(UnreadVisit::Read);
         self.chat_state.scroll_handle = gpui_kit::ScrollHandle::default();
         self.chat_state.prepend_scroll_anchor = None;
+        self.chat_state.live_activity_expanded = false;
         self.chat_state.newest_chord.reset();
         if session.agent == AgentKind::Shell && !session.archived {
             self.shell_host.prepare_selection(&host);

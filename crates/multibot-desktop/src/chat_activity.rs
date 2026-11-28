@@ -180,7 +180,7 @@ impl MultibotView {
         self.chat_state.busy_timer = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
-                    .timer(Duration::from_millis(350))
+                    .timer(Duration::from_millis(320))
                     .await;
                 let keep_running = this
                     .update(cx, |view, cx| {

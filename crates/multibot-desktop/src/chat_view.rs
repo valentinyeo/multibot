@@ -826,42 +826,126 @@ impl MultibotView {
         }
 
         if is_working {
+            let turn_start = self
+                .history
+                .messages
+                .iter()
+                .rposition(|message| message.role == MessageRole::User)
+                .map_or(0, |index| index + 1);
+            let has_activity = self.history.messages[turn_start..].iter().any(|message| {
+                message
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, MessageBlock::ToolUse { .. }))
+            });
+            let expanded = self.chat_state.live_activity_expanded;
             let dot = |idx: u8| {
                 div()
                     .id(format!("chat-busy-dot-{idx}"))
                     .test_support()
-                    .size(px(10.0))
+                    .size(px(5.0))
+                    .rounded(RADIUS_CHIP)
                     .when(busy_phase == idx, |el| el.mb(px(3.0)))
                     .when(busy_phase != idx, |el| el.mt(px(3.0)))
-                    .text_color(if busy_phase == idx {
+                    .bg(if busy_phase == idx {
                         theme::text_primary()
                     } else {
                         theme::text_secondary()
                     })
-                    .child(lucide_icon(icons::DOT, 10.0))
             };
-            msg_col = msg_col.child(
-                h_flex()
-                    .id("chat-busy-dots")
-                    .flex_shrink_0()
+            let mut activity = v_flex()
+                .id("chat-live-activity-container")
+                .w_full()
+                .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+                .mx_auto()
+                .px_2()
+                .gap_1p5()
+                .child(
+                    h_flex()
+                        .id("chat-live-activity")
+                        .role(Role::Button)
+                        .aria_label("Show current activity")
+                        .aria_expanded(expanded)
+                        .test_support()
+                        .cursor_pointer()
+                        .self_start()
+                        .max_w_full()
+                        .py_1p5()
+                        .gap_2()
+                        .items_center()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.chat_state.live_activity_expanded =
+                                !this.chat_state.live_activity_expanded;
+                            cx.notify();
+                        }))
+                        .child(
+                            h_flex()
+                                .id("chat-busy-dots")
+                                .test_support()
+                                .flex_shrink_0()
+                                .h(px(14.0))
+                                .items_center()
+                                .gap_1p5()
+                                .child(dot(0))
+                                .child(dot(1))
+                                .child(dot(2)),
+                        )
+                        .child(
+                            Label::new(activity_label(&self.history.messages))
+                                .id("chat-activity-label")
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .truncate(),
+                        )
+                        .when(has_activity, |el| {
+                            el.child(div().text_color(theme::text_muted()).child(lucide_icon(
+                                if expanded {
+                                    icons::CHEVRON_DOWN
+                                } else {
+                                    icons::CHEVRON_RIGHT
+                                },
+                                12.0,
+                            )))
+                        }),
+                );
+            if expanded {
+                let mut steps = v_flex()
+                    .id("chat-live-activity-steps")
                     .test_support()
                     .w_full()
-                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
-                    .mx_auto()
-                    .px_2()
-                    .py_1p5()
-                    .gap_1p5()
-                    .items_center()
-                    .child(
-                        h_flex()
-                            .h(px(14.0))
-                            .items_center()
-                            .gap_1p5()
-                            .child(dot(0))
-                            .child(dot(1))
-                            .child(dot(2)),
-                    ),
-            );
+                    .gap_1p5();
+                for (msg_idx, message) in self.history.messages.iter().enumerate().skip(turn_start)
+                {
+                    for (block_idx, block) in message.blocks.iter().enumerate() {
+                        if let MessageBlock::ToolUse {
+                            call_id,
+                            name,
+                            summary,
+                            detail,
+                            status,
+                            diff,
+                            output,
+                        } = block
+                        {
+                            steps = steps.child(self.render_tool_step_block(
+                                message,
+                                msg_idx,
+                                block_idx,
+                                call_id,
+                                name,
+                                summary,
+                                detail,
+                                *status,
+                                diff.as_ref(),
+                                output.as_deref(),
+                                cx,
+                            ));
+                        }
+                    }
+                }
+                activity = activity.child(steps);
+            }
+            msg_col = msg_col.child(activity);
         }
 
         if let Some(session) = &self.selection.selected_session

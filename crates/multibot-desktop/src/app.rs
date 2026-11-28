@@ -63,7 +63,6 @@ use gpui_kit::{
         button::{Button, ButtonCustomVariant, ButtonVariants},
         h_flex,
         input::{InputEvent, InputState, TextareaState},
-        label::Label,
     },
     div,
     prelude::FluentBuilder,
@@ -607,38 +606,7 @@ impl MultibotView {
                             .truncate()
                             .child(title)
                     })
-                    .when_some(self.render_update_pill(cx), |el, pill| el.child(pill))
-                    .when(
-                        self.main_surface == MainSurface::Chat && self.is_active_chat_working(),
-                        |el| {
-                            el.child(
-                                div().child(
-                                    div()
-                                        .id("chat-activity-pill")
-                                        .test_support()
-                                        .px_2p5()
-                                        .py_0p5()
-                                        .rounded(RADIUS_CHIP)
-                                        .bg(theme::bg_surface())
-                                        .border_1()
-                                        .border_color(theme::border_subtle())
-                                        .text_xs()
-                                        .text_color(theme::text_secondary())
-                                        .max_w(px(360.0))
-                                        .truncate()
-                                        .child(
-                                            Label::new(crate::chat_view::activity_label(
-                                                &self.history.messages,
-                                            ))
-                                            .text_xs()
-                                            .line_height(px(14.0))
-                                            .text_color(theme::text_secondary())
-                                            .truncate(),
-                                        ),
-                                ),
-                            )
-                        },
-                    ),
+                    .when_some(self.render_update_pill(cx), |el, pill| el.child(pill)),
             )
             .child(
                 h_flex()

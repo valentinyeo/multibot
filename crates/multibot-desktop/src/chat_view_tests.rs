@@ -1725,12 +1725,12 @@ fn busy_indicator_has_three_readable_dots_and_disappears_when_idle(cx: &mut Test
             window.render_frame(cx);
             let indicator = window.find("chat-busy-dots");
             assert!(indicator.visible());
-            assert_eq!(indicator.bounds().size.height, px(26.0));
+            assert_eq!(indicator.bounds().size.height, px(14.0));
             let mut previous = None;
             for index in 0..3 {
                 let dot = window.find(format!("chat-busy-dot-{index}"));
                 assert!(dot.visible());
-                assert_eq!(dot.bounds().size, gpui_kit::size(px(10.0), px(10.0)));
+                assert_eq!(dot.bounds().size, gpui_kit::size(px(5.0), px(5.0)));
                 let peak = window.find(format!("chat-busy-dot-{phase}"));
                 assert_eq!(
                     dot.bounds().top() - peak.bounds().top(),
@@ -5102,7 +5102,122 @@ fn activity_labels_are_short_plain_english_and_only_describe_current_turn() {
 }
 
 #[gpui_kit::test]
-fn activity_pill_and_busy_timer_follow_active_session_and_surface(cx: &mut TestAppContext) {
+fn live_activity_expands_only_current_turn_steps_with_tools_hidden(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.selection.selected_session = Some(SessionSummary {
+                id: "live-steps".into(),
+                working: true,
+                ..Default::default()
+            });
+            v.history.messages = vec![
+                ChatMessage {
+                    id: "old".into(),
+                    role: MessageRole::Assistant,
+                    blocks: vec![activity_tool(
+                        "read_file",
+                        "",
+                        "old.rs",
+                        ToolStatus::Completed,
+                    )],
+                    ..Default::default()
+                },
+                ChatMessage {
+                    id: "prompt".into(),
+                    role: MessageRole::User,
+                    text: "Check the file".into(),
+                    ..Default::default()
+                },
+                ChatMessage {
+                    id: "current".into(),
+                    role: MessageRole::Assistant,
+                    blocks: vec![
+                        activity_tool("read_file", "", "current.rs", ToolStatus::Completed),
+                        activity_tool("thinking", "", "Consider the result", ToolStatus::Completed),
+                    ],
+                    ..Default::default()
+                },
+                ChatMessage {
+                    id: "system".into(),
+                    role: MessageRole::System,
+                    blocks: vec![activity_tool(
+                        "system",
+                        "",
+                        "System activity",
+                        ToolStatus::Running,
+                    )],
+                    ..Default::default()
+                },
+            ];
+            assert!(!v.show_tool_calls());
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("chat-live-activity-steps").is_none());
+        assert!(window.try_find("tool-row-2-0").is_none());
+        window.click("chat-live-activity", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).chat_state.live_activity_expanded);
+        assert!(!view.read(cx).show_tool_calls());
+        assert!(window.try_find("tool-row-0-0").is_none());
+        for id in ["tool-row-2-0", "tool-row-2-1", "tool-row-3-0"] {
+            assert!(window.find(id).visible());
+        }
+        window.click("tool-row-2-0", cx);
+        window.render_frame(cx);
+        assert!(window.find("tool-detail-2-0").visible());
+        assert!(
+            gpui_kit::base::test_support::texts(window)
+                .iter()
+                .any(|text| text.text() == "Full tool output")
+        );
+        window.click("chat-live-activity", cx);
+        window.render_frame(cx);
+        assert!(!view.read(cx).chat_state.live_activity_expanded);
+        assert!(window.try_find("chat-live-activity-steps").is_none());
+        assert!(window.try_find("tool-row-2-0").is_none());
+
+        view.update(cx, |v, cx| {
+            assert!(v.toggle_all_tool_steps(cx));
+        });
+        window.render_frame(cx);
+        for id in ["tool-cluster-0", "tool-cluster-2", "tool-cluster-3"] {
+            window.click(id, cx);
+            window.render_frame(cx);
+        }
+        for id in [
+            "tool-row-0-0",
+            "tool-row-2-0",
+            "tool-row-2-1",
+            "tool-row-3-0",
+        ] {
+            assert!(window.try_find(id).is_some());
+        }
+        window.click("chat-live-activity", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("chat-live-activity-steps").is_some());
+        view.update(cx, |v, cx| {
+            let host = v.active_session_host().to_string();
+            v.select_session_on_host(
+                host,
+                SessionSummary {
+                    id: "next-chat".into(),
+                    working: true,
+                    ..Default::default()
+                },
+                cx,
+            );
+            assert!(!v.chat_state.live_activity_expanded);
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("chat-live-activity-steps").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn live_activity_and_busy_timer_follow_active_session_and_surface(cx: &mut TestAppContext) {
     use std::time::Duration;
     let (handle, view) = open_test_chat_window(cx);
     cx.update_window(handle, |_, window, cx| {
@@ -5125,7 +5240,15 @@ fn activity_pill_and_busy_timer_follow_active_session_and_surface(cx: &mut TestA
             cx.notify();
         });
         window.render_frame(cx);
-        assert!(window.find("chat-activity-pill").visible());
+        assert!(window.try_find("chat-activity-pill").is_none());
+        assert!(window.find("chat-live-activity").visible());
+        assert!(window.find("chat-activity-label").visible());
+        assert!(window.find("chat-busy-dots").visible());
+        assert!(
+            !gpui_kit::base::test_support::texts(window)
+                .iter()
+                .any(|text| text.text() == "Agent is working")
+        );
         assert!(
             gpui_kit::base::test_support::texts(window)
                 .iter()
@@ -5150,7 +5273,7 @@ fn activity_pill_and_busy_timer_follow_active_session_and_surface(cx: &mut TestA
     })
     .unwrap();
     cx.run_until_parked();
-    cx.executor().advance_clock(Duration::from_millis(350));
+    cx.executor().advance_clock(Duration::from_millis(320));
     cx.run_until_parked();
     assert_eq!(view.read_with(cx, |v, _| v.chat_state.busy_tick_phase), 1);
     cx.update_window(handle, |_, window, cx| {
@@ -5187,6 +5310,13 @@ fn activity_pill_and_busy_timer_follow_active_session_and_surface(cx: &mut TestA
         assert!(window.try_find("stop-agent").is_none());
     })
     .unwrap();
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    view.read_with(cx, |v, _| {
+        assert!(v.chat_state.busy_timer.is_none());
+        assert!(v.chat_state.busy_timer_key.is_none());
+        assert_eq!(v.chat_state.busy_tick_phase, 0);
+    });
 }
 
 #[gpui_kit::test]
