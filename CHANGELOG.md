@@ -7,6 +7,15 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 
+- Keep the sidebar visible in full-width chats and resize live shell grids correctly when their pane changes size (MBRU-98, MBRU-99).
+- Keep metadata-only chats idle, open empty chats without a welcome card, and hide Claude subagent transcripts from the sidebar (MBRU-100, MBRU-102).
+- Remove the Inbox dot, unify circular controls, and float the version pill and controls over full-height sidebar and chat views (MBRU-101, MBRU-103).
+- Keep hibernating chats hidden on reply by default and omit deleted server directories from directory pickers (MBRU-104).
+- Default agents to full access and keep permission choices consistent between the composer + menu and Ctrl+K (MBRU-105).
+- Make headings and secondary text easier to distinguish in Alt+H and other dialogs (MBRU-106).
+- Prefer full Google Chrome windows for the docked browser while keeping GPU acceleration disabled (MBRU-107).
+- Deliver @ mentions to sessions on other connected hosts (MBRU-108).
+
 - Replace text action buttons in chat and Server shells with icons for stop, send now, edit, and remove (MBRU-93, MBRU-96).
 - Enlarge the three-dot busy indicator so it is clearly visible in chat (MBRU-95).
 - Keep sent messages visible until the transcript catches up, without showing queued messages as sent too early (MBRU-94).
