@@ -12,13 +12,85 @@ use multibot_proto::{
     AgentKind, ChatMessage, DiffBlock, MessageBlock, MessageRole, TodoItem, TodoStatus, ToolStatus,
 };
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 pub struct AntigravityProvider;
+
+fn native_activity_detail(value: &Value) -> String {
+    if let Some(text) = value.as_str() {
+        return cap_chars(&super::strip_base64_cow(text), MAX_TOOL_DETAIL_CHARS);
+    }
+    // Serialize into a fixed buffer so a large tool argument cannot allocate a second full copy.
+    let mut buffer = [0u8; MAX_TOOL_DETAIL_CHARS];
+    let mut writer = std::io::Cursor::new(buffer.as_mut_slice());
+    let _ = serde_json::to_writer(&mut writer, value);
+    let len = writer.position() as usize;
+    cap_chars(
+        &super::strip_base64_cow(&String::from_utf8_lossy(&buffer[..len])),
+        MAX_TOOL_DETAIL_CHARS,
+    )
+}
+
+fn native_activity_summary(text: &str) -> String {
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !(line.starts_with('<') && line.ends_with('>')))
+        .unwrap_or("Activity");
+    cap_chars(&super::strip_base64_cow(first), 100)
+}
+
+fn native_tool_summary(name: &str, args: &Value) -> String {
+    let parsed = args
+        .as_str()
+        .filter(|s| s.len() <= MAX_TOOL_DETAIL_CHARS)
+        .and_then(|s| serde_json::from_str::<Value>(s).ok());
+    let args = parsed.as_ref().unwrap_or(args);
+    let raw = args
+        .as_str()
+        .filter(|s| !s.trim_start().starts_with(['{', '[']));
+    let key = |names: &[&str]| {
+        names
+            .iter()
+            .find_map(|key| args.get(key).and_then(Value::as_str))
+            .or(raw)
+    };
+    let (verb, subject) = match name.to_ascii_lowercase().as_str() {
+        "read_file" | "view_file" | "edit_file" | "write_file" | "write_to_file" => {
+            let path = key(&["Path", "path", "file_path", "TargetFile"]).unwrap_or("file");
+            let verb = if name.starts_with("read") || name.starts_with("view") {
+                "Read"
+            } else if name.starts_with("edit") {
+                "Edited"
+            } else {
+                "Wrote"
+            };
+            (verb, super::basename_str(path))
+        }
+        "run_command" => (
+            "Ran",
+            key(&["toolSummary", "CommandLine", "command", "cmd"]).unwrap_or("command"),
+        ),
+        "search_web" | "websearch" => ("Searched web", key(&["query", "Query"]).unwrap_or("query")),
+        "invoke_subagent" => (
+            "Agent",
+            key(&["Role", "role", "description"]).unwrap_or("task"),
+        ),
+        _ => (
+            name,
+            key(&["toolSummary", "description", "query", "Path"]).unwrap_or(""),
+        ),
+    };
+    let subject = cap_chars(&super::strip_base64_cow(subject), 100);
+    cap_chars(
+        &collapse_whitespace(&format!("{verb} {subject}")),
+        MAX_TOOL_SUMMARY_CHARS,
+    )
+}
 
 /// Returns `<home>/.multibot/history/<sha256("antigravity:" + sid)[..32]>.history.jsonl`.
 /// Strictly under `~/.multibot/history/` (Hard Invariant #2).
@@ -711,6 +783,7 @@ impl AgentProvider for AntigravityProvider {
             };
             let top_type = val.get("type").and_then(Value::as_str).unwrap_or("");
             if top_type.eq_ignore_ascii_case("SYSTEM_MESSAGE")
+                || top_type.eq_ignore_ascii_case("CHECKPOINT")
                 || top_type.eq_ignore_ascii_case("GENERIC")
                 || (top_type.eq_ignore_ascii_case("USER_INPUT")
                     && val
@@ -856,6 +929,8 @@ impl AgentProvider for AntigravityProvider {
         let mut parsed = ParsedSlice::default();
         let mut stream_acc = AgyStreamAccumulator::new();
         let mut open_tools: HashMap<String, (usize, usize, String)> = HashMap::new();
+        let mut native_open_tools: VecDeque<(usize, usize)> = VecDeque::new();
+        let mut native_open_thinking: Vec<(usize, usize)> = Vec::new();
 
         for line in lines {
             let Ok(line_str) = std::str::from_utf8(line.bytes) else {
@@ -870,14 +945,93 @@ impl AgentProvider for AntigravityProvider {
             };
             let byte_range = Some((line.start_offset, line.end_offset));
             let top_type = val.get("type").and_then(Value::as_str).unwrap_or("");
-            if top_type.eq_ignore_ascii_case("SYSTEM_MESSAGE")
-                || top_type.eq_ignore_ascii_case("GENERIC")
+            let generic = top_type.eq_ignore_ascii_case("GENERIC");
+            if generic
+                || top_type.eq_ignore_ascii_case("SYSTEM_MESSAGE")
+                || top_type.eq_ignore_ascii_case("CHECKPOINT")
                 || (top_type.eq_ignore_ascii_case("USER_INPUT")
                     && val
                         .get("source")
                         .and_then(Value::as_str)
                         .is_some_and(|s| s.to_ascii_uppercase().starts_with("SYSTEM")))
             {
+                let content = val.get("content").unwrap_or(&Value::Null);
+                let detail = native_activity_detail(content);
+                let status = if generic
+                    && (val.get("is_error").and_then(Value::as_bool) == Some(true)
+                        || val
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .is_some_and(|s| matches!(s, "ERROR" | "FAILED"))
+                        || val
+                            .get("error")
+                            .is_some_and(|v| !v.is_null() && v != &Value::Bool(false)))
+                {
+                    ToolStatus::Error
+                } else {
+                    ToolStatus::Completed
+                };
+                let call_id = val
+                    .get("tool_call_id")
+                    .or_else(|| val.get("call_id"))
+                    .and_then(Value::as_str);
+                let pending = if generic {
+                    let index = if let Some(call_id) = call_id {
+                        native_open_tools.iter().position(|(msg, block)| {
+                            matches!(&parsed.messages[*msg].blocks[*block],
+                                MessageBlock::ToolUse { call_id: id, .. } if id == call_id)
+                        })
+                    } else {
+                        (!native_open_tools.is_empty()).then_some(0)
+                    };
+                    index.and_then(|index| native_open_tools.remove(index))
+                } else {
+                    None
+                };
+                if let Some((msg, block)) = pending {
+                    if let MessageBlock::ToolUse {
+                        status: tool_status,
+                        output,
+                        ..
+                    } = &mut parsed.messages[msg].blocks[block]
+                    {
+                        *tool_status = status;
+                        *output = Some(detail);
+                    }
+                    let range = &mut parsed.messages[msg].source_byte_range;
+                    if let Some((_, end)) = range {
+                        *end = line.end_offset;
+                    }
+                } else {
+                    let name = if generic {
+                        "Activity"
+                    } else if top_type.eq_ignore_ascii_case("CHECKPOINT") {
+                        "Checkpoint"
+                    } else {
+                        "System"
+                    };
+                    parsed.messages.push(ChatMessage {
+                        id: format!("agy-native-activity-{}", line.start_offset),
+                        role: MessageRole::Assistant,
+                        text: String::new(),
+                        timestamp_ms: parse_row_timestamp(&val),
+                        blocks: vec![MessageBlock::ToolUse {
+                            call_id: format!("agy-native-activity-{}", line.start_offset),
+                            name: name.to_string(),
+                            summary: native_activity_summary(&detail),
+                            detail: if generic {
+                                String::new()
+                            } else {
+                                detail.clone()
+                            },
+                            status,
+                            diff: None,
+                            output: generic.then_some(detail),
+                        }],
+                        source_byte_range: byte_range,
+                        ..Default::default()
+                    });
+                }
                 continue;
             }
 
@@ -1345,6 +1499,69 @@ impl AgentProvider for AntigravityProvider {
                 } else {
                     TailActivity::Idle
                 };
+                if !is_user && completed && !has_tools && !text.is_empty() {
+                    for (msg, block) in native_open_tools
+                        .drain(..)
+                        .chain(native_open_thinking.drain(..))
+                    {
+                        if let MessageBlock::ToolUse { status, .. } =
+                            &mut parsed.messages[msg].blocks[block]
+                        {
+                            *status = ToolStatus::Completed;
+                        }
+                    }
+                }
+                let mut blocks = Vec::new();
+                if !is_user {
+                    if let Some(thinking) = val
+                        .get("thinking")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.trim().is_empty())
+                    {
+                        if !completed {
+                            native_open_thinking.push((parsed.messages.len(), blocks.len()));
+                        }
+                        blocks.push(MessageBlock::ToolUse {
+                            call_id: format!("agy-native-thinking-{}", line.start_offset),
+                            name: "Thinking".to_string(),
+                            summary: native_activity_summary(thinking),
+                            detail: native_activity_detail(&val["thinking"]),
+                            status: if completed {
+                                ToolStatus::Completed
+                            } else {
+                                ToolStatus::Running
+                            },
+                            diff: None,
+                            output: None,
+                        });
+                    }
+                    if let Some(calls) = val.get("tool_calls").and_then(Value::as_array) {
+                        for (index, call) in calls.iter().enumerate() {
+                            let name = cap_chars(
+                                call.get("name").and_then(Value::as_str).unwrap_or("Tool"),
+                                128,
+                            );
+                            let args = call.get("args").unwrap_or(&Value::Null);
+                            native_open_tools.push_back((parsed.messages.len(), blocks.len()));
+                            blocks.push(MessageBlock::ToolUse {
+                                call_id: call
+                                    .get("id")
+                                    .or_else(|| call.get("call_id"))
+                                    .and_then(Value::as_str)
+                                    .map(|s| cap_chars(s, 128))
+                                    .unwrap_or_else(|| {
+                                        format!("agy-native-tool-{}-{index}", line.start_offset)
+                                    }),
+                                summary: native_tool_summary(&name, args),
+                                name,
+                                detail: native_activity_detail(args),
+                                status: ToolStatus::Running,
+                                diff: None,
+                                output: None,
+                            });
+                        }
+                    }
+                }
                 if !text.is_empty() {
                     if is_user && parsed.title_hint.is_none() {
                         parsed.title_hint = text
@@ -1353,8 +1570,10 @@ impl AgentProvider for AntigravityProvider {
                             .find(|s| !s.is_empty())
                             .map(|s| truncate_title(s, 64));
                     }
-                    let mut blocks = vec![MessageBlock::Text { text: text.clone() }];
+                    blocks.push(MessageBlock::Text { text: text.clone() });
                     blocks.extend(extract_image_blocks(&text));
+                }
+                if !blocks.is_empty() {
                     parsed.messages.push(ChatMessage {
                         id: format!("agy-native-{}", line.start_offset),
                         role: if is_user {
@@ -1731,11 +1950,12 @@ mod tests {
             parsed.title_hint.as_deref(),
             Some("keep my chats responsive")
         );
-        assert_eq!(parsed.messages.len(), 2, "{:?}", parsed.messages);
+        assert_eq!(parsed.messages.len(), 3, "{:?}", parsed.messages);
         assert_eq!(parsed.messages[0].role, MessageRole::User);
         assert_eq!(parsed.messages[0].text, "keep my chats responsive");
-        assert_eq!(parsed.messages[1].role, MessageRole::Assistant);
-        assert_eq!(parsed.messages[1].text, "On it.");
+        assert!(parsed.messages[1].text.is_empty());
+        assert_eq!(parsed.messages[2].role, MessageRole::Assistant);
+        assert_eq!(parsed.messages[2].text, "On it.");
         assert_eq!(parsed.tail_activity, TailActivity::Idle);
         assert_eq!(parsed.model.as_deref(), Some("gemini-4-neon-high"));
         assert!(parsed.messages[0].timestamp_ms.is_some());
@@ -1751,7 +1971,193 @@ mod tests {
     }
 
     #[test]
-    fn native_transcript_skips_internal_records_and_cleans_unwrapped_prompts() {
+    fn native_activity_exposes_thinking_tools_and_paired_outputs() {
+        let planner = json!({"type":"PLANNER_RESPONSE", "status":"DONE", "thinking":"\nInspecting files\nMore reasoning", "tool_calls":[{"name":"read_file", "args":{"Path":"/repo/src/main.rs"}}]});
+        let mut payload = format!("{planner}\n");
+        let inflight = AntigravityProvider.parse_slice(payload.as_bytes(), 0);
+        assert_eq!(inflight.messages.len(), 1);
+        assert!(inflight.messages[0].text.is_empty());
+        assert!(
+            matches!(&inflight.messages[0].blocks[0], MessageBlock::ToolUse {name, summary, status: ToolStatus::Completed, ..} if name == "Thinking" && summary == "Inspecting files")
+        );
+        assert!(
+            matches!(&inflight.messages[0].blocks[1], MessageBlock::ToolUse {name, summary, status: ToolStatus::Running, output: None, ..} if name == "read_file" && summary.contains("main.rs"))
+        );
+        assert_eq!(inflight.tail_activity, TailActivity::Working);
+        assert!(inflight.last_assistant_preview.is_none());
+        payload.push_str(&format!(
+            "{}\n",
+            json!({"type":"GENERIC", "status":"DONE", "content":"file contents"})
+        ));
+        let parsed = AntigravityProvider.parse_slice(payload.as_bytes(), 0);
+        assert_eq!(parsed.messages.len(), 1);
+        assert!(
+            matches!(&parsed.messages[0].blocks[1], MessageBlock::ToolUse {status: ToolStatus::Completed, output: Some(output), ..} if output == "file contents")
+        );
+        assert_eq!(parsed.tail_activity, TailActivity::Working);
+        payload.push_str(&format!(
+            "{}\n",
+            json!({"type":"PLANNER_RESPONSE", "status":"DONE", "content":"All done"})
+        ));
+        let parsed = AntigravityProvider.parse_slice(payload.as_bytes(), 0);
+        assert_eq!(parsed.messages.last().unwrap().text, "All done");
+        assert_eq!(parsed.last_assistant_preview.as_deref(), Some("All done"));
+        assert_eq!(parsed.tail_activity, TailActivity::Idle);
+    }
+
+    #[test]
+    fn native_system_activity_stays_hidden_without_changing_preview_or_activity() {
+        for working in [true, false] {
+            let mut payload = if working {
+                format!(
+                    "{}\n",
+                    json!({"type":"PLANNER_RESPONSE", "status":"RUNNING", "content":"Working answer"})
+                )
+            } else {
+                format!(
+                    "{}\n",
+                    json!({"type":"PLANNER_RESPONSE", "status":"DONE", "content":"Clean answer"})
+                )
+            };
+            for kind in ["SYSTEM_MESSAGE", "CHECKPOINT", "USER_INPUT"] {
+                payload.push_str(&format!("{}\n", json!({"type":kind, "source":"SYSTEM_SDK", "title":"Not a title", "content":"\nBackground notice\nDetails"})));
+            }
+            let parsed = AntigravityProvider.parse_slice(payload.as_bytes(), 0);
+            assert_eq!(parsed.messages.len(), 4);
+            assert_eq!(
+                parsed.tail_activity,
+                if working {
+                    TailActivity::Working
+                } else {
+                    TailActivity::Idle
+                }
+            );
+            assert_eq!(
+                parsed.last_assistant_preview.as_deref(),
+                Some(if working {
+                    "Working answer"
+                } else {
+                    "Clean answer"
+                })
+            );
+            assert!(parsed.title_hint.is_none());
+            for message in &parsed.messages[1..] {
+                assert!(message.text.is_empty());
+                assert!(
+                    matches!(&message.blocks[0], MessageBlock::ToolUse {status: ToolStatus::Completed, summary, detail, ..} if summary == "Background notice" && detail.contains("Details"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_tools_pair_outputs_by_id_or_order_and_cap_hidden_details() {
+        let long = "a long line 🚀 ".repeat(5000);
+        let rows = [
+            json!({"type":"PLANNER_RESPONSE", "status":"RUNNING", "thinking":"Reasoning", "content":"Checking", "tool_calls":[
+                {"id":"read", "name":"read_file", "args":{"Path":"/repo/main.rs", "large":long}},
+                {"id":"run", "name":"run_command", "args":"{\"CommandLine\":\"cargo test\"}"},
+                {"name":"edit_file", "args":{"Path":"/repo/settings.rs"}},
+                {"name":"write_file", "args":{"Path":"/repo/new.rs"}},
+                {"name":"search_web", "args":{"query":"Rust docs"}},
+                {"name":"invoke_subagent", "args":{"Role":"reviewer"}},
+                {"name":"run_command", "args":"pwd"}
+            ]}),
+            json!({"type":"GENERIC", "call_id":"run", "status":"ERROR", "content":"command failed"}),
+            json!({"type":"GENERIC", "content":long}),
+        ];
+        let mut payload: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        let parsed = AntigravityProvider.parse_slice(payload.as_bytes(), 0);
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].text, "Checking");
+        let blocks = &parsed.messages[0].blocks;
+        for (index, expected) in [
+            (1, "Read main.rs"),
+            (2, "Ran cargo test"),
+            (3, "Edited settings.rs"),
+            (4, "Wrote new.rs"),
+            (5, "Searched web Rust docs"),
+            (6, "Agent reviewer"),
+            (7, "Ran pwd"),
+        ] {
+            assert!(
+                matches!(&blocks[index], MessageBlock::ToolUse {summary, detail, ..} if summary == expected && detail.chars().count() <= MAX_TOOL_DETAIL_CHARS),
+                "{blocks:?}"
+            );
+        }
+        assert!(matches!(
+            &blocks[0],
+            MessageBlock::ToolUse {
+                status: ToolStatus::Running,
+                ..
+            }
+        ));
+        assert!(
+            matches!(&blocks[1], MessageBlock::ToolUse {status:ToolStatus::Completed, output:Some(output), ..} if output.chars().count() <= MAX_TOOL_DETAIL_CHARS)
+        );
+        assert!(
+            matches!(&blocks[2], MessageBlock::ToolUse {status:ToolStatus::Error, output:Some(output), ..} if output == "command failed")
+        );
+        assert_eq!(parsed.tail_activity, TailActivity::Working);
+        payload.push_str(&format!(
+            "{}\n",
+            json!({"type":"PLANNER_RESPONSE", "status":"DONE", "content":"Finished"})
+        ));
+        payload.push_str(&format!(
+            "{}\n",
+            json!({"type":"GENERIC", "content":"Orphan output"})
+        ));
+        let parsed = AntigravityProvider.parse_slice(payload.as_bytes(), 0);
+        assert_eq!(parsed.messages.len(), 3);
+        assert!(parsed.messages[0].blocks.iter().all(|block| !matches!(
+            block,
+            MessageBlock::ToolUse {
+                status: ToolStatus::Running,
+                ..
+            }
+        )));
+        assert!(parsed.messages[2].text.is_empty());
+        assert!(
+            matches!(&parsed.messages[2].blocks[0], MessageBlock::ToolUse {name, summary, output:Some(output), ..} if name == "Activity" && summary == "Orphan output" && output == "Orphan output")
+        );
+        assert_eq!(parsed.last_assistant_preview.as_deref(), Some("Finished"));
+        assert_eq!(parsed.tail_activity, TailActivity::Idle);
+    }
+
+    #[test]
+    fn native_system_only_records_do_not_supply_titles_or_assistant_previews() {
+        let rows = [
+            json!({"type":"multibot_meta", "session_id":"native"}),
+            json!({"type":"SYSTEM_MESSAGE", "title":"Internal title", "content":"<SYSTEM_MESSAGE>\nBackground task completed\n</SYSTEM_MESSAGE>"}),
+            json!({"type":"CHECKPOINT", "title":"Internal checkpoint", "content":"Context compacted"}),
+            json!({"type":"USER_INPUT", "source":"SYSTEM_TASK", "title":"Internal wakeup", "content":"Wake up"}),
+        ];
+        let payload: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        let parsed = AntigravityProvider.parse_slice(payload.as_bytes(), 0);
+        assert_eq!(parsed.messages.len(), 3);
+        assert_eq!(parsed.tail_activity, TailActivity::Idle);
+        assert!(parsed.title_hint.is_none());
+        assert!(parsed.last_assistant_id.is_none());
+        assert!(parsed.last_assistant_preview.is_none());
+        assert!(
+            matches!(&parsed.messages[0].blocks[0], MessageBlock::ToolUse {summary, ..} if summary == "Background task completed")
+        );
+        let dir =
+            std::env::temp_dir().join(format!("multibotd-agy-system-only-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("transcript.jsonl");
+        fs::write(&path, payload).unwrap();
+        assert!(
+            AntigravityProvider
+                .extract_header_meta(&path)
+                .title_hint
+                .is_none()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn native_transcript_hides_internal_records_and_cleans_unwrapped_prompts() {
         let rows = [
             json!({"type":"SYSTEM_MESSAGE","role":"user","title":"internal title","content":"system noise"}),
             json!({"type":"USER_INPUT","source":"SYSTEM_SDK","content":"injected prompt"}),
@@ -1761,13 +2167,13 @@ mod tests {
         ];
         let payload: String = rows.iter().map(|r| format!("{r}\n")).collect();
         let parsed = AntigravityProvider.parse_slice(payload.as_bytes(), 100);
-        assert_eq!(parsed.messages.len(), 2);
-        assert_eq!(parsed.messages[0].text, "First clean line\nsecond line");
-        assert_eq!(parsed.messages[1].text, "Here is the answer");
+        assert_eq!(parsed.messages.len(), 5);
+        assert_eq!(parsed.messages[2].text, "First clean line\nsecond line");
+        assert_eq!(parsed.messages[3].text, "Here is the answer");
         assert_eq!(parsed.title_hint.as_deref(), Some("First clean line"));
         assert_eq!(parsed.tail_activity, TailActivity::Idle);
         assert_eq!(
-            parsed.messages[0].source_byte_range.unwrap().0,
+            parsed.messages[2].source_byte_range.unwrap().0,
             100 + format!("{}\n{}\n", rows[0], rows[1]).len() as u64
         );
         let dir =
@@ -1811,22 +2217,22 @@ mod tests {
             (
                 json!({"type":"SYSTEM_MESSAGE","content":"internal"}),
                 TailActivity::Idle,
-                3,
+                4,
             ),
             (
                 json!({"type":"PLANNER_RESPONSE","status":"DONE","thinking":"still thinking","content":""}),
                 TailActivity::Working,
-                3,
+                5,
             ),
             (
                 json!({"type":"PLANNER_RESPONSE","status":"RUNNING","content":"Partial"}),
                 TailActivity::Working,
-                4,
+                6,
             ),
             (
                 json!({"type":"PLANNER_RESPONSE","status":"DONE","content":"Finished"}),
                 TailActivity::Idle,
-                5,
+                7,
             ),
         ];
         let mut payload = String::new();
@@ -1848,7 +2254,7 @@ mod tests {
         let path = seed_native_brain_transcript(&dir, "4d5d5535-249c-4f10-90d9-7ec49c2eeb53");
         let page =
             read_history_page(AgentKind::Antigravity, &path, None, None, None, None).unwrap();
-        assert_eq!(page.messages.len(), 2);
+        assert_eq!(page.messages.len(), 3);
         assert_eq!(page.tail_activity, TailActivity::Idle);
         let offset = page.latest_offset;
         append_history_record(&path, &json!({"type":"USER_INPUT","source":"USER_EXPLICIT","content":"<USER_REQUEST>Next data:image/png;base64,iVBORw0KGgo=</USER_REQUEST><ADDITIONAL_METADATA>hidden</ADDITIONAL_METADATA>"})).unwrap();
@@ -1915,8 +2321,9 @@ mod tests {
         else {
             panic!("native reply must arrive as a live delta");
         };
-        assert_eq!(messages.len(), 1);
+        assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].text, "Finished");
+        assert!(messages[1..].iter().all(|m| m.text.is_empty()));
         assert_eq!(tail_activity, TailActivity::Idle);
         assert!(
             !summarize_session(
@@ -1927,6 +2334,47 @@ mod tests {
             )
             .working
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn native_summary_recovers_reply_before_hidden_activity_after_a_large_image() {
+        use crate::providers::{
+            ArchiveStore, DiscoveryContext, LiveActivity, MetadataStore, now_ms, summarize_session,
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "multibotd-agy-summary-hidden-{}",
+            std::process::id()
+        ));
+        let path = seed_native_brain_transcript(&dir, "4d5d5535-249c-4f10-90d9-7ec49c2eeb53");
+        let payload = [
+            json!({"type":"USER_INPUT", "source":"USER_EXPLICIT", "content":"Keep this title"}),
+            json!({"type":"PLANNER_RESPONSE", "status":"DONE", "content":format!("Clean answer data:image/png;base64,{}", "A".repeat(100_000))}),
+            json!({"type":"SYSTEM_MESSAGE", "title":"Not the title", "content":"Internal notice"}),
+            json!({"type":"CHECKPOINT", "content":"Compacted context"}),
+        ].iter().map(|row| format!("{row}\n")).collect::<String>();
+        fs::write(&path, payload).unwrap();
+        let metadata = MetadataStore::default();
+        let archive = ArchiveStore::default();
+        let live = LiveActivity::default();
+        let none = HashSet::new();
+        let workspaces = crate::server_workspaces::ServerWorkspaceIndex::default();
+        let ctx = DiscoveryContext {
+            active_session_ids: &none,
+            connected_session_ids: &none,
+            metadata: &metadata,
+            archive: &archive,
+            live: &live,
+            include_archived: true,
+            server_workspaces: &workspaces,
+        };
+        let summary = summarize_session(&AntigravityProvider, &path, now_ms(), &ctx);
+        assert_eq!(summary.title, "Keep this title");
+        assert_eq!(
+            summary.last_assistant_preview.as_deref(),
+            Some("Clean answer [image omitted]")
+        );
+        assert!(!summary.working);
         fs::remove_dir_all(dir).unwrap();
     }
 

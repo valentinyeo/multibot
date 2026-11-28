@@ -1723,21 +1723,32 @@ impl ProcessManager {
         source_path: &Path,
     ) {
         let mut meta = MetadataStore::load(&self.home);
-        if meta.get(conversation).is_some() {
-            return;
-        }
-        meta.sessions.insert(
-            conversation.to_string(),
-            SessionMetaEntry {
-                title: None,
-                cwd: cwd.map(String::from),
-                agent: Some(AgentKind::Antigravity),
-                source_path: Some(source_path.to_string_lossy().to_string()),
-                native_session_id: Some(conversation.to_string()),
-                workspace: None,
-                updated_at_ms: now_ms(),
-            },
-        );
+        let canonical_source =
+            std::fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+        let owner = meta
+            .sessions
+            .iter()
+            .filter(|(id, entry)| {
+                entry
+                    .agent
+                    .is_none_or(|agent| agent == AgentKind::Antigravity)
+                    && (id.as_str() == conversation
+                        || entry.native_session_id.as_deref() == Some(conversation)
+                        || entry.source_path.as_deref().is_some_and(|source| {
+                            let path = Path::new(source);
+                            std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+                                == canonical_source
+                        }))
+            })
+            .max_by_key(|(id, entry)| (crate::providers::session_metadata_priority(id, entry), *id))
+            .map(|(id, _)| id.clone())
+            .unwrap_or_else(|| conversation.to_string());
+        let entry = meta.sessions.entry(owner).or_default();
+        entry.cwd = entry.cwd.take().or_else(|| cwd.map(String::from));
+        entry.agent = Some(AgentKind::Antigravity);
+        entry.source_path = Some(source_path.to_string_lossy().to_string());
+        entry.native_session_id = Some(conversation.to_string());
+        entry.updated_at_ms = now_ms();
         let _ = meta.save(&self.home);
     }
 
