@@ -6,6 +6,7 @@ ships, move those bullets under its published version; keep older entries here.
 This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
+- Send chat messages with Enter, add line breaks with Shift+Enter, and force send queued messages with Ctrl+Enter (MBRU-137).
 - Add Ctrl+Shift+Enter to force send queued messages and show keyboard shortcuts in mouse-over tooltips on icon buttons (MBRU-136).
 - Detect live subworkers in Antigravity sessions using the conversation flag and sibling processes (MBRU-135).
 - Give each live server shell session its own native console window so switching between full-screen btop and other shells is instant without reloads or cross-session bleed (MBRU-134).

@@ -196,8 +196,16 @@ mod tooltip_tests {
     #[test]
     fn shortcut_tooltips_use_wired_registry_entries() {
         assert_eq!(
+            super::shortcut_tooltip("Send message", "chat.send"),
+            "Send message · Enter"
+        );
+        assert_eq!(
+            format!("{} ({} to force send)", super::shortcut_tooltip("Queue message", "chat.send"), multibot_keys::by_id("chat.force_send").unwrap().display),
+            "Queue message · Enter (Ctrl+Enter to force send)"
+        );
+        assert_eq!(
             super::shortcut_tooltip("Send now", "chat.force_send"),
-            "Send now · Ctrl+Shift+Enter"
+            "Send now · Ctrl+Enter"
         );
         for source in [
             include_str!("app.rs"),

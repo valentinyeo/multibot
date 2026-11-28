@@ -343,7 +343,7 @@ fn busy_composer_queues_fifo_once_for_every_chat_client(cx: &mut TestAppContext)
                     });
                 });
                 window.render_frame(cx);
-                window.press("ctrl-enter", cx);
+                window.press("enter", cx);
                 window.render_frame(cx);
                 assert!(view.read(cx).inputs.prompt_input.read(cx).value().is_empty());
                 assert!(window.find("stop-agent").visible());
@@ -710,7 +710,7 @@ fn daily_driver_session_switch_paths_focus_composer(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn composer_enter_inserts_newline_without_sending(cx: &mut TestAppContext) {
+fn composer_shift_enter_inserts_newline_without_sending(cx: &mut TestAppContext) {
     let (handle, view) = open_test_view_with_entity(cx);
     let (tx, mut rx) = mpsc::unbounded_channel();
     cx.update_window(handle, |_, window, cx| {
@@ -723,7 +723,7 @@ fn composer_enter_inserts_newline_without_sending(cx: &mut TestAppContext) {
         window.render_frame(cx);
         while rx.try_recv().is_ok() {}
         window.input("first", cx);
-        window.press("enter", cx);
+        window.press("shift-enter", cx);
         window.input("second", cx);
         window.press("shift-enter", cx);
         window.input("third", cx);
@@ -734,12 +734,19 @@ fn composer_enter_inserts_newline_without_sending(cx: &mut TestAppContext) {
         );
         assert!(view.read(cx).history.messages.is_empty());
         assert!(rx.try_recv().is_err());
+        window.press("left", cx);
+        window.press("shift-enter", cx);
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value(),
+            "first\nsecond\nthir\nd"
+        );
+        assert!(rx.try_recv().is_err());
     })
     .unwrap();
 }
 
 #[gpui_kit::test]
-fn composer_ctrl_enter_sends_multiline_message(cx: &mut TestAppContext) {
+fn composer_enter_sends_multiline_message(cx: &mut TestAppContext) {
     let (handle, view) = open_test_view_with_entity(cx);
     let (tx, mut rx) = mpsc::unbounded_channel();
     cx.update_window(handle, |_, window, cx| {
@@ -752,13 +759,16 @@ fn composer_ctrl_enter_sends_multiline_message(cx: &mut TestAppContext) {
         window.render_frame(cx);
         while rx.try_recv().is_ok() {}
         window.input("first", cx);
-        window.press("enter", cx);
+        window.press("shift-enter", cx);
         window.input("second", cx);
-        window.press("ctrl-enter", cx);
+        window.press("enter", cx);
         window.render_frame(cx);
         assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value(), "");
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "first\nsecond"));
         assert!(rx.try_recv().is_err());
+        window.press("enter", cx);
+        assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value(), "");
+        assert!(rx.try_recv().is_err(), "empty Enter must not send or insert a newline");
     }).unwrap();
 }
 
@@ -786,7 +796,7 @@ fn daily_driver_composer_grows_upward_caps_scrolls_and_sends(cx: &mut TestAppCon
         while let Ok(request) = rx.try_recv() {
             assert!(!matches!(request, ClientRequest::SendPrompt { .. }));
         }
-        window.press("ctrl-enter", cx);
+        window.press("enter", cx);
         window.render_frame(cx);
         assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value(), "");
         let mut sent = false;
@@ -1447,7 +1457,7 @@ fn lifecycle_dissolved_peek_keeps_workspace_and_reactivates_exact_history(cx: &m
             v.inputs.prompt_input.update(cx, |input, cx| { input.set_value("Continue saved chat", window, cx); input.focus(window, cx); });
         });
         window.render_frame(cx);
-        window.press("ctrl-enter", cx);
+        window.press("enter", cx);
         window.render_frame(cx);
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::UnarchiveSession { ref session_id }) if session_id == "saved"));
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { ref session_id, ref text, .. }) if session_id == "saved" && text == "queued before dissolve"));
@@ -2050,12 +2060,6 @@ fn wave1_general_preferences_control_send_key_and_queue_delivery(cx: &mut TestAp
         window.input("Send now", cx);
         window.press("enter", cx);
         window.render_frame(cx);
-        assert!(
-            rx.try_recv().is_err(),
-            "Enter must not send in Ctrl+Enter mode"
-        );
-        window.press("ctrl-enter", cx);
-        window.render_frame(cx);
         assert!(rx.try_recv().is_err());
         assert_eq!(view.read(cx).outbox.chat_outbox.entries[0].text, "Send now");
         view.update(cx, |v, cx| {
@@ -2064,7 +2068,7 @@ fn wave1_general_preferences_control_send_key_and_queue_delivery(cx: &mut TestAp
                 input.set_value("Wait for agent", window, cx)
             });
         });
-        window.press("ctrl-enter", cx);
+        window.press("enter", cx);
         window.render_frame(cx);
         assert!(rx.try_recv().is_err());
         assert_eq!(
@@ -4302,7 +4306,7 @@ fn new_antigravity_empty_history_can_send_and_render_first_reply(cx: &mut TestAp
             });
         });
         window.render_frame(cx);
-        window.press("ctrl-enter", cx);
+        window.press("enter", cx);
         window.render_frame(cx);
         let mut sent = false;
         while let Ok(request) = rx.try_recv() {
@@ -9845,8 +9849,8 @@ fn force_send_shortcut_targets_first_active_queued_message_in_both_focus_context
 ) {
     let spec = multibot_keys::by_id("chat.force_send").unwrap();
     assert!(spec.wired);
-    assert_eq!(spec.display, "Ctrl+Shift+Enter");
-    assert_eq!(spec.gpui_key, "ctrl-shift-enter");
+    assert_eq!(spec.display, "Ctrl+Enter");
+    assert_eq!(spec.gpui_key, "ctrl-enter");
     let (handle, view) = open_test_view_with_entity(cx);
     let (tx, mut rx) = mpsc::unbounded_channel();
     cx.update_window(handle, |_, window, cx| {
@@ -9867,20 +9871,32 @@ fn force_send_shortcut_targets_first_active_queued_message_in_both_focus_context
         });
         while rx.try_recv().is_ok() {}
         window.render_frame(cx);
-        window.press("ctrl-shift-enter", cx);
+        window.press("ctrl-enter", cx);
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::InterruptSession { session_id, .. }) if session_id == "force-active"));
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "first queued"));
         assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value().as_ref(), "keep draft");
         view.update(cx, |v, cx| v.focus_chat_panel(window, cx));
         window.render_frame(cx);
-        window.press("ctrl-shift-enter", cx);
+        window.press("ctrl-enter", cx);
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::InterruptSession { session_id, .. }) if session_id == "force-active"));
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "second queued"));
         assert_eq!(view.read(cx).outbox.chat_outbox.entries.len(), 1);
         assert_eq!(view.read(cx).outbox.chat_outbox.entries[0].text, "leave queued");
-        window.press("ctrl-shift-enter", cx);
+        window.press("ctrl-enter", cx);
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::InterruptSession { .. })));
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "keep draft"));
+        assert!(view.read(cx).inputs.prompt_input.read(cx).value().is_empty());
+        view.update(cx, |v, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
+                input.set_value("busy composer draft", window, cx);
+                input.focus(window, cx);
+            });
+        });
+        window.render_frame(cx);
+        window.press("ctrl-enter", cx);
+        assert!(matches!(rx.try_recv(), Ok(ClientRequest::InterruptSession { .. })));
+        assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "busy composer draft"));
+        assert!(rx.try_recv().is_err(), "force sending must not duplicate");
         assert!(view.read(cx).inputs.prompt_input.read(cx).value().is_empty());
     }).unwrap();
 }
@@ -9936,10 +9952,10 @@ fn force_send_idle_draft_and_palette_command_use_registered_shortcut(cx: &mut Te
         });
         while rx.try_recv().is_ok() {}
         window.render_frame(cx);
-        window.press("ctrl-shift-enter", cx);
+        window.press("ctrl-enter", cx);
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "idle draft"));
         assert!(rx.try_recv().is_err(), "idle sends must not interrupt or duplicate");
-        window.press("ctrl-shift-enter", cx);
+        window.press("ctrl-enter", cx);
         assert!(rx.try_recv().is_err(), "empty composer must not send");
     }).unwrap();
 }

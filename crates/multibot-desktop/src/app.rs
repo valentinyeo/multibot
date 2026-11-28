@@ -231,7 +231,7 @@ impl MultibotView {
 
         let prompt_input = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Message this session · Ctrl+Enter to send")
+                .placeholder("Message this session · Enter to send")
                 .auto_grow(1, 10)
                 .soft_wrap(true)
         });

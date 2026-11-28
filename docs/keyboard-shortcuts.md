@@ -14,7 +14,9 @@ updated: 2026-10-03
 
 | Shortcut | Action |
 | --- | --- |
-| Ctrl+Shift+Enter | Force send next queued message immediately (interrupts current turn); with no queue, send the composer draft |
+| Enter | Send message from the chat composer; queue while busy |
+| Shift+Enter | Insert a new line in the chat composer |
+| Ctrl+Enter | Force send next queued message immediately (interrupts current turn); with no queue, send the composer draft |
 
 ## Multibot chat tools and links
 
@@ -57,7 +59,7 @@ Source of truth for the F1 overlay is `SHORTCUT_ROWS` in `src/shortcuts.zig`. Th
 - Click an option card in Chat View: When the latest reply lists two or more options labelled A, B, C or 1, 2, 3, each shows as a card under the reply; a click sends the answer as `A: <option title>` through the normal message queue. When a Claude Code question prompt waits in a local console, its options show as cards, a click sends that option's number, and the Type something else card puts the cursor in the message box. Typing an answer still works. Only the latest reply's cards are clickable.
 - Ctrl+C in Chat View: Copy the current transcript selection (CRLF breaks, messages separated by a blank line). Without a selection this is unchanged. Right-click opens Reply and Copy with icons; Copy uses the selection or the clicked message. Tool blocks offer Copy only. Copy link appears on links, and unsent messages also offer Send again and Remove. Copying returns focus to the composer. Ctrl+K also has `Chat View: Copy Selection`.
 - Ctrl+A in Chat View: Select all transcript text while the transcript has focus; the composer keeps its own Ctrl+A. Esc clears the selection. Ctrl+K also has `Chat View: Select All Text`.
-- Up / Down / Enter in Chat View: With an empty message box, Up focuses the newest message with a highlight ring; Up and Down move between user, agent and waiting messages and the list scrolls to keep the focused one visible. Delete cancels a focused waiting message, including one hosted Claude has received but has not read. Enter opens the same options as right-click (Reply, Copy, reactions) and Up/Down/Enter/Esc work inside that menu; choosing one runs it for that message. Esc, typing, pasting, clicking or Down past the newest message returns to the box. Enter in the box with nothing focused still sends. Ctrl+K also has `Chat View: Focus Messages`.
+- Up / Down / Enter in Chat View: With an empty message box, Up focuses the newest message with a highlight ring; Up and Down move between user, agent and waiting messages and the list scrolls to keep the focused one visible. Delete cancels a focused waiting message, including one hosted Claude has received but has not read. Enter starts a Reply; right-click opens the message options (Reply, Copy, reactions), where Up/Down/Enter/Esc choose an action. Esc, typing, pasting, clicking or Down past the newest message returns to the box. Enter in the box with nothing focused still sends. Ctrl+K also has `Chat View: Focus Messages`.
 - Live Chat waiting messages: While a message waits for the bot, its bubble is faded. It becomes solid only when that message is acknowledged as read. Sending into steering alone does not mark it read; a send failure stays available for retry. Up in an empty message box or Ctrl+K → `Chat View: Focus Messages` selects messages; Delete or right-click → Cancel message takes back a waiting message, including one hosted Claude has already received. Cancellation completes only after Claude confirms it removed that specific message. Already-read messages, unsupported providers and terminal sessions stay unchanged when recall is refused.
 - Chat View message styles: Alt+C automatically shows your messages in right-aligned tinted bubbles and full-width replies with a small Claude/Codex avatar. Recorded times include their timezone; screen-copy history never invents timestamps. There is no extra switch or shortcut.
 - Chat View formatting: Alt+C reads the exact Claude or Codex conversation through the existing remote helper, including headings, emphasis, lists, tables, links and inline code. Missing identity, missing files or an older/unavailable helper keep the screen-copy fallback. No new shortcut or palette action is needed; the existing Alt+C and Chat View toggle enable it automatically.
@@ -331,10 +333,11 @@ The search bar stays hidden so the Inbox opens clean. Ctrl+F or / opens and focu
 | Ctrl+K "Chat View: Restart every idle live chat" | Restart every running live chat on this server on the newest version; chats that are replying restart when their reply ends. Every live chat also restarts nightly at 04:00 local server time |
 | Ctrl+K "Chat View: More Menu" | Chat View: open the round three-dot menu next to the title as one grouped panel: Approve, Stop, Terminal, Rename, History, Done, Hibernate, Dissolve, the current Model, End session and Remove from list; Up/Down/Enter or the mouse choose, Esc or a click outside closes |
 | Inbox icon in the chat header | Click the envelope left of the three dots to open the Inbox, same as Alt+I; a blue dot shows while Inbox items wait |
-| Up / Down / Enter in Chat View | Up in an empty message box focuses the newest message; Up/Down move between messages including waiting ones, Enter opens the right-click options, Delete cancels a waiting message, Esc or typing returns to the box |
-| Ctrl+Shift+Enter | Force send next queued message immediately (interrupts current turn); with no queue, send the composer draft |
-| Ctrl+Enter in Chat View | Send your message; while dictating, stops dictation and sends it with the spoken words |
-| Enter / Shift+Enter in Chat View | New line; plain Enter selects an open slash command suggestion or opens the focused message menu |
+| Up / Down / Enter in Chat View | Up in an empty message box focuses the newest message; Up/Down move between messages including waiting ones, Enter starts a Reply, Delete cancels a waiting message, Esc or typing returns to the box |
+| Ctrl+Enter | Force send next queued message immediately (interrupts current turn); with no queue, send the composer draft |
+| Enter in Chat View | Send your message; while dictating, stops dictation and sends it with the spoken words |
+| Shift+Enter in Chat View | Insert a new line in the chat composer |
+| Enter in Chat View with a picker or focused message | Select the highlighted slash command or mention, or reply to the focused message |
 | / in Chat View | Suggest Claude or Codex commands and skills; Up/Down, Tab or Enter inserts, Esc closes |
 | /plan or /permissions in live chat, or Ctrl+K -&gt; Chat View: Plus Menu | Choose Plan, Ask, Accept edits, or Bypass for this chat; /plan selects Plan first |
 | Ctrl+K "Chat View: Plus Menu" | Chat View: open the plus menu left of the message box: Attach file, Model, Effort and, in a Claude chat, Permission level; Up/Down/Enter or the mouse choose, Esc or a click outside closes |

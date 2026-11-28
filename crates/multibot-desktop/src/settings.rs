@@ -410,7 +410,7 @@ impl MultibotView {
                 content = content.child(v_flex().gap_3().p_4().rounded(RADIUS_BUBBLE)
                     .bg(theme::bg_surface()).border_1().border_color(theme::border_subtle())
                     .child(div().text_sm().child("Input box"))
-                    .child(div().id("composer-send-help").test_support().text_xs().text_color(theme::text_muted()).child("Ctrl+Enter sends a message. Enter or Shift+Enter adds a new line."))
+                    .child(div().id("composer-send-help").test_support().text_xs().text_color(theme::text_muted()).child("Enter sends a message. Shift+Enter adds a new line. Ctrl+Enter force sends."))
                     .child(div().text_sm().child("Queued messages"))
                     .child(div().text_xs().text_color(theme::text_secondary())
                         .child("Messages queue while the agent works. Use Send now beside a queued message to interrupt and send it immediately. Offline messages wait for reconnecting.")));

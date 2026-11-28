@@ -50,26 +50,26 @@ pub struct ShortcutSpec {
 pub const SHORTCUTS: &[ShortcutSpec] = &[
     ShortcutSpec {
         id: "chat.send",
-        display: "Ctrl+Enter",
-        gpui_key: "ctrl-enter",
+        display: "Enter",
+        gpui_key: "enter",
         category: ShortcutCategory::Chat,
         description: "Send message from the chat composer",
         wired: true,
     },
     ShortcutSpec {
         id: "chat.force_send",
-        display: "Ctrl+Shift+Enter",
-        gpui_key: "ctrl-shift-enter",
+        display: "Ctrl+Enter",
+        gpui_key: "ctrl-enter",
         category: ShortcutCategory::Chat,
         description: "Force send next queued message immediately (interrupts current turn)",
         wired: true,
     },
     ShortcutSpec {
         id: "chat.newline",
-        display: "Enter / Shift+Enter",
-        gpui_key: "enter",
+        display: "Shift+Enter",
+        gpui_key: "shift-enter",
         category: ShortcutCategory::Chat,
-        description: "New line; select slash command or open focused message menu",
+        description: "Insert a new line in the chat composer",
         wired: true,
     },
     // =========================================================================
@@ -1499,8 +1499,8 @@ mod tests {
         assert_eq!(fullscreen.gpui_key, "ctrl-shift-f");
         assert!(fullscreen.wired);
         assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 75);
-        assert_eq!(by_id("chat.send").unwrap().gpui_key, "ctrl-enter");
-        assert_eq!(by_id("chat.newline").unwrap().gpui_key, "enter");
+        assert_eq!(by_id("chat.send").unwrap().gpui_key, "enter");
+        assert_eq!(by_id("chat.newline").unwrap().gpui_key, "shift-enter");
         assert!(!by_id("browser.close_tab").unwrap().wired);
         assert!(!by_id("chat.steer").unwrap().wired);
         assert!(by_gpui_key("ctrl-shift-j").is_none());
@@ -1510,8 +1510,8 @@ mod tests {
 #[test]
 fn force_send_contract_is_wired_and_documented() {
     let shortcut = by_id("chat.force_send").unwrap();
-    assert_eq!(shortcut.display, "Ctrl+Shift+Enter");
-    assert_eq!(shortcut.gpui_key, "ctrl-shift-enter");
+    assert_eq!(shortcut.display, "Ctrl+Enter");
+    assert_eq!(shortcut.gpui_key, "ctrl-enter");
     assert_eq!(shortcut.category, ShortcutCategory::Chat);
     assert_eq!(
         shortcut.description,

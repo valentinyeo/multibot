@@ -87,8 +87,8 @@ fn configure_gpu_env_before_gpui(settings: &MultibotSettings) {
 pub fn bind_multibot_keys(cx: &mut App) {
     cx.bind_keys([
         // Slice 1 (20 bindings)
-        KeyBinding::new("ctrl-shift-enter", ForceSendQueued, None),
-        KeyBinding::new("ctrl-shift-enter", ForceSendQueued, Some("Input")),
+        KeyBinding::new("ctrl-enter", ForceSendQueued, None),
+        KeyBinding::new("ctrl-enter", ForceSendQueued, Some("Input")),
         KeyBinding::new("ctrl-k", OpenPalette, None),
         KeyBinding::new("ctrl-shift-k", OpenPalette, None),
         KeyBinding::new("alt-i", OpenInbox, None),

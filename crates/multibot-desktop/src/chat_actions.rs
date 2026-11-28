@@ -50,7 +50,16 @@ impl MultibotView {
                 cx.stop_propagation();
                 return;
             }
-            if action.secondary && !action.shift {
+            // Capture before TextareaState inserts its default newline.
+            if !action.secondary
+                && !action.shift
+                && this
+                    .inputs
+                    .prompt_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            {
                 this.chat_state.slash_sync_pending = false;
                 this.send_current_prompt(window, cx);
                 cx.stop_propagation();

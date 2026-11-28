@@ -2582,8 +2582,13 @@ fn session_mentions_picker_binds_duplicate_names_and_sends_exact_id(cx: &mut Tes
         window.render_frame(cx);
         assert_eq!(view.read(cx).mention_picker_state.filtered.len(), 2);
         window.press("down", cx);
-        window.press("tab", cx);
+        window.press("enter", cx);
         window.render_frame(cx);
+        assert!(!view.read(cx).mention_picker_state.is_open());
+        assert!(view.read(cx).history.messages.is_empty());
+        while let Ok(request) = rx.try_recv() {
+            assert!(!matches!(request, ClientRequest::SendPrompt { .. }));
+        }
         assert_eq!(
             view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "@Same Name "
@@ -2601,7 +2606,7 @@ fn session_mentions_picker_binds_duplicate_names_and_sends_exact_id(cx: &mut Tes
             view.read(cx).bound_mention_prompt(cx).trim(),
             "@Same Name{dup-b}"
         );
-        window.press("ctrl-enter", cx);
+        window.press("enter", cx);
         window.render_frame(cx);
         let mut saw_prompt = false;
         let mut saw_delivery = false;
@@ -3516,7 +3521,7 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
             window.render_frame(cx);
             assert_eq!(view.read(cx).chat_state.focused_message_idx, None);
 
-            // 5. Ctrl+Enter with slash picker closed sends prompt cleanly ONCE
+            // 5. Enter with slash picker closed sends prompt cleanly ONCE
             view.update(cx, |v, cx| {
                 v.history.messages.clear();
                 v.inputs.prompt_input.update(cx, |input, cx| {
@@ -3526,7 +3531,7 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
                 cx.notify();
             });
             window.render_frame(cx);
-            window.press("ctrl-enter", cx);
+            window.press("enter", cx);
             window.render_frame(cx);
             assert_eq!(
                 view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
@@ -3720,7 +3725,7 @@ fn live_modal_printable_guard_and_find_slash_routing_regressions(cx: &mut TestAp
         window.render_frame(cx);
         assert_eq!(view.read(cx).active_modal, ActiveModal::None);
 
-        // 2. Shift+Enter, Ctrl+Enter, and Alt+Enter while slash picker is open must NOT
+        // 2. Shift+Enter and Alt+Enter while slash picker is open must NOT
         //    accept "/plan " and must keep slash_picker_state.is_open() == true.
         view.update(cx, |v, cx| {
             v.inputs.prompt_input.update(cx, |input, cx| {
@@ -5848,7 +5853,7 @@ fn highlighted_quotes_use_shortcut_and_pill_and_send_in_commentary_order(cx: &mu
             view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
             "Before [Quote #1] Between [Quote #2] After"
         );
-        window.press("ctrl-enter", cx);
+        window.press("enter", cx);
         let prompt = std::iter::from_fn(|| rx.try_recv().ok())
             .find_map(|request| match request {
                 ClientRequest::SendPrompt { text, .. } => Some(text),
