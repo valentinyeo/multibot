@@ -1605,6 +1605,87 @@ fn global_palette_restores_inactive_chats_without_reordering_passive_active_visi
 }
 
 #[gpui_kit::test]
+fn global_palette_search_and_enter_restore_done_and_hibernated_chats(cx: &mut TestAppContext) {
+    use multibot_core::workspaces::SessionLifecycle;
+    let (handle, view) = open_view(cx);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, _| v.connection.daemon_tx = Some(tx));
+        for state in ["active", "done", "archived", "hibernated", "snoozed", "killed", "dissolved"] {
+            let now = now_unix_ms();
+            let (key, workspace_id) = view.update(cx, |v, _| {
+                let session = SessionSummary {
+                    id: state.into(),
+                    title: "Find lifecycle chat".into(),
+                    agent: AgentKind::Claude,
+                    archived: matches!(state, "archived" | "killed"),
+                    archive_kill_process: state == "killed",
+                    ..Default::default()
+                };
+                let key = v.session_key_for(&session);
+                v.connection.sessions = vec![session.clone()];
+                v.selection.selected_session = None;
+                let store = &mut v.sidebar_state.workspace_store;
+                let workspace = store.create_workspace(state, None).unwrap();
+                store.assign_session_workspace(&key, &workspace.id);
+                match state {
+                    "done" => store.archive_to_waiting_session(&key, now, &session),
+                    "hibernated" => store.hibernate_session(&key, &session, Some(now + 60_000), None, false),
+                    "dissolved" => store.dissolve_session(&key, now),
+                    _ => {}
+                }
+                if matches!(state, "done" | "archived" | "hibernated" | "snoozed") {
+                    store.snooze_workspace(&workspace.id, now + 60_000, now).unwrap();
+                }
+                store.record_session_view(&key, now);
+                (key, workspace.id)
+            });
+            window.press("ctrl-k", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::Palette);
+            view.update(cx, |v, cx| {
+                let recent = v.build_palette_rows("", now);
+                assert_eq!(recent.iter().any(|row| matches!(row, PaletteRow::Session { session_key, .. } if session_key == &key)), state == "active");
+                v.inputs.palette_input.update(cx, |input, cx| {
+                    input.set_value("Find lifecycle chat", window, cx);
+                    input.focus(window, cx);
+                });
+            });
+            window.render_frame(cx);
+            let rows = view.read_with(cx, |v, _| v.build_palette_rows("Find lifecycle chat", now));
+            if matches!(state, "killed" | "dissolved") {
+                assert!(!rows.iter().any(|row| matches!(row, PaletteRow::Session { .. })), "{state}");
+                window.press("escape", cx);
+                window.render_frame(cx);
+                continue;
+            }
+            let label = match state {
+                "done" | "archived" => format!("{state} · Done"),
+                "hibernated" | "snoozed" => format!("{state} · Hibernated"),
+                _ => state.to_string(),
+            };
+            assert!(matches!(&rows[..], [PaletteRow::Session { session_key, workspace_name, .. }] if session_key == &key && workspace_name == &label), "{state}: {rows:?}");
+            window.press("enter", cx);
+            window.render_frame(cx);
+            view.read_with(cx, |v, _| {
+                assert_eq!(v.active_modal, ActiveModal::None, "{state}");
+                let selected = v.selection.selected_session.as_ref().unwrap();
+                assert_eq!(selected.id, state);
+                assert!(!selected.archived);
+                let store = &v.sidebar_state.workspace_store;
+                assert_eq!(store.session_lifecycle(&key, selected, now), SessionLifecycle::Active);
+                assert!(!store.workspace_by_id(&workspace_id).unwrap().is_snoozed_at(now));
+                assert_eq!(store.session_meta[&key].last_input_ms.is_some(), state != "active");
+            });
+            let requests: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            if state == "archived" {
+                assert!(requests.iter().any(|request| matches!(request, ClientRequest::UnarchiveSession { session_id } if session_id == state)));
+            }
+        }
+    }).unwrap();
+}
+
+#[gpui_kit::test]
 fn palette_copy_and_reply_use_focused_message_or_latest(cx: &mut TestAppContext) {
     use multibot_proto::{ChatMessage, MessageRole};
     let (handle, view) = open_view(cx);

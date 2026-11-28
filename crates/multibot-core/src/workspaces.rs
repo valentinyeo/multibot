@@ -3264,7 +3264,10 @@ pub fn rank_palette(
                     return None;
                 }
                 let input = *session_map.get(key)?;
-                if input.summary.archived {
+                if input.summary.archived
+                    || store.session_lifecycle(key, input.summary, now_ms)
+                        != SessionLifecycle::Active
+                {
                     return None;
                 }
                 let ws_id = store.effective_workspace_id(key);
@@ -3435,18 +3438,30 @@ pub fn rank_palette(
 
             // Sessions (kind_tier = 0)
             for input in sessions {
-                if input.summary.archived || store.waiting_sessions.contains_key(&input.key) {
+                let lifecycle = store.session_lifecycle(&input.key, input.summary, now_ms);
+                if lifecycle == SessionLifecycle::Dissolved {
                     continue;
                 }
                 let ws_id = store.effective_workspace_id(&input.key);
-                let ws_name = match ws_map.get(ws_id.as_str()) {
+                let ws = ws_map.get(ws_id.as_str());
+                let ws_name = match ws {
                     Some(ws) => {
-                        if ws.archived || ws.is_snoozed_at(now_ms) {
+                        if ws.archived {
                             continue;
                         }
                         ws.name.clone()
                     }
                     None => DEFAULT_WORKSPACE_NAME.to_string(),
+                };
+                let ws_name = match lifecycle {
+                    SessionLifecycle::Done => format!("{ws_name} · Done"),
+                    SessionLifecycle::Hibernated => format!("{ws_name} · Hibernated"),
+                    SessionLifecycle::Active
+                        if ws.is_some_and(|ws| ws.is_snoozed_at(now_ms)) =>
+                    {
+                        format!("{ws_name} · Hibernated")
+                    }
+                    _ => ws_name,
                 };
                 let title = store
                     .effective_title(&input.key, &input.summary.title)
