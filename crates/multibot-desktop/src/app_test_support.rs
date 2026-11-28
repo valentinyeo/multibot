@@ -501,11 +501,6 @@ impl MultibotView {
                     {
                         self.record_send_failure(msg_id, text, message.clone(), cx);
                     }
-                    if code == "switch_shell_client_failed" {
-                        self.shell_host.switch_failed(message);
-                        cx.notify();
-                        return;
-                    }
                     if code == "switch_harness_failed" {
                         self.chat_state.pending_harness_switch = None;
                     }

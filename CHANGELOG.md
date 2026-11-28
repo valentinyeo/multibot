@@ -6,6 +6,7 @@ ships, move those bullets under its published version; keep older entries here.
 This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
+- Give each live server shell session its own native console window so switching between full-screen btop and other shells is instant without reloads or cross-session bleed (MBRU-134).
 - Fix the docked Windows browser pane to fill the right side with full native Chrome using a shared Multibot profile, removing the duplicate address bar and buttons (MBRU-132).
 
 - Hide hibernated chats from the sidebar and active view immediately after choosing a time in Alt+H (MBRU-133).

@@ -15,14 +15,6 @@ impl MultibotView {
             self.observe_turn_event(host_label, &event);
         }
         let should_flush = self.handle_outbox_event(host_label, &event);
-        if let ServerEvent::Error { code, message } = &event
-            && code == "switch_shell_client_failed"
-        {
-            if self.shell_host.switch_failed(message) {
-                cx.notify();
-            }
-            return;
-        }
         let matches_active_host = self
             .selection
             .selected_session_host

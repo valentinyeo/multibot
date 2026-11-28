@@ -213,8 +213,9 @@ impl MultibotView {
             } else if let Some(session) = &self.selection.selected_session {
                 if session.agent == AgentKind::Shell {
                     let host = self.active_session_host().to_string();
+                    let session_id = session.id.clone();
                     self.focus_chat_panel(window, cx);
-                    self.shell_host.focus_session(&host);
+                    self.shell_host.focus_session(&host, &session_id);
                 } else {
                     self.shell_host.focus_parent();
                     self.inputs
