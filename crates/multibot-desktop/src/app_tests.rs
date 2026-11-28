@@ -68,6 +68,7 @@ fn dispatched_messages_survive_history_until_each_echo(cx: &mut TestAppContext) 
             v.connection.sessions = vec![session.clone()];
             v.select_session(session.clone(), cx);
             while rx.try_recv().is_ok() {}
+            v.apply_pending_draft(window, cx);
             v.inputs
                 .prompt_input
                 .update(cx, |input, cx| input.set_value("ping", window, cx));
@@ -123,6 +124,7 @@ fn dispatched_messages_survive_history_until_each_echo(cx: &mut TestAppContext) 
                 .dispatching
                 .clear();
             while rx.try_recv().is_ok() {}
+            v.apply_pending_draft(window, cx);
             v.inputs
                 .prompt_input
                 .update(cx, |input, cx| input.set_value("ping", window, cx));
@@ -170,9 +172,11 @@ fn force_sent_message_survives_quiet_interrupt_and_history(cx: &mut TestAppConte
             v.connection.sessions = vec![session.clone()];
             v.select_session(session.clone(), cx);
             while rx.try_recv().is_ok() {}
+            v.apply_pending_draft(window, cx);
             v.inputs.prompt_input.update(cx, |input, cx| input.set_value("original turn", window, cx));
             v.send_current_prompt(window, cx);
             assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { .. })));
+            v.apply_pending_draft(window, cx);
             v.inputs.prompt_input.update(cx, |input, cx| input.set_value("urgent", window, cx));
             v.send_current_prompt(window, cx);
             assert_eq!(v.history.messages.len(), 1, "queued prompt belongs only in tray");
@@ -220,6 +224,7 @@ fn failed_send_retry_preserves_one_bubble_until_echo(cx: &mut TestAppContext) {
             let session = make_session("retry-echo", AgentKind::Claude, "Retry", false);
             v.connection.daemon_tx = Some(tx);
             v.select_session(session.clone(), cx);
+            v.apply_pending_draft(window, cx);
             v.inputs
                 .prompt_input
                 .update(cx, |input, cx| input.set_value("retry me", window, cx));
@@ -330,10 +335,13 @@ fn busy_composer_queues_fifo_once_for_every_chat_client(cx: &mut TestAppContext)
             });
             while rx.try_recv().is_ok() {}
             for text in ["first follow-up", "second follow-up"] {
-                view.update(cx, |v, cx| v.inputs.prompt_input.update(cx, |input, cx| {
-                    input.set_value(text, window, cx);
-                    input.focus(window, cx);
-                }));
+                view.update(cx, |v, cx| {
+                    v.apply_pending_draft(window, cx);
+                    v.inputs.prompt_input.update(cx, |input, cx| {
+                        input.set_value(text, window, cx);
+                        input.focus(window, cx);
+                    });
+                });
                 window.render_frame(cx);
                 window.press("ctrl-enter", cx);
                 window.render_frame(cx);
@@ -645,6 +653,7 @@ fn daily_driver_session_switch_paths_focus_composer(cx: &mut TestAppContext) {
                     },
                     cx,
                 );
+                v.apply_pending_draft(window, cx);
                 v.inputs
                     .prompt_input
                     .update(cx, |input, cx| input.set_value("", window, cx));
@@ -688,10 +697,11 @@ fn daily_driver_session_switch_paths_focus_composer(cx: &mut TestAppContext) {
                     .is_focused(window),
                 "{path}"
             );
+            let before = view.read(cx).inputs.prompt_input.read(cx).value().to_string();
             window.input("ready", cx);
             assert_eq!(
                 view.read(cx).inputs.prompt_input.read(cx).value(),
-                "ready",
+                format!("{before}ready"),
                 "{path}"
             );
         }
@@ -871,6 +881,7 @@ fn daily_driver_shortcuts_search_filters_and_never_changes_the_draft(cx: &mut Te
         view.update(cx, |v, cx| {
             let session = make_session("search-shortcuts", AgentKind::Claude, "Shortcuts", false);
             v.select_session(session, cx);
+            v.apply_pending_draft(window, cx);
             v.inputs
                 .prompt_input
                 .update(cx, |input, cx| input.set_value("unsent draft", window, cx));
@@ -1168,6 +1179,7 @@ fn lifecycle_single_chords_and_removed_leader_preserve_composer(cx: &mut TestApp
             let session = make_session("go", AgentKind::Claude, "Go", false);
             v.connection.sessions = vec![session.clone()];
             v.select_session(session, cx);
+            v.apply_pending_draft(window, cx);
             v.inputs
                 .prompt_input
                 .update(cx, |input, cx| input.replace("draft", window, cx));
@@ -3684,7 +3696,7 @@ fn dissolved_shell_stays_hidden_after_reload_and_fresh_session_lists(cx: &mut Te
         });
         for app_scoped in [false, true] {
             view.update(cx, |v, cx| {
-                v.clear_active_session_view();
+                v.clear_active_session_view(cx);
                 v.connection.sessions.clear();
                 v.sidebar_state.workspace_store = WorkspaceStore::load_from(&path).unwrap();
                 v.sync_workspace_to_shared(cx);
@@ -4281,6 +4293,7 @@ fn new_antigravity_empty_history_can_send_and_render_first_reply(cx: &mut TestAp
                 session.id
             );
             assert!(v.history.messages.is_empty());
+            v.apply_pending_draft(window, cx);
             v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("Hello new AGY", window, cx);
                 input.focus(window, cx);
@@ -6805,7 +6818,7 @@ fn pending_attachments_cleared_on_select_session_and_clear_active_session_view(
             // Switching/disconnecting hosts calls clear_active_session_view, which must also clear pending_attachments.
             v.stage_dropped_paths(&[secret_png.clone()], window, cx);
             assert_eq!(v.chat_state.pending_attachments.len(), 1);
-            v.clear_active_session_view();
+            v.clear_active_session_view(cx);
             assert!(
                 v.chat_state.pending_attachments.is_empty(),
                 "clear_active_session_view must clear staged pending_attachments"
@@ -9741,7 +9754,7 @@ fn test_round7_chat_find_slash_picker_and_message_nav_restore_focus_after_modals
         );
 
         // =================================================================
-        // Trace 2C: Empty-composer Message Navigation (`Up`) & Action Menu (`Enter`)
+        // Trace 2C: Empty-composer Message Navigation (`Up`), Reply (`Enter`), Reactions (`r`)
         //           survive Ctrl+K -> Esc and F1 -> Esc with full Up/Down/Enter
         // =================================================================
         view.update(cx, |v, cx| {
@@ -9782,9 +9795,14 @@ fn test_round7_chat_find_slash_picker_and_message_nav_restore_focus_after_modals
         window.press("enter", cx);
         window.render_frame(cx);
         assert!(
-            view.read(cx).chat_state.message_action_menu_open,
-            "Enter must open Message Action Menu immediately after Ctrl+K -> Esc"
+            view.read(cx).chat_state.reply_quote.is_some(),
+            "Enter replies directly"
         );
+        assert!(!view.read(cx).chat_state.message_action_menu_open);
+        window.press("up", cx);
+        window.press("r", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).chat_state.reaction_picker_open);
         assert_eq!(view.read(cx).chat_state.message_action_index, 0);
 
         // F1 -> Esc while Action Menu is open must keep Down/Enter responsive

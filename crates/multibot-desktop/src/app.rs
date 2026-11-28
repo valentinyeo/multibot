@@ -674,6 +674,7 @@ impl MultibotView {
 
 impl Render for MultibotView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.apply_pending_draft(window, cx);
         self.sync_busy_dots_timer(cx);
         if self.active_modal == ActiveModal::None
             && (self.sidebar_state.rename.is_some()
@@ -812,6 +813,7 @@ impl Render for MultibotView {
                 el.child(self.render_chat_info(cx))
             })
             .when_some(self.render_table_modal(cx), |el, modal| el.child(modal))
+            .when_some(self.render_image_viewer(window, cx), |el, modal| el.child(modal))
     }
 }
 

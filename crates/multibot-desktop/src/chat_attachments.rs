@@ -1,5 +1,146 @@
 use super::*;
 
+pub(crate) fn fit_image_size(width: u32, height: u32, max_w: f32, max_h: f32) -> (f32, f32) {
+    if width == 0 || height == 0 {
+        return (0.0, 0.0);
+    }
+    let scale = (max_w.max(0.0) / width as f32)
+        .min(max_h.max(0.0) / height as f32)
+        .min(1.0);
+    (width as f32 * scale, height as f32 * scale)
+}
+
+pub(crate) fn read_image_dimensions(path: &Path) -> Option<(u32, u32)> {
+    use std::sync::{Mutex, OnceLock};
+    type DimensionsCache = HashMap<PathBuf, Option<(u32, u32)>>;
+    static CACHE: OnceLock<Mutex<DimensionsCache>> = OnceLock::new();
+    let mut cache = CACHE.get_or_init(Mutex::default).lock().ok()?;
+    if let Some(size) = cache.get(path) {
+        return *size;
+    }
+    // Missing downloads may appear on the next frame; don't cache missing files.
+    let file = std::fs::File::open(path).ok()?;
+    let size = image_header_dimensions(&mut std::io::BufReader::new(file));
+    if cache.len() >= 256 {
+        cache.clear();
+    }
+    cache.insert(path.to_path_buf(), size);
+    size
+}
+
+fn image_header_dimensions(
+    reader: &mut (impl std::io::Read + std::io::Seek),
+) -> Option<(u32, u32)> {
+    use std::io::SeekFrom;
+    let mut header = [0u8; 12];
+    reader.read_exact(&mut header).ok()?;
+    let dimensions = if header.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let mut ihdr = [0u8; 12];
+        reader.read_exact(&mut ihdr).ok()?;
+        if &ihdr[..4] != b"IHDR" || header[8..12] != 13u32.to_be_bytes() {
+            return None;
+        }
+        (
+            u32::from_be_bytes(ihdr[4..8].try_into().ok()?),
+            u32::from_be_bytes(ihdr[8..12].try_into().ok()?),
+        )
+    } else if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
+        (
+            u16::from_le_bytes(header[6..8].try_into().ok()?) as u32,
+            u16::from_le_bytes(header[8..10].try_into().ok()?) as u32,
+        )
+    } else if header.starts_with(b"\xff\xd8") {
+        reader.seek(SeekFrom::Start(2)).ok()?;
+        loop {
+            let mut byte = [0];
+            reader.read_exact(&mut byte).ok()?;
+            if byte[0] != 0xff {
+                return None;
+            }
+            while byte[0] == 0xff {
+                reader.read_exact(&mut byte).ok()?;
+            }
+            let marker = byte[0];
+            if matches!(marker, 0xd9 | 0xda | 0x00) {
+                return None;
+            }
+            if marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+                continue;
+            }
+            let mut length = [0; 2];
+            reader.read_exact(&mut length).ok()?;
+            let length = u16::from_be_bytes(length);
+            if length < 2 {
+                return None;
+            }
+            if matches!(marker, 0xc0..=0xc2) {
+                if length < 8 {
+                    return None;
+                }
+                let mut sof = [0; 5];
+                reader.read_exact(&mut sof).ok()?;
+                break (
+                    u16::from_be_bytes([sof[3], sof[4]]) as u32,
+                    u16::from_be_bytes([sof[1], sof[2]]) as u32,
+                );
+            }
+            reader.seek(SeekFrom::Current(i64::from(length) - 2)).ok()?;
+        }
+    } else if header.starts_with(b"RIFF") && &header[8..12] == b"WEBP" {
+        let end = u64::from(u32::from_le_bytes(header[4..8].try_into().ok()?)) + 8;
+        loop {
+            if reader.stream_position().ok()?.checked_add(8)? > end {
+                return None;
+            }
+            let mut chunk = [0; 8];
+            reader.read_exact(&mut chunk).ok()?;
+            let len = u32::from_le_bytes(chunk[4..8].try_into().ok()?);
+            let next = reader.stream_position().ok()?.checked_add(u64::from(len))?;
+            if next > end {
+                return None;
+            }
+            match &chunk[..4] {
+                b"VP8X" if len >= 10 => {
+                    let mut data = [0; 10];
+                    reader.read_exact(&mut data).ok()?;
+                    break (
+                        1 + u32::from_le_bytes([data[4], data[5], data[6], 0]),
+                        1 + u32::from_le_bytes([data[7], data[8], data[9], 0]),
+                    );
+                }
+                b"VP8L" if len >= 5 => {
+                    let mut data = [0; 5];
+                    reader.read_exact(&mut data).ok()?;
+                    if data[0] != 0x2f {
+                        return None;
+                    }
+                    let bits = u32::from_le_bytes(data[1..5].try_into().ok()?);
+                    break ((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1);
+                }
+                b"VP8 " if len >= 10 => {
+                    let mut data = [0; 10];
+                    reader.read_exact(&mut data).ok()?;
+                    if data[0] & 1 != 0 || &data[3..6] != b"\x9d\x01\x2a" {
+                        return None;
+                    }
+                    break (
+                        u32::from(u16::from_le_bytes([data[6], data[7]]) & 0x3fff),
+                        u32::from(u16::from_le_bytes([data[8], data[9]]) & 0x3fff),
+                    );
+                }
+                _ => {
+                    reader
+                        .seek(SeekFrom::Start(next + u64::from(len % 2)))
+                        .ok()?;
+                }
+            }
+        }
+    } else {
+        return None;
+    };
+    (dimensions.0 > 0 && dimensions.1 > 0).then_some(dimensions)
+}
+
 // ============================================================================
 // 6. Image Paste/Drop, File Attach, SSH Atomic Staging & Thumbnails
 // ============================================================================
@@ -337,6 +478,7 @@ impl MultibotView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.apply_pending_draft(window, cx);
         let mut candidates = Vec::with_capacity(paths.len());
         let mut rejected_invalid = 0usize;
         for p in paths {
@@ -766,7 +908,7 @@ mod remote_image_tests {
     }
 
     #[gpui_kit::test]
-    fn remote_image_background_fetch_is_deduplicated_and_card_opens_original(
+    fn remote_image_background_fetch_is_deduplicated_and_card_opens_viewer(
         cx: &mut gpui_kit::TestAppContext,
     ) {
         use gpui_kit::{AppContext, test::TestWindowExt};
@@ -809,7 +951,19 @@ mod remote_image_tests {
             window.render_frame(cx);
             let _ = crate::external_url::take_opened_urls();
             window.click("chat-image-0-url-0", cx);
+            assert!(crate::external_url::take_opened_urls().is_empty());
+            window.render_frame(cx);
+            assert!(window.find("image-viewer-modal").visible());
+            window.click("image-viewer-open-browser", cx);
             assert_eq!(crate::external_url::take_opened_urls(), vec![url.clone()]);
+            window.click("image-viewer-close", cx);
+            window.render_frame(cx);
+            assert!(view.read(cx).chat_state.image_viewer.is_none());
+            window.click("chat-image-0-url-0", cx);
+            window.render_frame(cx);
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(view.read(cx).chat_state.image_viewer.is_none());
         })
         .unwrap();
         std::fs::remove_file(path).unwrap();
@@ -834,5 +988,88 @@ mod remote_image_tests {
             );
         });
         assert!(!image_cache_path(&bad_url, image_ext_from_url(&bad_url)).is_file());
+    }
+}
+
+#[cfg(test)]
+mod dimension_tests {
+    use super::*;
+
+    fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+        image_header_dimensions(&mut std::io::Cursor::new(bytes))
+    }
+
+    #[test]
+    fn parses_png_gif_and_all_jpeg_sof_headers() {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend(1920u32.to_be_bytes());
+        png.extend(1080u32.to_be_bytes());
+        assert_eq!(dimensions(&png), Some((1920, 1080)));
+        for signature in [b"GIF87a", b"GIF89a"] {
+            let mut gif = signature.to_vec();
+            gif.extend(640u16.to_le_bytes());
+            gif.extend(480u16.to_le_bytes());
+            gif.extend([0; 3]);
+            assert_eq!(dimensions(&gif), Some((640, 480)));
+        }
+        for marker in [0xc0, 0xc1, 0xc2] {
+            let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe0, 0, 4, 1, 2, 0xff, marker, 0, 8, 8];
+            jpeg.extend(1080u16.to_be_bytes());
+            jpeg.extend(1920u16.to_be_bytes());
+            jpeg.push(3);
+            assert_eq!(dimensions(&jpeg), Some((1920, 1080)));
+        }
+        for length in 0..png.len() {
+            assert_eq!(dimensions(&png[..length]), None, "truncated at {length}");
+        }
+        assert_eq!(dimensions(b"not an image header"), None);
+        png[16..20].fill(0);
+        assert_eq!(dimensions(&png), None);
+        assert_eq!(dimensions(b"\xff\xd8\xff\xe0\0\x01xxxxxxxx"), None);
+    }
+
+    #[test]
+    fn parses_webp_lossy_lossless_and_extended_headers() {
+        let width = 1920u32;
+        let height = 1080u32;
+        let mut vp8 = vec![0, 0, 0, 0x9d, 1, 0x2a];
+        vp8.extend((width as u16).to_le_bytes());
+        vp8.extend((height as u16).to_le_bytes());
+        let mut vp8l = vec![0x2f];
+        vp8l.extend(((width - 1) | ((height - 1) << 14)).to_le_bytes());
+        let mut vp8x = vec![0; 4];
+        vp8x.extend(&(width - 1).to_le_bytes()[..3]);
+        vp8x.extend(&(height - 1).to_le_bytes()[..3]);
+        for (kind, payload) in [(b"VP8 ", vp8), (b"VP8L", vp8l), (b"VP8X", vp8x)] {
+            let mut bytes = b"RIFF".to_vec();
+            bytes.extend((12u32 + payload.len() as u32).to_le_bytes());
+            bytes.extend(b"WEBP");
+            bytes.extend(kind);
+            bytes.extend((payload.len() as u32).to_le_bytes());
+            bytes.extend(payload);
+            assert_eq!(dimensions(&bytes), Some((width, height)), "{kind:?}");
+            bytes.truncate(bytes.len() - 1);
+            assert_eq!(dimensions(&bytes), None);
+        }
+    }
+
+    #[test]
+    fn fits_exact_aspect_ratio_without_upscaling() {
+        assert_eq!(fit_image_size(1920, 1080, 320.0, 480.0), (320.0, 180.0));
+        assert_eq!(fit_image_size(1080, 1920, 320.0, 480.0), (270.0, 480.0));
+        assert_eq!(fit_image_size(16, 9, 320.0, 480.0), (16.0, 9.0));
+        assert_eq!(fit_image_size(0, 9, 320.0, 480.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn caches_header_dimensions_without_rereading_the_file() {
+        let path = std::env::temp_dir().join(format!("multibot-dimensions-{}.png", now_unix_ms()));
+        assert_eq!(read_image_dimensions(&path), None);
+        let png = remote_image_tests::PNG;
+        std::fs::write(&path, png).unwrap();
+        assert_eq!(read_image_dimensions(&path), Some((1, 1)));
+        std::fs::write(&path, b"not an image").unwrap();
+        assert_eq!(read_image_dimensions(&path), Some((1, 1)));
+        std::fs::remove_file(path).unwrap();
     }
 }

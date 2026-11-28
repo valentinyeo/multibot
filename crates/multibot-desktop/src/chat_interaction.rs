@@ -20,28 +20,6 @@ impl MultibotView {
         if self.chat_state.interaction_session_key.as_ref() != Some(&key) {
             if let Some(handle) = self.chat_state.interaction_window {
                 TextSelection::clear_for_window(handle.window_id(), cx);
-                let tokens: Vec<_> = self
-                    .chat_state
-                    .quoted_snippets
-                    .iter()
-                    .map(QuotedSnippet::token)
-                    .collect();
-                if !tokens.is_empty() {
-                    let input = self.inputs.prompt_input.clone();
-                    cx.defer(move |cx| {
-                        let _ = handle.update(cx, |_, window, cx| {
-                            input.update(cx, |input, cx| {
-                                let mut draft = input.value().to_string();
-                                for token in tokens {
-                                    draft = draft.replace(&token, "");
-                                }
-                                let end = draft.len();
-                                input.set_value(draft, window, cx);
-                                input.set_selected_range(end..end, cx);
-                            })
-                        });
-                    });
-                }
             }
             self.chat_state.reset_chat_interactions(key);
         }
@@ -53,6 +31,7 @@ impl MultibotView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.apply_pending_draft(window, cx);
         if text.trim().is_empty() {
             return;
         }
@@ -236,6 +215,10 @@ impl MultibotView {
         // Never steal Escape from higher-priority overlays (table modal, palette, shortcuts).
         if self.has_higher_priority_modal() {
             return false;
+        }
+        if self.chat_state.image_viewer.take().is_some() {
+            cx.notify();
+            return true;
         }
         if self.mention_picker_state.is_open() {
             return self.handle_mention_key("escape", window, cx);

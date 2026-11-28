@@ -50,7 +50,7 @@ use gpui_kit::{
     },
     div, img,
     prelude::FluentBuilder,
-    px, rgb,
+    px, rgb, rgba,
 };
 use multibot_core::cache::sha256_hex;
 use multibot_core::chat_scroll::{ChatScrollTracker, NewestChord, PendingScrollTarget};
@@ -514,6 +514,7 @@ impl MultibotView {
                                     local_path.as_deref(),
                                     alt,
                                     &format!("{orig_idx}-block-{block_idx}"),
+                                    cx,
                                 ));
                             }
                             MessageBlock::QuestionPrompt {
@@ -595,6 +596,7 @@ impl MultibotView {
                         None,
                         "",
                         &format!("{orig_idx}-url-{image_idx}"),
+                        cx,
                     ));
                 }
 
@@ -873,6 +875,7 @@ impl MultibotView {
             }
         }
 
+        let mut live_activity = None;
         if is_working {
             let turn_start = self
                 .history
@@ -907,63 +910,64 @@ impl MultibotView {
                 .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
                 .mx_auto()
                 .px_2()
-                .gap_1p5()
+                .gap_1p5();
+            let activity_row = h_flex()
+                .id("chat-live-activity")
+                .role(Role::Button)
+                .aria_label("Show current activity")
+                .aria_expanded(expanded)
+                .test_support()
+                .cursor_pointer()
+                .self_start()
+                .max_w_full()
+                .py_1p5()
+                .gap_2()
+                .items_center()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.chat_state.live_activity_expanded = !this.chat_state.live_activity_expanded;
+                    cx.notify();
+                }))
                 .child(
                     h_flex()
-                        .id("chat-live-activity")
-                        .role(Role::Button)
-                        .aria_label("Show current activity")
-                        .aria_expanded(expanded)
+                        .id("chat-busy-dots")
                         .test_support()
-                        .cursor_pointer()
-                        .self_start()
-                        .max_w_full()
-                        .py_1p5()
-                        .gap_2()
+                        .flex_shrink_0()
+                        .h(px(14.0))
                         .items_center()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.chat_state.live_activity_expanded =
-                                !this.chat_state.live_activity_expanded;
-                            cx.notify();
-                        }))
-                        .child(
-                            h_flex()
-                                .id("chat-busy-dots")
-                                .test_support()
-                                .flex_shrink_0()
-                                .h(px(14.0))
-                                .items_center()
-                                .gap_1p5()
-                                .child(dot(0))
-                                .child(dot(1))
-                                .child(dot(2)),
-                        )
-                        .child(
-                            Label::new(activity_label(&self.history.messages))
-                                .id("chat-activity-label")
-                                .text_xs()
-                                .text_color(theme::text_secondary())
-                                .truncate(),
-                        )
-                        .when(has_activity, |el| {
-                            el.child(div().text_color(theme::text_muted()).child(lucide_icon(
-                                if expanded {
-                                    icons::CHEVRON_DOWN
-                                } else {
-                                    icons::CHEVRON_RIGHT
-                                },
-                                12.0,
-                            )))
-                        }),
-                );
+                        .gap_1p5()
+                        .child(dot(0))
+                        .child(dot(1))
+                        .child(dot(2)),
+                )
+                .child(
+                    Label::new(activity_label(&self.history.messages))
+                        .id("chat-activity-label")
+                        .text_xs()
+                        .text_color(theme::text_secondary())
+                        .truncate(),
+                )
+                .when(has_activity, |el| {
+                    el.child(div().text_color(theme::text_muted()).child(lucide_icon(
+                        if expanded {
+                            icons::CHEVRON_DOWN
+                        } else {
+                            icons::CHEVRON_RIGHT
+                        },
+                        12.0,
+                    )))
+                });
             if expanded {
                 let mut steps = v_flex()
                     .id("chat-live-activity-steps")
                     .test_support()
                     .w_full()
-                    .gap_1p5();
-                for (msg_idx, message) in self.history.messages.iter().enumerate().skip(turn_start)
-                {
+                    .gap_1p5()
+                    .max_h(px(220.0))
+                    .overflow_y_scroll()
+                    .rounded(RADIUS_ROW)
+                    .bg(theme::bg_surface())
+                    .p_2();
+                for (msg_idx, message) in self.history.messages.iter().enumerate().skip(turn_start) {
                     for (block_idx, block) in message.blocks.iter().enumerate() {
                         if let MessageBlock::ToolUse {
                             call_id,
@@ -993,10 +997,11 @@ impl MultibotView {
                 }
                 activity = activity.child(steps);
             }
-            msg_col = msg_col.child(activity);
+            live_activity = Some(activity.child(activity_row).pb_2());
         }
 
-        if let Some(session) = &self.selection.selected_session
+        if !is_working
+            && let Some(session) = &self.selection.selected_session
             && let Some(notice) = self
                 .chat_state
                 .turn_notices
@@ -1006,6 +1011,9 @@ impl MultibotView {
                 div()
                     .id("chat-turn-notice")
                     .test_support()
+                    .w_full()
+                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+                    .mx_auto()
                     .px_2()
                     .py_1p5()
                     .text_xs()
@@ -1126,7 +1134,8 @@ impl MultibotView {
                             .absolute()
                             .bottom_0()
                             .left_0()
-                            .right_0(),
+                            .right_0()
+                            .when_some(live_activity, |el, activity| el.child(activity)),
                         cx,
                     )
                     .test_support(),

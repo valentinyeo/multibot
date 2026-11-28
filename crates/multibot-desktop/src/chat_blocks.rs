@@ -427,6 +427,7 @@ impl MultibotView {
         local_path: Option<&str>,
         alt: &str,
         id: &str,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let resolved_local = local_path
             .map(PathBuf::from)
@@ -439,31 +440,34 @@ impl MultibotView {
                 .filter(|p| p.is_file())
             });
 
+        let viewer = ImageViewerState {
+            local_path: resolved_local.clone(),
+            url: url.map(str::to_string),
+            alt: alt.to_string(),
+        };
         let mut card = div()
             .id(SharedString::from(format!("chat-image-{id}")))
             .test_support()
-            .when_some(
-                url.filter(|u| crate::external_url::is_http_url(u))
-                    .map(str::to_string),
-                |el, url| {
-                    el.cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(move |_, _, cx| {
-                            cx.stop_propagation();
-                            let _ = crate::external_url::open_external_url(&url);
-                        })
-                },
-            )
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.chat_state.image_viewer = Some(viewer.clone());
+                cx.notify();
+            }))
             .max_w(px(320.0))
-            .max_h(px(480.0))
             .rounded(RADIUS_ROW)
             .bg(theme::bg_canvas())
-            .border_1()
-            .border_color(theme::border_subtle())
             .overflow_hidden();
 
         if let Some(path) = resolved_local {
-            card = card.child(img(path).max_w(px(320.0)).max_h(px(480.0)));
+            let (width, height) = read_image_dimensions(&path)
+                .map(|(w, h)| fit_image_size(w, h, 320.0, 480.0))
+                .unwrap_or((320.0, 180.0));
+            card = card
+                .w(px(width))
+                .h(px(height))
+                .child(img(path).w(px(width)).h(px(height)));
         } else {
             let caption = if !alt.trim().is_empty() {
                 alt.to_string()
@@ -894,5 +898,88 @@ impl MultibotView {
         }
 
         Some(wrapper.into_any_element())
+    }
+}
+
+impl MultibotView {
+    pub(crate) fn render_image_viewer(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let viewer = self.chat_state.image_viewer.as_ref()?;
+        let mut content = v_flex()
+            .id("image-viewer-content")
+            .test_support()
+            .items_center()
+            .justify_center();
+        if let Some(path) = viewer.local_path.as_ref() {
+            let bounds = window.viewport_size();
+            let max_w = f32::from(bounds.width) * 0.85;
+            let max_h = f32::from(bounds.height) * 0.85;
+            let (w, h) = read_image_dimensions(path)
+                .map(|(w, h)| fit_image_size(w, h, max_w, max_h))
+                .unwrap_or((max_w.min(320.0), max_h.min(180.0)));
+            content = content.child(img(path.clone()).w(px(w)).h(px(h)));
+        } else {
+            content = content
+                .text_color(theme::text_secondary())
+                .child(viewer.alt.clone());
+        }
+        let pills = h_flex()
+            .id("image-viewer-controls")
+            .absolute()
+            .top_4()
+            .right_4()
+            .gap_2()
+            .when_some(
+                viewer
+                    .url
+                    .as_ref()
+                    .filter(|url| crate::external_url::is_http_url(url))
+                    .cloned(),
+                |el, url| {
+                    el.child(
+                        Button::new("image-viewer-open-browser")
+                            .small()
+                            .label("Open in browser")
+                            .rounded(RADIUS_CHIP)
+                            .on_click(move |_, _, _| {
+                                let _ = crate::external_url::open_external_url(&url);
+                            }),
+                    )
+                },
+            )
+            .child(
+                Button::new("image-viewer-close")
+                    .small()
+                    .icon(lucide_icon(icons::X, 16.0))
+                    .rounded(RADIUS_CHIP)
+                    .accessibility_label("Close image viewer")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.chat_state.image_viewer = None;
+                        cx.notify();
+                    })),
+            );
+        Some(
+            div()
+                .id("image-viewer-modal")
+                .test_support()
+                .absolute()
+                .inset_0()
+                .size_full()
+                .bg(rgba(0x000000d9))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.chat_state.image_viewer = None;
+                    cx.notify();
+                }))
+                .child(content.on_click(|_, _, cx| cx.stop_propagation()))
+                .child(pills.on_click(|_, _, cx| cx.stop_propagation()))
+                .into_any_element(),
+        )
     }
 }

@@ -1288,3 +1288,112 @@ fn global_palette_restores_inactive_chats_without_reordering_passive_active_visi
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+fn palette_copy_and_reply_use_focused_message_or_latest(cx: &mut TestAppContext) {
+    use multibot_proto::{ChatMessage, MessageRole};
+    let (handle, view) = open_view(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.selection.selected_session = Some(SessionSummary {
+                id: "palette-messages".into(),
+                ..Default::default()
+            });
+            v.history.messages = ["First message", "Latest reply"]
+                .into_iter()
+                .enumerate()
+                .map(|(i, text)| ChatMessage {
+                    id: format!("message-{i}"),
+                    role: MessageRole::Assistant,
+                    text: text.into(),
+                    ..Default::default()
+                })
+                .collect();
+            v.chat_state.focused_message_idx = Some(0);
+            cx.notify();
+        });
+        window.render_frame(cx);
+        let (copy, reply) = view.read_with(cx, |v, _| {
+            let catalog = v.build_palette_command_catalog(now_unix_ms());
+            (
+                catalog
+                    .iter()
+                    .find(|item| item.label == "Copy message")
+                    .unwrap()
+                    .id
+                    .clone(),
+                catalog
+                    .iter()
+                    .find(|item| item.label == "Reply to message")
+                    .unwrap()
+                    .id
+                    .clone(),
+            )
+        });
+        for (id, expected) in [
+            (copy.as_str(), "First message"),
+            (reply.as_str(), "First message"),
+        ] {
+            view.update(cx, |v, cx| {
+                v.active_modal = ActiveModal::Palette;
+                v.execute_palette_row(
+                    PaletteRow::Command {
+                        id: id.into(),
+                        label: String::new(),
+                        chord: String::new(),
+                        category: PaletteCategory::ChatView,
+                        destructive: false,
+                        match_rank: 0,
+                        frecency: 0,
+                    },
+                    now_unix_ms(),
+                    Some(window),
+                    cx,
+                );
+            });
+            if id == copy {
+                assert_eq!(
+                    cx.read_from_clipboard().unwrap().text().as_deref(),
+                    Some(expected)
+                );
+            } else {
+                assert_eq!(
+                    view.read(cx)
+                        .chat_state
+                        .reply_quote
+                        .as_ref()
+                        .unwrap()
+                        .full_text,
+                    expected
+                );
+            }
+        }
+        view.update(cx, |v, cx| {
+            v.chat_state.focused_message_idx = None;
+            v.execute_palette_row(
+                PaletteRow::Command {
+                    id: reply,
+                    label: String::new(),
+                    chord: String::new(),
+                    category: PaletteCategory::ChatView,
+                    destructive: false,
+                    match_rank: 0,
+                    frecency: 0,
+                },
+                now_unix_ms(),
+                Some(window),
+                cx,
+            );
+        });
+        assert_eq!(
+            view.read(cx)
+                .chat_state
+                .reply_quote
+                .as_ref()
+                .unwrap()
+                .full_text,
+            "Latest reply"
+        );
+    })
+    .unwrap();
+}

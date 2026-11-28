@@ -308,7 +308,9 @@ impl MultibotView {
             this.toggle_dictation(window, cx);
         }))
         .on_action(cx.listener(|this, _: &CloseOverlay, window, cx| {
-            if this.sidebar_state.pending_shell_dissolve.take().is_some() {
+            if this.chat_state.image_viewer.take().is_some() {
+                this.focus_active_surface_default(window, cx);
+            } else if this.sidebar_state.pending_shell_dissolve.take().is_some() {
                 this.notice = None;
             } else if this.active_modal == ActiveModal::ChatInfo {
                 this.active_modal = ActiveModal::None;

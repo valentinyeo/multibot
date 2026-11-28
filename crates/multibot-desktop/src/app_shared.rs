@@ -270,7 +270,7 @@ impl MultibotView {
                 && cx.global::<SharedAppStore>().host_connections.is_empty()
             {
                 self.sync.last_synced_connection_gen = connection_gen;
-                self.clear_active_session_view();
+                self.clear_active_session_view(cx);
                 self.history.pending_switch_tokens.clear();
                 self.history.pending_older_page_before.clear();
                 self.selection.pending_spawn_open = false;

@@ -800,6 +800,7 @@ fn codex_exit_commands_dissolve_without_sending_a_prompt(cx: &mut TestAppContext
                 v.select_session(v.connection.sessions[0].clone(), cx);
                 while rx.try_recv().is_ok() {}
                 if command != "ctrl-shift-w" {
+                    v.apply_pending_draft(window, cx);
                     v.inputs.prompt_input.update(cx, |input, cx| input.set_value(command, window, cx));
                     v.send_current_prompt(window, cx);
                 }

@@ -16,7 +16,7 @@ const MAX_MRU: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriggerMode {
-    /// `/` command trigger (any agent; start-of-composer for Codex, start or post-whitespace for Claude/Antigravity).
+    /// `/` command trigger (any agent; start or post-whitespace).
     Slash,
     /// `$` skill trigger (Codex skills ONLY).
     Dollar,
@@ -355,9 +355,6 @@ pub fn detect_trigger(text: &str, caret_byte: usize, agent: AgentKind) -> Option
     let first = token.chars().next()?;
     match first {
         '/' => {
-            if agent == AgentKind::Codex && start != 0 {
-                return None;
-            }
             Some(SlashTrigger {
                 mode: TriggerMode::Slash,
                 start_byte: start,
@@ -890,10 +887,10 @@ mod tests {
             assert_eq!(t.query, "pl");
         }
 
-        // `/` mid-message works for Claude & Antigravity, rejected for Codex.
+        // `/` mid-message works for all agents.
         assert!(detect_trigger("please /plan", 12, AgentKind::Claude).is_some());
         assert!(detect_trigger("please /plan", 12, AgentKind::Antigravity).is_some());
-        assert!(detect_trigger("please /plan", 12, AgentKind::Codex).is_none());
+        assert!(detect_trigger("please /plan", 12, AgentKind::Codex).is_some());
 
         // `$` ONLY triggers for Codex skills (rejected for Claude & Antigravity).
         let codex_skill = detect_trigger("run $ver", 8, AgentKind::Codex).expect("codex $ skill");
@@ -1123,5 +1120,72 @@ mod tests {
             picker.scroll_top,
             picker.filtered.len().saturating_sub(VISIBLE_ROWS)
         );
+    }
+}
+
+#[cfg(test)]
+mod mid_sentence_tests {
+    use super::*;
+
+    #[test]
+    fn slash_triggers_after_all_composer_whitespace_but_not_in_urls_or_paths() {
+        for agent in [
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::Antigravity,
+            AgentKind::Pi,
+            AgentKind::Cursor,
+        ] {
+            for space in [' ', '\t', '\r', '\n'] {
+                let text = format!("please{space}/pot");
+                let trigger = detect_trigger(&text, text.len(), agent).unwrap();
+                assert_eq!(trigger.start_byte, 7);
+                assert_eq!(trigger.query, "pot");
+            }
+            for text in [
+                "https://example.com/foo",
+                "crates/multibotd/src",
+                "please https://example.com/foo",
+                "see crates/foo/bar",
+            ] {
+                assert!(
+                    detect_trigger(text, text.len(), agent).is_none(),
+                    "{agent:?}: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn codex_mid_sentence_slash_discovers_plugin_skills_and_replaces_only_trigger() {
+        let mut picker = SlashPickerState::default();
+        picker.set_daemon_commands(
+            AgentKind::Codex,
+            ["pstack", "poteto-mode"]
+                .into_iter()
+                .map(|name| SlashCommandItem {
+                    name: name.into(),
+                    description: "Plugin skill".into(),
+                    trigger: "$".into(),
+                    source: "plugin".into(),
+                    opens_in_terminal: false,
+                })
+                .collect(),
+        );
+        for name in ["pstack", "poteto-mode"] {
+            let text = format!("é please /{name} then continue");
+            let caret = text.find(" then").unwrap();
+            picker.sync_from_composer(&text, caret, AgentKind::Codex);
+            assert!(picker.filtered.iter().any(|item| item.name == name));
+            match picker.handle_key("tab") {
+                SlashKeyOutcome::Accepted(item, Some(trigger)) => {
+                    let (out, _) = insert_slash_command(&text, &trigger, &item);
+                    assert_eq!(out, format!("é please ${name} then continue"));
+                }
+                other => panic!("Expected plugin skill, got {other:?}"),
+            }
+        }
+        picker.sync_from_composer("please /plan", 12, AgentKind::Codex);
+        assert!(picker.filtered.iter().any(|item| item.name == "plan"));
     }
 }

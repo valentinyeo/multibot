@@ -151,13 +151,15 @@ impl MultibotView {
                     session_id: Some(previous.id.clone()),
                 });
             }
-            let attachments = std::mem::take(&mut self.chat_state.pending_attachments);
-            let reply_quote = self.chat_state.reply_quote.take();
             self.open_session_on_host(host.into(), session.clone(), false, cx);
-            self.chat_state.pending_attachments = attachments;
-            self.chat_state.reply_quote = reply_quote;
+            if let Some(draft) = self.chat_state.session_drafts.remove(&old) {
+                self.chat_state.pending_draft_text = Some(draft.text);
+                self.chat_state.reply_quote = draft.reply_quote;
+                self.chat_state.quoted_snippets = draft.quoted_snippets;
+                self.chat_state.pending_attachments = draft.pending_attachments;
+            }
             self.chat_state.composer_options.insert(
-                new,
+                new.clone(),
                 SessionOptions {
                     model: session.model.clone(),
                     ..Default::default()
@@ -167,6 +169,9 @@ impl MultibotView {
                 "Switched to {}. Conversation preserved.",
                 session.agent.label()
             ));
+        }
+        if let Some(draft) = self.chat_state.session_drafts.remove(&old) {
+            self.chat_state.session_drafts.insert(new, draft);
         }
         self.persist_workspace_store_if_enabled();
         cx.notify();

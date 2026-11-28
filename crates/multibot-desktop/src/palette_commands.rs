@@ -1,4 +1,5 @@
 use super::*;
+use crate::chat_view::MessageMenuAction;
 
 impl MultibotView {
     pub(super) fn start_agent_session(
@@ -778,6 +779,17 @@ impl MultibotView {
                             self.footprint_label,
                             self.connection.connection_status
                         ));
+                    }
+                    "pal-cmd-reply-message" | "pal-cmd-copy-message" => {
+                        if let Some(window) = window {
+                            let action = if id == "pal-cmd-reply-message" {
+                                MessageMenuAction::Reply
+                            } else {
+                                MessageMenuAction::Copy
+                            };
+                            self.execute_focused_message_action(action, window, cx);
+                        }
+                        return;
                     }
                     "pal-cmd-copy-code" => {
                         self.copy_latest_code_block(cx);

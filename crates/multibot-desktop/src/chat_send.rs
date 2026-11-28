@@ -198,6 +198,7 @@ impl MultibotView {
     }
 
     pub(crate) fn send_current_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_pending_draft(window, cx);
         self.sync_chat_interaction_session(cx);
         if self
             .chat_state
@@ -274,6 +275,8 @@ impl MultibotView {
             return;
         }
 
+        self.chat_state.session_drafts.remove(&key);
+        self.chat_state.turn_notices.remove(&key);
         let quote = self.chat_state.reply_quote.take();
         let snippets = std::mem::take(&mut self.chat_state.quoted_snippets);
         self.chat_state.selection_quote_popover = None;

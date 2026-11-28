@@ -14,6 +14,21 @@ pub(crate) struct ReplyQuote {
     pub full_text: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ImageViewerState {
+    pub local_path: Option<PathBuf>,
+    pub url: Option<String>,
+    pub alt: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SessionDraft {
+    pub text: String,
+    pub reply_quote: Option<ReplyQuote>,
+    pub quoted_snippets: Vec<QuotedSnippet>,
+    pub pending_attachments: Vec<StagedAttachment>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct QuotedSnippet {
     pub id: u64,
@@ -154,6 +169,9 @@ pub(crate) struct ChatViewState {
     pub awaiting_reply_sessions: HashMap<String, AwaitingReply>,
     pub turn_notices: HashMap<String, String>,
     pub image_fetch_state: HashMap<String, ImageFetchState>,
+    pub image_viewer: Option<ImageViewerState>,
+    pub session_drafts: HashMap<String, SessionDraft>,
+    pub pending_draft_text: Option<String>,
     pub failed_sends: HashMap<String, FailedSend>,
     pub expanded_tools: HashSet<String>,
     pub show_all_tools: HashSet<String>,
@@ -216,6 +234,9 @@ impl Default for ChatViewState {
             awaiting_reply_sessions: HashMap::new(),
             turn_notices: HashMap::new(),
             image_fetch_state: HashMap::new(),
+            image_viewer: None,
+            session_drafts: HashMap::new(),
+            pending_draft_text: None,
             failed_sends: HashMap::new(),
             expanded_tools: HashSet::new(),
             show_all_tools: HashSet::new(),
@@ -295,7 +316,6 @@ impl ChatViewState {
             return;
         }
         self.interaction_session_key = Some(session_key);
-        self.quoted_snippets.clear();
         self.selection_quote_popover = None;
         self.drag_selecting = false;
         self.close_message_menu();

@@ -98,19 +98,31 @@ fn open_browser(url: &str) -> anyhow::Result<()> {
             show: i32,
         ) -> *mut c_void;
     }
-    let operation: Vec<u16> = "open\0".encode_utf16().collect();
-    let url: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            operation.as_ptr(),
-            url.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1,
-        )
-    };
-    anyhow::ensure!(result as usize > 32, "Could not open your browser.");
+    anyhow::ensure!(is_http_url(url), "Only HTTP and HTTPS links can be opened.");
+    let url = url.to_string();
+    // ShellExecuteW pumps COM/Win32 messages; never re-enter GPUI from a click handler.
+    std::thread::Builder::new()
+        .name("open-url".into())
+        .spawn(move || {
+            let operation: Vec<u16> = "open\0".encode_utf16().collect();
+            let url: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
+            let result = unsafe {
+                ShellExecuteW(
+                    std::ptr::null_mut(),
+                    operation.as_ptr(),
+                    url.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    1,
+                )
+            };
+            if result as usize <= 32 {
+                eprintln!(
+                    "Could not open your browser (ShellExecuteW {}).",
+                    result as usize
+                );
+            }
+        })?;
     Ok(())
 }
 

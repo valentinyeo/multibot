@@ -6252,3 +6252,335 @@ fn shared_message_actions_fall_back_to_latest_visible_message(cx: &mut TestAppCo
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+fn session_drafts_preserve_text_quotes_attachments_and_clear_only_the_sent_chat(
+    cx: &mut TestAppContext,
+) {
+    let (handle, view) = open_test_chat_window(cx);
+    let a = SessionSummary {
+        id: "draft-a".into(),
+        ..Default::default()
+    };
+    let b = SessionSummary {
+        id: "draft-b".into(),
+        ..Default::default()
+    };
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| v.select_session(a.clone(), cx));
+        window.render_frame(cx);
+        window.input("  Draft A é\nsecond line  ", cx);
+        view.update(cx, |v, cx| {
+            v.set_reply_quote("source".into(), "Quoted reply".into(), cx);
+            v.quote_snippet("Full selected passage".into(), window, cx);
+            v.chat_state.pending_attachments.push(StagedAttachment {
+                path: PathBuf::from("/tmp/draft-attachment.txt"),
+                is_image: false, size_bytes: 3, inserted_token: "draft-attachment.txt".into(),
+            });
+        });
+        let a_text = view.read(cx).inputs.prompt_input.read(cx).value().to_string();
+        view.update(cx, |v, cx| v.select_session(b.clone(), cx));
+        window.render_frame(cx);
+        assert!(view.read(cx).inputs.prompt_input.read(cx).value().is_empty());
+        assert!(view.read(cx).chat_state.reply_quote.is_none());
+        assert!(view.read(cx).chat_state.quoted_snippets.is_empty());
+        assert!(view.read(cx).chat_state.pending_attachments.is_empty());
+        window.input("Draft B stays here", cx);
+        view.update(cx, |v, cx| v.select_session(a.clone(), cx));
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value().as_ref(), a_text);
+        assert_eq!(view.read(cx).chat_state.quoted_snippets[0].full_text, "Full selected passage");
+        assert_eq!(view.read(cx).chat_state.pending_attachments.len(), 1);
+        assert_eq!(view.read(cx).chat_state.reply_quote.as_ref().unwrap().full_text, "Quoted reply");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        view.update(cx, |v, cx| {
+            v.connection.daemon_tx = Some(tx);
+            v.send_current_prompt(window, cx);
+            assert!(!v.chat_state.session_drafts.contains_key(&v.session_key_for(&a)));
+            assert!(v.inputs.prompt_input.read(cx).value().is_empty());
+        });
+        assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|request| {
+            matches!(request, ClientRequest::SendPrompt { session_id, text, .. }
+                if session_id == "draft-a" && text.contains("Full selected passage") && text.contains("Quoted reply"))
+        }));
+        view.update(cx, |v, cx| v.select_session(b.clone(), cx));
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value().as_ref(), "Draft B stays here");
+        view.update(cx, |v, cx| v.select_session(a.clone(), cx));
+        window.render_frame(cx);
+        assert!(view.read(cx).inputs.prompt_input.read(cx).value().is_empty());
+    }).unwrap();
+}
+
+#[gpui_kit::test]
+fn session_drafts_survive_rapid_switches_clear_and_same_ids_on_other_hosts(
+    cx: &mut TestAppContext,
+) {
+    let (handle, view) = open_test_chat_window(cx);
+    let session = SessionSummary {
+        id: "same-id".into(),
+        ..Default::default()
+    };
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.select_session_on_host("host-a".into(), session.clone(), cx)
+        });
+        window.render_frame(cx);
+        window.input("Host A draft", cx);
+        view.update(cx, |v, cx| {
+            v.select_session_on_host("host-b".into(), session.clone(), cx);
+            v.select_session_on_host("host-a".into(), session.clone(), cx);
+        });
+        window.render_frame(cx);
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            "Host A draft"
+        );
+        view.update(cx, |v, cx| {
+            v.clear_active_session_view(cx);
+            v.select_session_on_host("host-b".into(), session.clone(), cx);
+        });
+        window.render_frame(cx);
+        assert!(
+            view.read(cx)
+                .inputs
+                .prompt_input
+                .read(cx)
+                .value()
+                .is_empty()
+        );
+        window.input("Host B draft", cx);
+        view.update(cx, |v, cx| {
+            v.select_session_on_host("host-b".into(), session.clone(), cx);
+        });
+        window.render_frame(cx);
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            "Host B draft"
+        );
+        view.update(cx, |v, cx| {
+            v.select_session_on_host("host-a".into(), session.clone(), cx)
+        });
+        window.render_frame(cx);
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            "Host A draft"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn live_activity_stays_above_composer_when_history_scrolls_and_expands_upward(
+    cx: &mut TestAppContext,
+) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let session = SessionSummary {
+                id: "pinned-activity".into(),
+                working: true,
+                ..Default::default()
+            };
+            let key = v.session_key_for(&session);
+            v.chat_state
+                .turn_notices
+                .insert(key, "No reply received".into());
+            v.selection.selected_session = Some(session);
+            v.history.messages = chat_scroll_messages();
+            v.history.messages.push(ChatMessage {
+                id: "tool".into(),
+                role: MessageRole::Assistant,
+                blocks: vec![activity_tool(
+                    "Bash",
+                    "Run tests",
+                    "cargo test",
+                    ToolStatus::Running,
+                )],
+                ..Default::default()
+            });
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert!(window.try_find("chat-turn-notice").is_none());
+        let row = window.find("chat-live-activity").bounds();
+        let input = window.find("prompt-input").bounds();
+        assert!(row.bottom() <= input.top());
+        assert!(row.top() >= window.find("chat-composer-overlay").bounds().top());
+        view.update(cx, |v, cx| {
+            v.chat_state
+                .scroll_handle
+                .set_offset(gpui_kit::point(px(0.0), px(0.0)));
+            v.chat_state.scroll.sync_position(1000.0);
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert_eq!(window.find("chat-live-activity").bounds(), row);
+        window.click("chat-live-activity", cx);
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("prompt-input").bounds(), input);
+        assert_eq!(window.find("chat-live-activity").bounds(), row);
+        assert!(window.find("chat-live-activity-steps").bounds().bottom() <= row.top());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn turn_notices_ignore_mid_turn_idle_snapshots_and_clear_on_work_or_reply(cx: &mut TestAppContext) {
+    use multibot_proto::ServerEvent;
+    let (_, view) = open_test_chat_window(cx);
+    view.update(cx, |v, _| {
+        let session = SessionSummary {
+            id: "notice".into(),
+            ..Default::default()
+        };
+        let host = v.active_session_host().to_string();
+        let key = v.session_key_for(&session);
+        v.selection.selected_session = Some(session.clone());
+        v.begin_awaiting_reply(&key, &host, &session, "send", "hello", &[]);
+        v.observe_turn_history(&key, &[], Some(true));
+        let tool = ChatMessage {
+            role: MessageRole::Assistant,
+            blocks: vec![activity_tool(
+                "Bash",
+                "Run tests",
+                "",
+                ToolStatus::Completed,
+            )],
+            ..Default::default()
+        };
+        v.observe_turn_history(&key, &[tool], Some(false));
+        assert!(v.chat_state.awaiting_reply_sessions.contains_key(&key));
+        assert!(!v.chat_state.turn_notices.contains_key(&key));
+        v.finish_turn_without_reply(&key, "No reply received");
+        v.observe_turn_event(
+            &host,
+            &ServerEvent::SessionUpdated {
+                session: SessionSummary {
+                    working: true,
+                    ..session.clone()
+                },
+            },
+        );
+        assert!(!v.chat_state.turn_notices.contains_key(&key));
+        v.chat_state
+            .turn_notices
+            .insert(key.clone(), "No reply received".into());
+        v.observe_turn_event(
+            &host,
+            &ServerEvent::Sessions {
+                sessions: vec![SessionSummary {
+                    working: true,
+                    ..session.clone()
+                }],
+            },
+        );
+        assert!(!v.chat_state.turn_notices.contains_key(&key));
+        v.chat_state
+            .turn_notices
+            .insert(key.clone(), "No reply received".into());
+        v.observe_turn_event(
+            &host,
+            &ServerEvent::HistoryAppend {
+                session_id: session.id.clone(),
+                messages: vec![ChatMessage {
+                    role: MessageRole::Assistant,
+                    text: "Answer".into(),
+                    ..Default::default()
+                }],
+                working: Some(false),
+                latest_offset: None,
+                todos: vec![],
+                probe_sha256: None,
+            },
+        );
+        assert!(!v.chat_state.turn_notices.contains_key(&key));
+        v.chat_state
+            .turn_notices
+            .insert(key.clone(), "No reply received".into());
+        v.begin_awaiting_reply(&key, &host, &session, "send2", "hello", &[]);
+        assert!(!v.chat_state.turn_notices.contains_key(&key));
+    });
+}
+
+#[test]
+fn command_activity_strips_repeated_verbs_case_insensitively() {
+    for summary in [
+        "Run tests",
+        "Ran tests",
+        "Running tests",
+        "Ran Run tests",
+        "RUNNING run tests",
+        "rAn rUnNiNg RUN tests",
+    ] {
+        assert_eq!(
+            tool_activity_label("Bash", summary, ""),
+            "Running tests",
+            "{summary}"
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn image_viewer_fits_inline_images_and_closes_on_backdrop_or_session_switch(
+    cx: &mut TestAppContext,
+) {
+    let (handle, view) = open_test_chat_window(cx);
+    let path = std::env::temp_dir().join(format!("multibot-wide-image-{}.png", now_unix_ms()));
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    png.extend(1920u32.to_be_bytes());
+    png.extend(1080u32.to_be_bytes());
+    std::fs::write(&path, png).unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.selection.selected_session = Some(SessionSummary {
+                id: "viewer".into(),
+                ..Default::default()
+            });
+            v.history.messages = vec![ChatMessage {
+                id: "image".into(),
+                role: MessageRole::Assistant,
+                blocks: vec![MessageBlock::Image {
+                    url: Some("file:///not-allowed".into()),
+                    local_path: Some(path.to_string_lossy().into()),
+                    alt: "Screenshot".into(),
+                }],
+                ..Default::default()
+            }];
+            cx.notify();
+        });
+        window.render_frame(cx);
+        let card = window.find("chat-image-0-block-0").bounds();
+        assert_eq!(
+            (f32::from(card.size.width), f32::from(card.size.height)),
+            (320.0, 180.0)
+        );
+        window.click("chat-image-0-block-0", cx);
+        window.render_frame(cx);
+        assert!(window.find("image-viewer-modal").visible());
+        assert!(window.try_find("image-viewer-open-browser").is_none());
+        let image = window.find("image-viewer-content").bounds();
+        assert!(
+            (f32::from(image.size.width) / f32::from(image.size.height) - 16.0 / 9.0).abs() < 0.01
+        );
+        window.click_at("image-viewer-modal", gpui_kit::point(px(8.0), px(8.0)), cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).chat_state.image_viewer.is_none());
+        window.click("chat-image-0-block-0", cx);
+        window.render_frame(cx);
+        view.update(cx, |v, cx| {
+            v.select_session(
+                SessionSummary {
+                    id: "other".into(),
+                    ..Default::default()
+                },
+                cx,
+            )
+        });
+        assert!(view.read(cx).chat_state.image_viewer.is_none());
+    })
+    .unwrap();
+    std::fs::remove_file(path).unwrap();
+}

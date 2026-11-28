@@ -895,6 +895,22 @@ exec "$MULTIBOT_TEST_TMUX" "$@"
             fs::read_to_string(home.join("attach-attempts"))
         )
     });
+    // The wrapper marker precedes exec; wait until the control client has actually
+    // attached before creating a newer shell it could otherwise attach to instead.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let ServerEvent::Sessions { sessions } =
+                decode_line::<ServerEvent>(&output.next_line().await.unwrap().unwrap()).unwrap()
+                && sessions.iter().any(|shell| {
+                    shell.id == session.id && shell.shell_attached == Some(true)
+                })
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
     // Create a second shell without asking Multibot to refresh.
     assert!(
         Command::new("tmux")
@@ -983,6 +999,19 @@ exec "$MULTIBOT_TEST_TMUX" "$@"
             .unwrap()
             .success()
     );
+    // Archiving already hid this shell from live inventory, so killing it need
+    // not emit another change event. Request the current inventory explicitly.
+    input
+        .write_all(
+            encode_line(&ClientRequest::ListSessions {
+                limit: Some(20),
+                include_archived: Some(false),
+            })
+            .unwrap()
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let ServerEvent::Sessions { sessions } =

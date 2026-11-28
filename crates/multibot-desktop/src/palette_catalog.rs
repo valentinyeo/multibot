@@ -596,6 +596,26 @@ impl MultibotView {
             },
             // Chat View
             PaletteCommandSpec {
+                id: "pal-cmd-reply-message".into(),
+                label: "Reply to message".into(),
+                chord: String::new(),
+                category: PaletteCategory::ChatView,
+                destructive: false,
+                aliases: vec![],
+                tab_context: false,
+                global: true,
+            },
+            PaletteCommandSpec {
+                id: "pal-cmd-copy-message".into(),
+                label: "Copy message".into(),
+                chord: String::new(),
+                category: PaletteCategory::ChatView,
+                destructive: false,
+                aliases: vec![],
+                tab_context: false,
+                global: true,
+            },
+            PaletteCommandSpec {
                 id: "pal-cmd-copy-code".into(),
                 label: "Copy Latest Code Block".into(),
                 chord: "Ctrl+Shift+D".into(),

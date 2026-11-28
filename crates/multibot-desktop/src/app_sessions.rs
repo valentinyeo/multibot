@@ -1,7 +1,64 @@
 use super::*;
+use crate::chat_view::SessionDraft;
+use gpui_kit::base::TextSelection;
 
 impl MultibotView {
-    pub(crate) fn clear_active_session_view(&mut self) {
+    fn switch_session_draft(&mut self, incoming: Option<String>, cx: &mut Context<Self>) {
+        let outgoing = self
+            .selection
+            .selected_session
+            .as_ref()
+            .map(|s| self.session_key_for(s));
+        if outgoing == incoming && incoming.is_some() {
+            return;
+        }
+        if let Some(key) = outgoing {
+            // A second switch may arrive before render has applied the first restore.
+            let draft = SessionDraft {
+                text: self
+                    .chat_state
+                    .pending_draft_text
+                    .take()
+                    .unwrap_or_else(|| self.inputs.prompt_input.read(cx).value().to_string()),
+                reply_quote: self.chat_state.reply_quote.take(),
+                quoted_snippets: std::mem::take(&mut self.chat_state.quoted_snippets),
+                pending_attachments: std::mem::take(&mut self.chat_state.pending_attachments),
+            };
+            if draft == SessionDraft::default() {
+                self.chat_state.session_drafts.remove(&key);
+            } else {
+                self.chat_state.session_drafts.insert(key, draft);
+            }
+        }
+        if let Some(handle) = self.chat_state.interaction_window {
+            TextSelection::clear_for_window(handle.window_id(), cx);
+        }
+        self.chat_state.interaction_session_key = None;
+        let draft = incoming
+            .as_ref()
+            .and_then(|key| self.chat_state.session_drafts.get(key))
+            .cloned()
+            .unwrap_or_default();
+        self.chat_state.pending_draft_text = Some(draft.text);
+        self.chat_state.reply_quote = draft.reply_quote;
+        self.chat_state.quoted_snippets = draft.quoted_snippets;
+        self.chat_state.pending_attachments = draft.pending_attachments;
+        self.chat_state.image_viewer = None;
+        self.chat_state.selection_quote_popover = None;
+        self.chat_state.drag_selecting = false;
+        self.chat_state.close_message_menu();
+    }
+
+    pub(crate) fn apply_pending_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.chat_state.pending_draft_text.take() {
+            self.inputs
+                .prompt_input
+                .update(cx, |input, cx| input.set_value(text, window, cx));
+        }
+    }
+
+    pub(crate) fn clear_active_session_view(&mut self, cx: &mut Context<Self>) {
+        self.switch_session_draft(None, cx);
         self.chat_state.busy_timer = None;
         self.chat_state.busy_timer_key = None;
         self.chat_state.pending_harness_switch = None;
@@ -14,8 +71,6 @@ impl MultibotView {
         self.chat_state.close_find();
         self.slash_picker_state.close();
         self.mention_picker_state.close();
-        self.chat_state.reply_quote = None;
-        self.chat_state.pending_attachments.clear();
         self.chat_state.focused_message_idx = None;
         self.chat_state.message_action_menu_open = false;
         self.chat_state.message_action_index = 0;
@@ -36,6 +91,10 @@ impl MultibotView {
         session: SessionSummary,
         cx: &mut Context<Self>,
     ) {
+        self.switch_session_draft(
+            Some(canonical_session_key(&host, session.agent, &session.id)),
+            cx,
+        );
         self.sidebar_state.pending_shell_dissolve = None;
         if self.selection.selected_session_host.as_deref() != Some(host.as_str())
             || self
@@ -73,8 +132,6 @@ impl MultibotView {
         self.chat_state.close_find();
         self.slash_picker_state.close();
         self.mention_picker_state.close();
-        self.chat_state.reply_quote = None;
-        self.chat_state.pending_attachments.clear();
         self.chat_state.focused_message_idx = None;
         self.chat_state.message_action_menu_open = false;
         self.chat_state.message_action_index = 0;

@@ -10,7 +10,6 @@ pub(crate) struct AwaitingReply {
     pub prompt_text: String,
     pub baseline_user_ids: HashSet<String>,
     pub baseline_replies: HashSet<(String, u64)>,
-    pub saw_working: bool,
 }
 
 fn assistant_replies(messages: &[ChatMessage]) -> impl Iterator<Item = (String, u64)> + '_ {
@@ -116,7 +115,20 @@ pub(crate) fn tool_activity_label(name: &str, summary: &str, detail: &str) -> St
         "edit_file" | "edit" | "write_file" | "write" | "multiedit" => file_label("Editing"),
         "run_command" | "bash" | "exec_command" => readable_summary(summary)
             .map(|s| {
-                if let Some(action) = s.strip_prefix("Run ") {
+                let mut action = s.as_str();
+                loop {
+                    let stripped = ["Run ", "Ran ", "Running "].into_iter().find_map(|prefix| {
+                        action
+                            .get(..prefix.len())
+                            .filter(|part| part.eq_ignore_ascii_case(prefix))
+                            .map(|_| action[prefix.len()..].trim_start())
+                    });
+                    match stripped {
+                        Some(rest) => action = rest,
+                        None => break,
+                    }
+                }
+                if action.len() != s.len() {
                     format!("Running {action}")
                 } else {
                     s
@@ -227,7 +239,6 @@ impl MultibotView {
                     .map(|m| m.id.clone())
                     .collect(),
                 baseline_replies: assistant_replies(messages).collect(),
-                saw_working: false,
             },
         );
     }
@@ -254,7 +265,10 @@ impl MultibotView {
         messages: &[ChatMessage],
         working: Option<bool>,
     ) {
-        let Some(turn) = self.chat_state.awaiting_reply_sessions.get_mut(key) else {
+        if working == Some(true) || assistant_replies(messages).next().is_some() {
+            self.chat_state.turn_notices.remove(key);
+        }
+        let Some(turn) = self.chat_state.awaiting_reply_sessions.get(key) else {
             return;
         };
         if assistant_replies(messages).any(|reply| !turn.baseline_replies.contains(&reply)) {
@@ -264,11 +278,9 @@ impl MultibotView {
                     sent.awaiting_reply = false;
                 }
             }
-        } else if working == Some(false) && (turn.saw_working || messages.is_empty()) {
+        } else if working == Some(false) && messages.is_empty() {
             // Empty idle appends signal process exit, even if no start event reached this view.
             self.finish_turn_without_reply(key, "No reply received");
-        } else if working == Some(true) {
-            turn.saw_working = true;
         }
     }
 
@@ -293,15 +305,11 @@ impl MultibotView {
 
     pub(crate) fn observe_turn_event(&mut self, host: &str, event: &ServerEvent) {
         if let ServerEvent::Sessions { sessions } = event {
-            for turn in self.chat_state.awaiting_reply_sessions.values_mut() {
-                if turn.host == host
-                    && sessions
-                        .iter()
-                        .any(|s| s.id == turn.session_id && s.working)
-                {
-                    turn.saw_working = true;
-                }
-            }
+            self.chat_state.turn_notices.retain(|key, _| {
+                !sessions
+                    .iter()
+                    .any(|session| session.working && turn_session_matches(key, host, &session.id))
+            });
             return;
         }
         if let ServerEvent::PromptStatus {
@@ -341,6 +349,11 @@ impl MultibotView {
                 messages,
                 ..
             } => {
+                if assistant_replies(messages).next().is_some() {
+                    self.chat_state
+                        .turn_notices
+                        .retain(|key, _| !turn_session_matches(key, host, session_id));
+                }
                 let keys: Vec<_> = self
                     .chat_state
                     .awaiting_reply_sessions
@@ -364,9 +377,9 @@ impl MultibotView {
             }
             _ => return,
         };
-        if assistant_replies(messages).next().is_some() {
+        if working == Some(true) || assistant_replies(messages).next().is_some() {
             self.chat_state.turn_notices.retain(|key, _| {
-                !matches!(multibot_core::workspaces::parse_session_key(key), Some((h, _, id)) if h == host && id == session_id)
+                !turn_session_matches(key, host, session_id)
             });
         }
         let keys: Vec<_> = self
@@ -380,4 +393,8 @@ impl MultibotView {
             self.observe_turn_history(&key, messages, working);
         }
     }
+}
+
+fn turn_session_matches(key: &str, host: &str, session_id: &str) -> bool {
+    matches!(multibot_core::workspaces::parse_session_key(key), Some((h, _, id)) if h == host && id == session_id)
 }

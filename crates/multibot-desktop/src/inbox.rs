@@ -455,7 +455,7 @@ impl MultibotView {
                 {
                     self.select_session_on_host(host, session, cx);
                 } else {
-                    self.clear_active_session_view();
+                    self.clear_active_session_view(cx);
                 }
             }
             self.cleanup_unmounted_surface_state();
@@ -641,7 +641,7 @@ impl MultibotView {
             if let Some((host, next)) = next.and_then(|key| self.host_for_session_key(&key)) {
                 self.select_session_on_host(host, next, cx);
             } else {
-                self.clear_active_session_view();
+                self.clear_active_session_view(cx);
             }
         }
         self.cleanup_unmounted_surface_state();
