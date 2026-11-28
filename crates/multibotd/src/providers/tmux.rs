@@ -39,6 +39,7 @@ pub fn parse_tmux_sessions_output(stdout: &str) -> Vec<SessionSummary> {
                 agent: AgentKind::Shell,
                 title: title.into(),
                 cwd: (!cwd.is_empty()).then(|| cwd.into()),
+                cwd_exists: (!cwd.is_empty()).then(|| Path::new(cwd).is_dir()),
                 source_path: format!("tmux:{name}"),
                 shell_attached: Some(fields[4].parse::<u32>().ok()? > 0),
                 updated_at_ms: activity,
@@ -127,6 +128,22 @@ impl AgentProvider for TmuxProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shell_inventory_reports_missing_existing_and_unknown_directories() {
+        let home = std::env::temp_dir().join(format!("multibot-tmux-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let raw = format!(
+            "exists\t1\tbash\t{}\t0\tbash\nmissing\t1\tbash\t{}\t0\tbash\nunknown\t1\tbash\t\t0\tbash\n",
+            home.display(),
+            home.join("deleted").display()
+        );
+        let shells = parse_tmux_sessions_output(&raw);
+        assert_eq!(shells[0].cwd_exists, Some(true));
+        assert_eq!(shells[1].cwd_exists, Some(false));
+        assert_eq!(shells[2].cwd_exists, None);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn shell_inventory_keeps_attachment_and_command_details() {
         let shells = parse_tmux_sessions_output(

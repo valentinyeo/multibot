@@ -247,9 +247,9 @@ fn hibernate_modes_reply_timer_and_dissolved_precedence_survive_serde() {
     session.last_assistant_id = Some("a1".into());
     let key = canonical_session_key("h", session.agent, &session.id);
     let now = now_unix_ms();
-    assert!(SessionMeta::default().hibernate_wake_on_reply);
+    assert!(!SessionMeta::default().hibernate_wake_on_reply);
     assert!(
-        serde_json::from_str::<SessionMeta>("{}")
+        !serde_json::from_str::<SessionMeta>("{}")
             .unwrap()
             .hibernate_wake_on_reply
     );
@@ -385,6 +385,38 @@ fn workspace_directories_are_distinct_and_scoped_to_workspace_and_host() {
         store.workspace_directories(ALL_WORKSPACES_ID, "local", &inputs),
         ["/other-workspace", "/repo/a", "/repo/b"]
     );
+}
+
+#[test]
+fn workspace_directories_exclude_only_confirmed_missing_directories() {
+    let mut store = WorkspaceStore::new();
+    let sessions: Vec<_> = [
+        ("/deleted", Some(false)),
+        ("/exists", Some(true)),
+        ("/unknown", None),
+    ]
+    .into_iter()
+    .map(|(cwd, cwd_exists)| SessionSummary {
+        id: cwd.into(),
+        cwd: Some(cwd.into()),
+        cwd_exists,
+        ..Default::default()
+    })
+    .collect();
+    let inputs: Vec<_> = sessions.iter().map(|s| make_input("remote", s)).collect();
+    for input in &inputs {
+        store.favorites.insert(input.key.clone());
+    }
+    for workspace in [
+        ALL_WORKSPACES_ID,
+        STARRED_WORKSPACE_ID,
+        &store.default_workspace_id(),
+    ] {
+        assert_eq!(
+            store.workspace_directories(workspace, "remote", &inputs),
+            ["/exists", "/unknown"]
+        );
+    }
 }
 
 #[test]

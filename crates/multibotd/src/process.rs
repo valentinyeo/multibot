@@ -89,13 +89,37 @@ async fn switch_shell_client_at(
                     String::from_utf8_lossy(&output.stderr).trim()
                 ));
             }
-            Ok(())
+            Ok(tty.to_owned())
         };
         let result = tokio::time::timeout_at(deadline, result)
             .await
             .unwrap_or_else(|_| Err(anyhow!("Timed out switching shell client")));
         match result {
-            Ok(()) => return Ok(()),
+            Ok(tty) => {
+                let target = format!("={session_id}");
+                for args in [
+                    &["set-window-option", "-t", &target, "window-size", "latest"][..],
+                    &["refresh-client", "-t", &tty][..],
+                ] {
+                    let mut command = Command::new("tmux");
+                    if let Some(socket) = socket {
+                        command.args(["-S", socket]);
+                    }
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(1),
+                        command
+                            .env_remove("TMUX")
+                            .args(args)
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .kill_on_drop(true)
+                            .status(),
+                    )
+                    .await;
+                }
+                return Ok(());
+            }
             Err(error) => {
                 let waiting_for_attach = error.downcast_ref::<std::io::Error>().is_some_and(|e| {
                     matches!(
@@ -633,6 +657,14 @@ impl ProcessManager {
                     text,
                     is_new_session,
                 )?;
+                if agent == AgentKind::Cursor
+                    && matches!(
+                        options.and_then(|o| o.permission),
+                        None | Some(PermissionLevel::FullAccess)
+                    )
+                {
+                    args.insert(0, "--force".into());
+                }
                 if agent == AgentKind::Pi {
                     if let Some(model) = options.and_then(|o| o.model.as_ref()) {
                         args.splice(0..0, ["--model".into(), model.clone()]);
@@ -730,9 +762,14 @@ impl ProcessManager {
                     "stream-json".to_string(),
                     "--output-format".to_string(),
                     "stream-json".to_string(),
-                    "--dangerously-skip-permissions".to_string(),
-                    "--print=".to_string(),
                 ];
+                if matches!(
+                    options.and_then(|o| o.permission),
+                    None | Some(PermissionLevel::FullAccess)
+                ) {
+                    args.push("--dangerously-skip-permissions".to_string());
+                }
+                args.push("--print=".to_string());
                 if let Some(conv_id) = conversation.as_deref() {
                     args.push("--conversation".to_string());
                     args.push(conv_id.to_string());
@@ -1931,15 +1968,16 @@ fn build_claude_args(
         if let Some(effort) = options.effort {
             args.extend(["--effort".into(), effort_value(effort, false).into()]);
         }
-        if let Some(permission) = options.permission {
-            let mode = match permission {
-                PermissionLevel::Ask => "default",
-                PermissionLevel::Auto => "acceptEdits",
-                PermissionLevel::FullAccess => "bypassPermissions",
-            };
-            args.extend(["--permission-mode".into(), mode.into()]);
-        }
     }
+    let mode = match options
+        .and_then(|o| o.permission)
+        .unwrap_or(PermissionLevel::FullAccess)
+    {
+        PermissionLevel::Ask => "default",
+        PermissionLevel::Auto => "acceptEdits",
+        PermissionLevel::FullAccess => "bypassPermissions",
+    };
+    args.extend(["--permission-mode".into(), mode.into()]);
     args.extend(["--".into(), text.into()]);
     Ok(args)
 }
@@ -1967,21 +2005,22 @@ fn build_codex_args(
                 format!("model_reasoning_effort=\"{}\"", effort_value(effort, true)),
             ]);
         }
-        if let Some(permission) = options.permission {
-            // Config works for both exec and exec resume; resume has no --sandbox flag.
-            let (sandbox, approval) = match permission {
-                PermissionLevel::Ask => ("read-only", "on-request"),
-                PermissionLevel::Auto => ("workspace-write", "on-request"),
-                PermissionLevel::FullAccess => ("danger-full-access", "never"),
-            };
-            args.extend([
-                "-c".into(),
-                format!("sandbox_mode=\"{sandbox}\""),
-                "-c".into(),
-                format!("approval_policy=\"{approval}\""),
-            ]);
-        }
     }
+    // Config works for both exec and exec resume; resume has no --sandbox flag.
+    let (sandbox, approval) = match options
+        .and_then(|o| o.permission)
+        .unwrap_or(PermissionLevel::FullAccess)
+    {
+        PermissionLevel::Ask => ("read-only", "on-request"),
+        PermissionLevel::Auto => ("workspace-write", "on-request"),
+        PermissionLevel::FullAccess => ("danger-full-access", "never"),
+    };
+    args.extend([
+        "-c".into(),
+        format!("sandbox_mode=\"{sandbox}\""),
+        "-c".into(),
+        format!("approval_policy=\"{approval}\""),
+    ]);
     args.extend(["--".into(), text.into()]);
     Ok(args)
 }
@@ -2000,8 +2039,9 @@ fn validate_options(agent: AgentKind, options: Option<&SessionOptions>) -> Resul
     let Some(options) = options.filter(|o| !o.is_default()) else {
         return Ok(());
     };
-    if matches!(agent, AgentKind::Antigravity | AgentKind::Cursor)
-        || (agent == AgentKind::Pi && (options.effort.is_some() || options.permission.is_some()))
+    if (matches!(agent, AgentKind::Antigravity | AgentKind::Cursor)
+        && (options.model.is_some() || options.effort.is_some()))
+        || (agent == AgentKind::Pi && options.effort.is_some())
     {
         return Err(anyhow!(
             "{} does not support composer overrides; use agent defaults",

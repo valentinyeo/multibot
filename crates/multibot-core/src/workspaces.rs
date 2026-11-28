@@ -286,7 +286,7 @@ pub struct SessionGroup {
 pub struct SessionMeta {
     #[serde(default)]
     pub full_width: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub hibernate_wake_on_reply: bool,
     #[serde(default)]
     pub hibernate_reply_boundary: Option<WaitingEntry>,
@@ -333,7 +333,7 @@ impl Default for SessionMeta {
     fn default() -> Self {
         Self {
             full_width: false,
-            hibernate_wake_on_reply: true,
+            hibernate_wake_on_reply: false,
             hibernate_reply_boundary: None,
             dissolved_at_ms: None,
             face: None,
@@ -1877,7 +1877,10 @@ impl WorkspaceStore {
     ) -> Vec<String> {
         let mut directories = Vec::new();
         for input in sessions {
-            if input.host != host || input.summary.archived {
+            if input.host != host
+                || input.summary.archived
+                || input.summary.cwd_exists == Some(false)
+            {
                 continue;
             }
             let in_workspace = match workspace_id {
