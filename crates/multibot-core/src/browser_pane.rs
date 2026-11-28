@@ -131,10 +131,86 @@ pub fn discover_browser(roots: &[PathBuf], is_file: impl Fn(&Path) -> bool) -> O
     .find(|path| is_file(path))
 }
 
+pub fn shared_profile(root: &Path) -> PathBuf {
+    root.join("default")
+}
+
+pub fn beacon_url(nonce: &str) -> String {
+    // Encode the title so arbitrary nonces cannot escape the data URL's HTML.
+    let escaped = nonce
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let title: String = escaped
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b == b'-' {
+                char::from(b).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    format!(
+        "data:text/html,<title>{title}</title><style>html,body{{background:%230d0d0d;margin:0}}</style>"
+    )
+}
+
+pub fn window_matches_beacon(
+    class_name: &str,
+    title: &str,
+    nonce: &str,
+    width: i32,
+    height: i32,
+) -> bool {
+    class_name == "Chrome_WidgetWin_1"
+        && !nonce.is_empty()
+        && title.contains(nonce)
+        && width > 0
+        && height > 0
+}
+
+pub fn locked_popup_style(style: u32) -> u32 {
+    // Win32 style values stay here so docking policy can be tested on Linux.
+    (style
+        & !(0x00C00000
+            | 0x00040000
+            | 0x00800000
+            | 0x00080000
+            | 0x00020000
+            | 0x00010000
+            | 0x40000000))
+        | 0x80000000
+}
+
+pub fn toolwindow_ex_style(ex_style: u32) -> u32 {
+    (ex_style & !0x00040000) | 0x00000080
+}
+
+pub fn client_to_screen_rect(
+    rect: BrowserPaneRect,
+    client_origin_x: i32,
+    client_origin_y: i32,
+) -> BrowserPaneRect {
+    BrowserPaneRect {
+        x: rect.x.saturating_add(client_origin_x),
+        y: rect.y.saturating_add(client_origin_y),
+        ..rect
+    }
+}
+
 pub fn launch_args(profile: &Path, url: &str) -> Vec<OsString> {
+    launch_args_with_bounds(profile, url, None)
+}
+
+pub fn launch_args_with_bounds(
+    profile: &Path,
+    url: &str,
+    screen_rect: Option<BrowserPaneRect>,
+) -> Vec<OsString> {
     let mut profile_arg = OsString::from("--user-data-dir=");
     profile_arg.push(profile);
-    vec![
+    let mut args = vec![
         profile_arg,
         "--remote-debugging-address=127.0.0.1".into(),
         "--remote-debugging-port=0".into(),
@@ -145,9 +221,13 @@ pub fn launch_args(profile: &Path, url: &str) -> Vec<OsString> {
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
         "--hide-crash-restore-bubble".into(),
-        "--new-window".into(),
-        url.into(),
-    ]
+    ];
+    if let Some(rect) = screen_rect.filter(|rect| rect.width > 0 && rect.height > 0) {
+        args.push(format!("--window-position={},{}", rect.x, rect.y).into());
+        args.push(format!("--window-size={},{}", rect.width, rect.height).into());
+    }
+    args.extend(["--new-window".into(), url.into()]);
+    args
 }
 
 /// Chromium writes the ephemeral loopback port and the browser WebSocket path.
@@ -198,6 +278,84 @@ impl BrowserPaneRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_profile_is_always_inside_multibot() {
+        let root = browser_profile_root(Path::new("roaming"));
+        assert_eq!(
+            shared_profile(&root),
+            Path::new("roaming/Multibot/browser-profile/default")
+        );
+    }
+
+    #[test]
+    fn beacon_only_matches_a_real_window_for_this_launch() {
+        let nonce = "MBPANE-123-4";
+        assert!(beacon_url(nonce).contains(&format!("<title>{nonce}</title>")));
+        assert!(beacon_url(nonce).contains("background:%230d0d0d"));
+        assert!(beacon_url("</title>").contains("%26lt%3B%2Ftitle%26gt%3B"));
+        assert!(window_matches_beacon(
+            "Chrome_WidgetWin_1",
+            &format!("{nonce} - Chrome"),
+            nonce,
+            800,
+            600
+        ));
+        for (class, title, nonce, w, h) in [
+            ("Other", nonce, nonce, 800, 600),
+            ("Chrome_WidgetWin_1", "Other", nonce, 800, 600),
+            ("Chrome_WidgetWin_1", nonce, "", 800, 600),
+            ("Chrome_WidgetWin_1", nonce, nonce, 0, 600),
+            ("Chrome_WidgetWin_1", nonce, nonce, 800, -1),
+        ] {
+            assert!(!window_matches_beacon(class, title, nonce, w, h));
+        }
+    }
+
+    #[test]
+    fn popup_has_no_native_frame_and_is_not_a_child_or_taskbar_window() {
+        let removed = 0x00C00000
+            | 0x00040000
+            | 0x00800000
+            | 0x00080000
+            | 0x00020000
+            | 0x00010000
+            | 0x40000000;
+        assert_eq!(locked_popup_style(removed | 0x10000000), 0x90000000);
+        assert_eq!(locked_popup_style(0), 0x80000000);
+        assert_eq!(toolwindow_ex_style(0x00040000 | 0x00000008), 0x00000088);
+    }
+
+    #[test]
+    fn pane_coordinates_and_launch_bounds_support_negative_screen_origins() {
+        let client = BrowserPaneRect {
+            x: 400,
+            y: 44,
+            width: 600,
+            height: 700,
+        };
+        let screen = client_to_screen_rect(client, -1920, 100);
+        assert_eq!(
+            screen,
+            BrowserPaneRect {
+                x: -1520,
+                y: 144,
+                ..client
+            }
+        );
+        let args = launch_args_with_bounds(Path::new("profile"), DEFAULT_URL, Some(screen));
+        assert!(args.contains(&"--window-position=-1520,144".into()));
+        assert!(args.contains(&"--window-size=600,700".into()));
+        assert_eq!(&args[args.len() - 2..], ["--new-window", DEFAULT_URL]);
+        assert_eq!(
+            launch_args_with_bounds(
+                Path::new("profile"),
+                DEFAULT_URL,
+                Some(BrowserPaneRect { width: 0, ..client })
+            ),
+            launch_args(Path::new("profile"), DEFAULT_URL)
+        );
+    }
 
     #[test]
     fn devtools_active_port_parses_only_loopback_port_and_browser_path() {

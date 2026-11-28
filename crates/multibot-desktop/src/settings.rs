@@ -704,7 +704,21 @@ impl MultibotView {
             .p_3()
             .gap_1()
             .bg(theme::bg_sidebar())
-            .child(div().p_2().text_sm().child("Settings"));
+            // Same leading inset as the tab labels below (Medium button `px_2p5`),
+            // so the title and every nav label start on one vertical line.
+            .child(
+                div()
+                    .id("settings-nav-title")
+                    .px_2p5()
+                    .py_2()
+                    .text_sm()
+                    .child(
+                        div()
+                            .id("settings-nav-title-text")
+                            .test_support()
+                            .child("Settings"),
+                    ),
+            );
         for tab in SettingsTab::ALL {
             rail = rail.child(
                 Button::new(tab.id())
@@ -764,40 +778,45 @@ impl MultibotView {
                             .min_w_0()
                             .h_full()
                             .child(
-                                h_flex()
+                                v_flex()
                                     .p_5()
-                                    .justify_between()
-                                    .items_start()
-                                    .gap_3()
+                                    .gap_2()
+                                    // The close button shares the heading's row so
+                                    // `items_center()` puts its centre on the
+                                    // heading's centre line.
                                     .child(
-                                        v_flex()
-                                            .gap_2()
+                                        h_flex()
+                                            .justify_between()
+                                            .items_center()
+                                            .gap_3()
                                             .child(
                                                 div()
+                                                    .id("settings-pane-title")
+                                                    .test_support()
                                                     .text_lg()
                                                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                                     .text_color(theme::text_primary())
                                                     .child(self.settings_tab.title()),
                                             )
                                             .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(theme::text_secondary())
-                                                    .child(self.settings_tab.subtitle()),
+                                                Button::new("settings-close")
+                                                    .xsmall()
+                                                    .icon(lucide_icon(icons::X, 12.0))
+                                                    .accessibility_label("Close settings")
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        this.set_main_surface(
+                                                            crate::state::MainSurface::Chat,
+                                                        );
+                                                        this.focus_active_surface_default(window, cx);
+                                                        cx.notify();
+                                                    })),
                                             ),
                                     )
                                     .child(
-                                        Button::new("settings-close")
-                                            .xsmall()
-                                            .icon(lucide_icon(icons::X, 12.0))
-                                            .accessibility_label("Close settings")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.set_main_surface(
-                                                    crate::state::MainSurface::Chat,
-                                                );
-                                                this.focus_active_surface_default(window, cx);
-                                                cx.notify();
-                                            })),
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme::text_secondary())
+                                            .child(self.settings_tab.subtitle()),
                                     ),
                             )
                             .child(
@@ -825,5 +844,55 @@ impl MultibotView {
             }
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{AppContext, TestAppContext};
+
+    /// A GPUI Kit `Medium` button (the size the nav tabs use) insets its label
+    /// by `px_2p5`, so its label starts this far inside the button's left edge.
+    const NAV_LABEL_INSET: f32 = 10.0;
+
+    /// MBRU-115: the nav title starts on the same vertical line as every tab
+    /// label, and the close button centres on the pane heading.
+    #[gpui_kit::test]
+    fn settings_nav_title_and_close_button_sit_on_their_gridlines(cx: &mut TestAppContext) {
+        let (handle, _view) = crate::app::tests::open_test_view_with_entity(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.press("ctrl-,", cx);
+            window.render_frame(cx);
+
+            let title_left = window.find("settings-nav-title-text").bounds().left().as_f32();
+            for tab in SettingsTab::ALL {
+                let label_left = window.find(tab.id()).bounds().left().as_f32() + NAV_LABEL_INSET;
+                assert!(
+                    (label_left - title_left).abs() <= 0.5,
+                    "{} starts at x={label_left} but Settings starts at x={title_left}",
+                    tab.title()
+                );
+            }
+
+            let heading = window.find("settings-pane-title").bounds();
+            let close = window.find("settings-close").bounds();
+            assert!(
+                (close.center().y.as_f32() - heading.center().y.as_f32()).abs() <= 1.0,
+                "close button centre y={} but the heading centre y={}",
+                close.center().y.as_f32(),
+                heading.center().y.as_f32()
+            );
+
+            let console_right = window.find("settings-console").bounds().right().as_f32();
+            assert!(
+                (console_right - close.right().as_f32() - 20.0).abs() <= 1.0,
+                "close button right edge x={} is not flush with the card inset x={}",
+                close.right().as_f32(),
+                console_right - 20.0
+            );
+        })
+        .unwrap();
     }
 }

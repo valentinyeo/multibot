@@ -6,6 +6,7 @@ ships, move those bullets under its published version; keep older entries here.
 This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
+- Fix the docked Windows browser pane to fill the right side with full native Chrome using a shared Multibot profile, removing the duplicate address bar and buttons (MBRU-132).
 
 - Hide hibernated chats from the sidebar and active view immediately after choosing a time in Alt+H (MBRU-133).
 - Autocomplete natural language durations and dates with resolved date and time previews in Alt+H Hibernate (MBRU-131).
@@ -21,6 +22,7 @@ This file is embedded in Multibot so Changelog works offline.
 - Fetch and unfurl remote screenshot and image links inline in chat (MBRU-111).
 - Condense live working status into one interactive bottom-left row with 5px animated dots, rotating plain-English activity, expandable current-turn steps, full Antigravity hidden activity under Show tool calls, and monochrome dark grey composer buttons (MBRU-116).
 - Align the Command Palette search text, breadcrumb, section headers, and row labels on one leading edge (MBRU-114).
+- Align the Settings sidebar title with the tab labels and centre the close button on the pane heading (MBRU-115).
 - Keep the sidebar visible in full-width chats and resize live shell grids correctly when their pane changes size (MBRU-98, MBRU-99).
 - Keep metadata-only chats idle, open empty chats without a welcome card, and hide Claude subagent transcripts from the sidebar (MBRU-100, MBRU-102).
 - Remove the Inbox dot, unify circular controls, and float the version pill and controls over full-height sidebar and chat views (MBRU-101, MBRU-103).

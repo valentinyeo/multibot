@@ -9,22 +9,13 @@ pub(crate) mod native;
 mod windows {
     use super::{Context, MultibotView, Window, native};
     use crate::{
-        computer_view::normalise_user_input,
-        icons::{self, lucide_icon},
         state::{ActiveModal, MainSurface},
         theme,
     };
     use gpui_kit::{
-        AnyElement, AppContext, Entity, Focusable, InteractiveElement, IntoElement, Keystroke,
-        ParentElement, Styled, Subscription, Task,
-        component::{
-            Sizable,
-            button::Button,
-            h_flex,
-            input::{Input, InputEvent, InputState},
-            v_flex,
-        },
-        div, px, relative,
+        AnyElement, InteractiveElement, IntoElement, Keystroke, ParentElement, Styled, Task,
+        component::{Sizable, button::Button, v_flex},
+        relative,
     };
     use multibot_core::browser_pane::{BrowserPaneRect, BrowserPaneState, DEFAULT_URL};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -34,12 +25,6 @@ mod windows {
         time::{Duration, Instant},
     };
     use tokio::sync::{mpsc, oneshot};
-
-    struct AddressBar {
-        key: String,
-        input: Entity<InputState>,
-        _submit: Subscription,
-    }
 
     enum Tab {
         Starting(u64, native::Browser),
@@ -65,7 +50,7 @@ mod windows {
         clock: Option<Instant>,
         shown: Option<String>,
         focus_on_show: Option<String>,
-        address: Option<AddressBar>,
+        pane_rect: Option<BrowserPaneRect>,
         hibernation: Option<(u64, Task<()>)>,
         generation: u64,
         capture_id: Option<u64>,
@@ -106,24 +91,6 @@ mod windows {
                 }
             }
         }
-
-        fn close_all(&mut self) {
-            // Keep exit notifications for profiles whose processes are still shutting
-            // down, so an immediate reopen cannot race Chromium's profile lock.
-            self.tabs.retain(|_, tab| {
-                let Some(id) = tab.generation() else {
-                    return false;
-                };
-                *tab = Tab::Stopping(id);
-                true
-            });
-            self.shortcuts = None;
-            self.shown = None;
-            self.address = None;
-            self.focus_on_show = None;
-            self.hibernation = None;
-            self.model.release_all_tabs();
-        }
     }
 
     fn parent_handle(window: &Window) -> Option<usize> {
@@ -134,13 +101,6 @@ mod windows {
     }
 
     impl MultibotView {
-        pub(crate) fn browser_address_focused(&self, window: &Window, cx: &Context<Self>) -> bool {
-            self.browser.shown.is_some()
-                && self.browser.address.as_ref().is_some_and(|address| {
-                    address.input.read(cx).focus_handle(cx).is_focused(window)
-                })
-        }
-
         pub(crate) fn handle_browser_command(
             &self,
             host: &str,
@@ -198,7 +158,8 @@ mod windows {
             (self.main_surface == MainSurface::Chat
                 && self.active_modal == ActiveModal::None
                 && !self.table_modal_state.is_open()
-                && !self.computer.is_open())
+                && !self.computer.is_open()
+                && self.chat_state.image_viewer.is_none())
             .then(|| self.selection.selected_session.as_ref())
             .flatten()
             .map(|session| self.session_key_for(session))
@@ -210,7 +171,8 @@ mod windows {
             };
             self.browser.clock.get_or_insert_with(Instant::now);
             if !self.browser.model.toggle(&key) {
-                self.browser.close_all();
+                self.browser.place(&key, None);
+                self.browser.stop_tab(&key);
                 self.focus_browser_composer(window, cx);
             }
             cx.notify();
@@ -316,40 +278,6 @@ mod windows {
                 .detach();
         }
 
-        fn submit_browser_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-            let Some(key) = self.browser_session() else {
-                return;
-            };
-            let Some(address) = self
-                .browser
-                .address
-                .as_ref()
-                .filter(|address| address.key == key)
-            else {
-                return;
-            };
-            let value = address.input.read(cx).value();
-            let url = if matches!(value.trim(), "" | DEFAULT_URL) {
-                DEFAULT_URL.to_owned()
-            } else {
-                match normalise_user_input(value.as_ref()) {
-                    Ok(url) => url.as_str().to_owned(),
-                    Err(err) => {
-                        self.notice = Some(err.message().to_owned());
-                        cx.notify();
-                        return;
-                    }
-                }
-            };
-            self.browser.model.set_url(&key, url);
-            self.browser.place(&key, None);
-            self.browser.stop_tab(&key);
-            if !self.browser.tabs.contains_key(&key) {
-                self.start_browser(key, window, cx);
-            }
-            cx.notify();
-        }
-
         fn install_browser_shortcuts(
             &mut self,
             parent: usize,
@@ -406,13 +334,7 @@ mod windows {
                 let parent = parent_handle(window)
                     .ok_or_else(|| anyhow::anyhow!("No Windows window handle"))?;
                 self.install_browser_shortcuts(parent, window, cx)?;
-                let url = self
-                    .browser
-                    .model
-                    .tab(&key)
-                    .and_then(|tab| tab.url.as_deref())
-                    .unwrap_or(DEFAULT_URL);
-                native::Browser::launch(parent, &key, url)
+                native::Browser::launch(parent, self.browser.pane_rect)
             })();
             let (mut browser, process) = match result {
                 Ok(result) => result,
@@ -437,11 +359,8 @@ mod windows {
             let spawn = std::thread::Builder::new()
                 .name("docked-browser".into())
                 .spawn(move || {
-                    let result = process.find_window();
-                    if ready_tx.send(result).is_ok() {
-                        process.wait();
-                        let _ = exit_tx.send(());
-                    }
+                    let result = process.find_window(exit_tx);
+                    let _ = ready_tx.send(result);
                 });
             if let Err(err) = spawn {
                 self.browser.tabs.insert(key, Tab::Failed(err.to_string()));
@@ -455,14 +374,26 @@ mod windows {
                         }
                         let Some(Tab::Starting(_, mut browser)) = view.browser.tabs.remove(&key) else { return };
                         let tab = match result.and_then(|hwnd| browser.attach(hwnd)) {
-                            Ok(()) => Tab::Ready(generation, browser),
+                            Ok(()) => {
+                                let cdp = browser.cdp.clone();
+                                let nonce = browser.nonce.clone();
+                                let url = view.browser.model.tab(&key)
+                                    .and_then(|tab| tab.url.clone()).unwrap_or_else(|| DEFAULT_URL.into());
+                                view.runtime.spawn(async move {
+                                    if let Err(error) = cdp.bind_beacon_and_navigate(&nonce, &url).await {
+                                        eprintln!("Could not bind docked browser: {error}");
+                                    }
+                                });
+                                Tab::Ready(generation, browser)
+                            },
                             Err(err) => Tab::Failed(err.to_string()),
                         };
                         view.browser.tabs.insert(key.clone(), tab);
                         cx.notify();
                     });
                 }
-                if exit_rx.await.is_ok() {
+                let _ = exit_rx.await;
+                {
                     let _ = this.update(cx, |view, cx| {
                         match view.browser.tabs.get(&key) {
                             Some(Tab::Stopping(id)) if *id == generation => {
@@ -470,7 +401,7 @@ mod windows {
                             }
                             Some(Tab::Ready(id, _)) if *id == generation => {
                                 view.browser.place(&key, None);
-                                view.browser.tabs.insert(key, Tab::Failed("Browser closed. Press Go to reopen.".into()));
+                                view.browser.tabs.insert(key, Tab::Failed("Chrome closed.".into()));
                             }
                             _ => return,
                         }
@@ -551,46 +482,17 @@ mod windows {
                 }
                 return;
             };
-            if self
-                .browser
-                .address
-                .as_ref()
-                .is_none_or(|bar| bar.key != key)
-            {
-                let url = self
-                    .browser
-                    .model
-                    .tab(&key)
-                    .and_then(|tab| tab.url.as_deref())
-                    .unwrap_or_default();
-                let input = cx.new(|cx| {
-                    let mut input = InputState::new(window, cx).placeholder("Enter a web address");
-                    input.set_value(url, window, cx);
-                    input
-                });
-                let submit = cx.subscribe_in(&input, window, |view, _, event, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        view.submit_browser_address(window, cx);
-                    }
-                });
-                self.browser.address = Some(AddressBar {
-                    key: key.clone(),
-                    input,
-                    _submit: submit,
-                });
-            }
-            if !self.browser.tabs.contains_key(&key) {
+            if !self.browser.tabs.contains_key(&key) && self.browser.pane_rect.is_some() {
                 self.start_browser(key, window, cx);
             }
         }
 
         pub(crate) fn render_browser_pane(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
             let key = self.browser.shown.clone()?;
-            let address = self.browser.address.as_ref()?;
             let status = match self.browser.tabs.get(&key) {
-                Some(Tab::Ready(..)) => "",
-                Some(Tab::Failed(error)) => error,
-                _ => "Opening browser…",
+                Some(Tab::Ready(..)) => String::new(),
+                Some(Tab::Failed(error)) => format!("{error}\nCtrl+Shift+B closes the pane."),
+                _ => "Opening Chrome…".into(),
             };
             let weak = cx.entity().downgrade();
             Some(
@@ -606,42 +508,30 @@ mod windows {
                     .border_l_1()
                     .border_color(theme::border_subtle())
                     .child(
-                        h_flex()
+                        v_flex()
                             .w_full()
-                            .h(px(44.))
-                            .px_2()
-                            .gap_2()
-                            .flex_shrink_0()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(Input::new(&address.input).small()),
-                            )
-                            .child(Button::new("browser-go").label("Go").small().on_click(
-                                cx.listener(|view, _, window, cx| {
-                                    view.submit_browser_address(window, cx)
-                                }),
-                            ))
-                            .child(
-                                Button::new("browser-close")
-                                    .icon(lucide_icon(icons::X, 12.0))
-                                    .label("Close")
-                                    .accessibility_label("Close browser pane")
-                                    .small()
-                                    .on_click(cx.listener(|view, _, window, cx| {
-                                        view.toggle_browser_pane(window, cx)
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
+                            .h_full()
                             .min_h_0()
                             .p_2()
                             .text_sm()
                             .text_color(theme::text_muted())
-                            .child(status.to_owned()),
+                            .child(status)
+                            .children(
+                                matches!(self.browser.tabs.get(&key), Some(Tab::Failed(_))).then(
+                                    || {
+                                        Button::new("browser-reopen")
+                                            .label("Reopen")
+                                            .small()
+                                            .on_click(cx.listener(|view, _, window, cx| {
+                                                if let Some(key) = view.browser.shown.clone() {
+                                                    view.browser.tabs.remove(&key);
+                                                    view.start_browser(key, window, cx);
+                                                    cx.notify();
+                                                }
+                                            }))
+                                    },
+                                ),
+                            ),
                     )
                     .on_children_prepainted(move |bounds, window, cx| {
                         let Some(body) = bounds.last() else { return };
@@ -652,8 +542,13 @@ mod windows {
                             body.size.height.as_f32(),
                             window.scale_factor(),
                         );
-                        let _ = weak.update(cx, |view, _| {
+                        let _ = weak.update(cx, |view, cx| {
                             if view.browser.shown.as_deref() == Some(key.as_str()) {
+                                view.browser.pane_rect = Some(rect);
+                                if !view.browser.tabs.contains_key(&key) {
+                                    view.start_browser(key.clone(), window, cx);
+                                    cx.notify();
+                                }
                                 view.browser.place(&key, Some(rect));
                                 if view.browser.focus_on_show.as_deref() == Some(key.as_str())
                                     && let Some(hwnd) = view.browser.visible_window(&key)

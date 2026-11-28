@@ -509,7 +509,7 @@ impl MultibotView {
                 self.chat_state.find_open,
                 self.sidebar_state.rename.is_some()
                     || self.sidebar_state.new_workspace_draft.is_some(),
-                self.browser_address_focused(window, cx),
+                false,
             ) && !self.table_modal_state.is_open()
                 && !self.computer.is_open()
                 && !self.slash_picker_state.is_open()
