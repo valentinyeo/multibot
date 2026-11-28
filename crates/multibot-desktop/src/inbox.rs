@@ -7,6 +7,7 @@ use gpui_kit::{
     Context, FocusHandle, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, Modifiers,
     MouseButton, ParentElement, Role, SharedString, StatefulInteractiveElement, Styled,
     TestSupportExt, Window,
+    base::TestTextExt,
     component::{h_flex, v_flex},
     div,
     prelude::FluentBuilder,
@@ -17,6 +18,23 @@ use multibot_core::workspaces::{
 };
 
 const DOUBLE_G_WINDOW_MS: i64 = 600;
+
+/// Padding that puts a bordered Inbox surface (a split chip or a session card) on
+/// the shared leading line. Each draws a `1px` hairline inside its own box, so the
+/// padding is one pixel short of the line and the border closes the gap.
+const INBOX_LEAD_PADDING: f32 = 20.0;
+
+/// Width of the hairline border that chips and session cards draw inside their box.
+const INBOX_BORDER_WIDTH: f32 = 1.0;
+
+/// Padding for a borderless Inbox surface (a lifecycle tab) whose text must reach
+/// the same leading line that a bordered surface reaches through its border.
+const INBOX_BORDERLESS_LEAD_PADDING: f32 = INBOX_LEAD_PADDING + INBOX_BORDER_WIDTH;
+
+/// Fixed width of the row timestamp column. Every Inbox card right-aligns its
+/// age (`now`, `2m`, `3m`, `9m`) inside this column and places its favorite star
+/// and status dots to its left, so timestamps never shift when a dot appears.
+const INBOX_TIMESTAMP_COLUMN: f32 = 40.0;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct InboxState {
@@ -1038,7 +1056,8 @@ impl MultibotView {
                     )))
                     .role(Role::Button)
                     .test_support()
-                    .px_3p5()
+                    .pl(px(INBOX_BORDERLESS_LEAD_PADDING))
+                    .pr_3p5()
                     .py_2()
                     .rounded(RADIUS_CHIP)
                     .bg(if active {
@@ -1052,7 +1071,7 @@ impl MultibotView {
                         theme::text_muted()
                     })
                     .cursor_pointer()
-                    .child(lifecycle.label())
+                    .child(lifecycle.label().test_text(lifecycle.label()))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
@@ -1103,7 +1122,8 @@ impl MultibotView {
                     .id(el_id)
                     .role(Role::Button)
                     .test_support()
-                    .px_3p5()
+                    .pl(px(INBOX_LEAD_PADDING))
+                    .pr_3p5()
                     .py_1p5()
                     .rounded(RADIUS_CHIP)
                     .bg(if active {
@@ -1142,7 +1162,7 @@ impl MultibotView {
                     .when(favorite, |el| {
                         el.child(lucide_icon(icons::STAR_FILLED, 14.0))
                     })
-                    .child(label),
+                    .child(label.clone().test_text(label)),
             );
         }
 
@@ -1287,7 +1307,8 @@ impl MultibotView {
                         .id(SharedString::from(format!("inbox-row-{idx}")))
                         .role(Role::Button)
                         .test_support()
-                        .px_4()
+                        .pl(px(INBOX_LEAD_PADDING))
+                        .pr_4()
                         .py_3()
                         .rounded(RADIUS_ROW)
                         .bg(if is_selected {
@@ -1322,6 +1343,10 @@ impl MultibotView {
                                 .gap_3()
                                 .child(
                                     div()
+                                        .id(SharedString::from(format!(
+                                            "inbox-row-agent-{idx}"
+                                        )))
+                                        .test_support()
                                         .w(px(40.0))
                                         .h(px(40.0))
                                         .rounded(RADIUS_CHIP)
@@ -1390,61 +1415,77 @@ impl MultibotView {
                                                     h_flex()
                                                         .items_center()
                                                         .gap_1p5()
+                                                        // Status markers lead the timestamp: a star,
+                                                        // a working dot, or an unread dot widens this
+                                                        // group leftward without ever moving the age
+                                                        // off its fixed right-aligned column.
+                                                        .child(
+                                                            h_flex()
+                                                                .items_center()
+                                                                .gap_1p5()
+                                                                .when(row.due_reminder, |el| {
+                                                                    el.child(
+                                                                        div()
+                                                                            .id(SharedString::from(format!("dismiss-reminder-{idx}")))
+                                                                            .role(Role::Button)
+                                                                            .test_support()
+                                                                            .px_2()
+                                                                            .py_0p5()
+                                                                            .rounded(RADIUS_CHIP)
+                                                                            .bg(theme::bg_canvas())
+                                                                            .text_xs()
+                                                                            .text_color(theme::accent_amber())
+                                                                            .child("Due reminder · Dismiss")
+                                                                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                                                                                cx.stop_propagation();
+                                                                                this.sidebar_state.workspace_store.set_reminder(&key_dismiss, None, None);
+                                                                                this.persist_workspace_store_if_enabled();
+                                                                                this.sync_workspace_to_shared(cx);
+                                                                                cx.notify();
+                                                                            })),
+                                                                    )
+                                                                })
+                                                                .when(row.favorite, |el| {
+                                                                    el.child(
+                                                                        div()
+                                                                            .w(px(6.0))
+                                                                            .h(px(6.0))
+                                                                            .rounded(RADIUS_CHIP)
+                                                                            .bg(theme::accent_amber()),
+                                                                    )
+                                                                })
+                                                                .when(row.working, |el| {
+                                                                    el.child(
+                                                                        div()
+                                                                            .w(px(7.0))
+                                                                            .h(px(7.0))
+                                                                            .rounded(RADIUS_CHIP)
+                                                                            .bg(theme::accent_green()),
+                                                                    )
+                                                                })
+                                                                .when(row.unread, |el| {
+                                                                    el.child(
+                                                                        div()
+                                                                            .w(px(7.0))
+                                                                            .h(px(7.0))
+                                                                            .rounded(RADIUS_CHIP)
+                                                                            .bg(theme::accent_blue()),
+                                                                    )
+                                                                }),
+                                                        )
                                                         .child(
                                                             div()
+                                                                .id(SharedString::from(format!(
+                                                                    "inbox-row-age-{idx}"
+                                                                )))
+                                                                .test_support()
+                                                                .min_w(px(INBOX_TIMESTAMP_COLUMN))
+                                                                .flex_shrink_0()
                                                                 .text_xs()
+                                                                .text_right()
                                                                 .text_color(theme::text_muted())
-                                                                .child(age),
-                                                        )
-                                                        .when(row.due_reminder, |el| {
-                                                            el.child(
-                                                                div()
-                                                                    .id(SharedString::from(format!("dismiss-reminder-{idx}")))
-                                                                    .role(Role::Button)
-                                                                    .test_support()
-                                                                    .px_2()
-                                                                    .py_0p5()
-                                                                    .rounded(RADIUS_CHIP)
-                                                                    .bg(theme::bg_canvas())
-                                                                    .text_xs()
-                                                                    .text_color(theme::accent_amber())
-                                                                    .child("Due reminder · Dismiss")
-                                                                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                                                                        cx.stop_propagation();
-                                                                        this.sidebar_state.workspace_store.set_reminder(&key_dismiss, None, None);
-                                                                        this.persist_workspace_store_if_enabled();
-                                                                        this.sync_workspace_to_shared(cx);
-                                                                        cx.notify();
-                                                                    })),
-                                                            )
-                                                        })
-                                                        .when(row.favorite, |el| {
-                                                            el.child(
-                                                                div()
-                                                                    .w(px(6.0))
-                                                                    .h(px(6.0))
-                                                                    .rounded(RADIUS_CHIP)
-                                                                    .bg(theme::accent_amber()),
-                                                            )
-                                                        })
-                                                        .when(row.working, |el| {
-                                                            el.child(
-                                                                div()
-                                                                    .w(px(7.0))
-                                                                    .h(px(7.0))
-                                                                    .rounded(RADIUS_CHIP)
-                                                                    .bg(theme::accent_green()),
-                                                            )
-                                                        })
-                                                        .when(row.unread, |el| {
-                                                            el.child(
-                                                                div()
-                                                                    .w(px(7.0))
-                                                                    .h(px(7.0))
-                                                                    .rounded(RADIUS_CHIP)
-                                                                    .bg(theme::accent_blue()),
-                                                            )
-                                                        }),
+                                                                .child(age.clone().test_text(age)),
+                                                        ),
                                                 ),
                                         )
                                         .child(
