@@ -536,8 +536,8 @@ pub fn discover_live_sessions_with_ctx(
         tmux::apply_metadata(shell, ctx.metadata, ctx.server_workspaces, ctx.archive);
     }
     shells.retain(|shell| ctx.include_archived || !shell.archived);
-    // A live-shell list must never resurrect a killed shell from archive metadata.
-    sessions.retain(|session| session.agent != AgentKind::Shell);
+    // Prefer live tmux details to archive metadata for shells that can still be attached.
+    sessions.retain(|session| !shells.iter().any(|shell| shell.agent == session.agent && shell.id == session.id));
     // The transcript limit must never hide a live terminal.
     sessions.extend(shells);
     sessions.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
@@ -3650,8 +3650,9 @@ mod tests {
         let shell = saved.iter().find(|s| s.id == "dissolved-shell").unwrap();
         assert!(shell.archived && shell.archive_kill_process);
         assert_eq!(shell.source_path, "tmux:dissolved-shell");
-        assert!(!discover_live_sessions_with_ctx(&home, 50, &ctx).iter()
-            .any(|shell| shell.agent == AgentKind::Shell && shell.id == "dissolved-shell"));
+        let archived = discover_live_sessions_with_ctx(&home, 50, &ctx);
+        let killed_shell = archived.iter().find(|shell| shell.id == "dissolved-shell").unwrap();
+        assert!(killed_shell.archived && killed_shell.shell_attached.is_none());
         append_archived_sessions(&ctx, &mut saved);
         assert_eq!(
             saved.iter().filter(|s| s.id == "dissolved-shell").count(),

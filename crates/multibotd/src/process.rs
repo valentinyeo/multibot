@@ -142,7 +142,20 @@ impl ProcessManager {
         if text.trim().is_empty() {
             return Err(anyhow!("prompt text is empty"));
         }
-        self.dispatch_prompt_internal(session_id, agent, cwd, text, false, options.as_ref())
+        let result = self.dispatch_prompt_internal(session_id, agent, cwd, text, false, options.as_ref());
+        if result.is_ok() {
+            self.notify_session_working(session_id, true);
+        }
+        result
+    }
+
+    // An agent can finish without touching its transcript, so filesystem watches alone
+    // cannot advance the desktop's pending queue.
+    fn notify_session_working(&self, session_id: &str, working: bool) {
+        let _ = self.out_tx.send(ServerEvent::HistoryAppend {
+            session_id: session_id.into(), messages: Vec::new(), latest_offset: None,
+            working: Some(working), todos: Vec::new(), probe_sha256: None,
+        });
     }
 
     fn dispatch_prompt_internal(
@@ -718,6 +731,7 @@ impl ProcessManager {
                                     }
                                 };
                                 if matched_pid {
+                                    mgr_stdout.notify_session_working(&sid_stdout, false);
                                     mgr_stdout.drain_next_queued(&sid_stdout);
                                 }
                             }
@@ -783,6 +797,7 @@ impl ProcessManager {
             }
         };
         if removed_matching {
+            self.notify_session_working(session_id, false);
             self.drain_next_queued(session_id);
         }
     }
@@ -821,6 +836,7 @@ impl ProcessManager {
                 qp.options.as_ref(),
             ) {
                 Ok(detail) => {
+                    self.notify_session_working(session_id, true);
                     let _ = self.out_tx.send(ServerEvent::PromptStatus {
                         session_id: session_id.to_string(),
                         message_id: qp.message_id,
@@ -2387,6 +2403,32 @@ mv '{}.tmp' '{}'
         fs::remove_dir_all(home).unwrap();
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_chat_client_reports_exit_without_a_transcript_write() {
+        for agent in [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity, AgentKind::Pi, AgentKind::Cursor] {
+            let home = temp_home("exit-activity");
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let mgr = ProcessManager::new(home.clone(), tx);
+            mgr.set_test_bin_override(Some(PathBuf::from("/bin/true")));
+            mgr.send_prompt("exit-session", agent, Some(home.to_str().unwrap()), "prompt", None).await.unwrap();
+            let events = tokio::time::timeout(Duration::from_secs(5), async {
+                let mut events = Vec::new();
+                while let Some(event) = rx.recv().await {
+                    if let ServerEvent::HistoryAppend { session_id, messages, working: Some(working), .. } = event {
+                        assert_eq!(session_id, "exit-session");
+                        assert!(messages.is_empty());
+                        events.push(working);
+                        if !working { break; }
+                    }
+                }
+                events
+            }).await.unwrap();
+            assert_eq!(events, [true, false], "{agent:?}");
+            fs::remove_dir_all(home).unwrap();
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn spawn_retries_executable_busy_until_writer_closes() {
@@ -3116,6 +3158,9 @@ mv '{}.tmp' '{}'
             other => panic!("expected failed status for q-bad, got {other:?}"),
         }
 
+        assert!(matches!(rx.recv().await, Some(ServerEvent::HistoryAppend {
+            working: Some(true), messages, ..
+        }) if messages.is_empty()));
         let ev2 = rx.recv().await.expect("second PromptStatus");
         match ev2 {
             ServerEvent::PromptStatus {
@@ -3321,6 +3366,27 @@ mv '{}.tmp' '{}'
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hosted_agy_reports_turn_complete_while_the_process_stays_connected() {
+        let home = temp_home("agy-turn-activity");
+        let (bin, _) = fake_agy(&home);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mgr = ProcessManager::new(home.clone(), tx);
+        mgr.set_test_bin_override(Some(bin));
+        mgr.send_prompt("turn-session", AgentKind::Antigravity, None, "prompt", None).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, ServerEvent::HistoryAppend { working: Some(false), .. }) { break; }
+            }
+        }).await.unwrap();
+        assert!(mgr.connected_session_ids().contains("turn-session"));
+        assert!(!mgr.is_session_busy("turn-session"));
+        mgr.archive_session("turn-session".into(), AgentKind::Antigravity,
+            hosted_history_path(&home, "turn-session").to_string_lossy().into(), true).await;
+        fs::remove_dir_all(home).unwrap();
+    }
+
     /// A follow-up typed while the turn is still running must reach the live `agy` stdin.
     /// Queueing it behind the turn is what makes an Antigravity chat look stuck.
     #[cfg(unix)]
@@ -3347,11 +3413,15 @@ mv '{}.tmp' '{}'
         )
         .await;
 
-        match rx.recv().await.unwrap() {
-            ServerEvent::PromptStatus { status, detail, .. } => {
-                assert_eq!(status, "sent", "follow-up must not be queued: {detail}");
+        loop {
+            match rx.recv().await.unwrap() {
+                ServerEvent::PromptStatus { status, detail, .. } => {
+                    assert_eq!(status, "sent", "follow-up must not be queued: {detail}");
+                    break;
+                }
+                ServerEvent::HistoryAppend { messages, working: Some(_), .. } if messages.is_empty() => {}
+                other => panic!("expected PromptStatus(sent), got {other:?}"),
             }
-            other => panic!("expected PromptStatus(sent), got {other:?}"),
         }
 
         let frame = wait_for_log_line(&log, "follow-up while working").await;
@@ -3559,6 +3629,9 @@ mv '{}.tmp' '{}'
             .unwrap();
             assert_eq!(frame["message"]["content"], expected);
         }
+        assert!(matches!(rx.try_recv(), Ok(ServerEvent::HistoryAppend {
+            working: Some(true), messages, ..
+        }) if messages.is_empty()));
         assert!(
             matches!(rx.try_recv().unwrap(), ServerEvent::PromptStatus { status, .. } if status == "sent")
         );
