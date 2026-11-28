@@ -102,10 +102,20 @@ pub(crate) fn should_show_embedded_shell(
 }
 
 #[cfg(any(windows, test))]
-fn forwarded_shortcut(key: u32, ctrl: bool, alt: bool, shift: bool) -> Option<&'static str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellShortcut {
+    Paste,
+    Forward(&'static str),
+}
+
+#[cfg(any(windows, test))]
+fn shell_shortcut(key: u32, ctrl: bool, alt: bool, shift: bool) -> Option<ShellShortcut> {
+    if key == 0x56 && ctrl && !alt {
+        return Some(ShellShortcut::Paste);
+    }
     registered_native_shortcut(key, ctrl, alt, shift)
         .filter(|spec| spec.category != multibot_keys::ShortcutCategory::Browser)
-        .map(|spec| spec.gpui_key)
+        .map(|spec| ShellShortcut::Forward(spec.gpui_key))
 }
 
 #[cfg(any(windows, test))]
@@ -674,23 +684,41 @@ mod tests {
     #[test]
     fn keyboard_escape_preserves_terminal_control_keys() {
         for key in [0x4B, 0x31, 0x39, 0xBC, 0x4E] {
-            assert!(forwarded_shortcut(key, true, false, false).is_some());
+            assert!(shell_shortcut(key, true, false, false).is_some());
         }
-        assert!(forwarded_shortcut(0x49, false, true, false).is_some());
-        assert!(forwarded_shortcut(0x4B, false, true, false).is_some());
-        assert!(forwarded_shortcut(0x70, false, false, false).is_some());
-        assert!(forwarded_shortcut(0x43, true, false, false).is_none());
-        assert!(forwarded_shortcut(0x44, true, false, false).is_none());
-        assert!(forwarded_shortcut(0x5A, true, false, false).is_none());
-        assert!(forwarded_shortcut(0x41, false, false, false).is_none());
-        assert!(forwarded_shortcut(0x1B, false, false, false).is_none());
-        assert!(forwarded_shortcut(0x4B, true, true, false).is_none());
+        assert!(shell_shortcut(0x49, false, true, false).is_some());
+        assert!(shell_shortcut(0x4B, false, true, false).is_some());
+        assert!(shell_shortcut(0x70, false, false, false).is_some());
+        assert!(shell_shortcut(0x43, true, false, false).is_none());
+        assert!(shell_shortcut(0x44, true, false, false).is_none());
+        assert!(shell_shortcut(0x5A, true, false, false).is_none());
+        assert!(shell_shortcut(0x41, false, false, false).is_none());
+        assert!(shell_shortcut(0x1B, false, false, false).is_none());
+        assert!(shell_shortcut(0x4B, true, true, false).is_none());
     }
+    #[test]
+    fn both_paste_chords_stay_in_the_shell_instead_of_forwarding_ctrl_v() {
+        for shift in [false, true] {
+            assert_eq!(
+                shell_shortcut(0x56, true, false, shift),
+                Some(ShellShortcut::Paste)
+            );
+            assert!(shell_shortcut(0x56, false, false, shift).is_none());
+            assert!(shell_shortcut(0x56, true, true, shift).is_none());
+            for key in [0x43, 0x44, 0x5A, 0x1B] {
+                assert_ne!(
+                    shell_shortcut(key, true, false, shift),
+                    Some(ShellShortcut::Paste)
+                );
+            }
+        }
+    }
+
     #[test]
     fn workspace_shortcut_is_forwarded_from_native_terminal_and_browser() {
         assert_eq!(
-            forwarded_shortcut(0x57, false, true, true),
-            Some("alt-shift-w")
+            shell_shortcut(0x57, false, true, true),
+            Some(ShellShortcut::Forward("alt-shift-w"))
         );
         assert_eq!(
             registered_native_shortcut(0x57, false, true, true)
@@ -698,7 +726,7 @@ mod tests {
                 .id,
             "workspace.switcher"
         );
-        assert!(forwarded_shortcut(0x57, false, true, false).is_none());
+        assert!(shell_shortcut(0x57, false, true, false).is_none());
         assert!(registered_native_shortcut(0x57, true, true, true).is_none());
     }
 

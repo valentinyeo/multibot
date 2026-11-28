@@ -1,4 +1,4 @@
-use super::{ShellLaunchSpec, ShellViewportRect, forwarded_shortcut, windows_quote};
+use super::{ShellLaunchSpec, ShellShortcut, ShellViewportRect, shell_shortcut, windows_quote};
 use anyhow::{Result, bail};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -116,16 +116,34 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                 let ctrl = GetAsyncKeyState(0x11) < 0;
                 let alt = GetAsyncKeyState(0x12) < 0;
                 let shift = GetAsyncKeyState(0x10) < 0;
-                if let Some(chord) = forwarded_shortcut(key, ctrl, alt, shift) {
+                if let Some(shortcut) = shell_shortcut(key, ctrl, alt, shift) {
                     let foreground = GetForegroundWindow();
                     let root = GetAncestor(foreground, GA_ROOT) as usize;
                     let parent = VISIBLE.with(|v| {
                         v.borrow()
                             .get(&root)
                             .filter(|(hwnd, _)| *hwnd != 0 && !crate::browser_pane::native::has_focus(root))
-                            .map(|_| root)
+                            .map(|(hwnd, _)| (root, *hwnd))
                     });
-                    if let Some(parent) = parent {
+                    if let Some((parent, hwnd)) = parent {
+                        let chord = match shortcut {
+                            ShellShortcut::Paste => {
+                                let mut info = GUITHREADINFO::default();
+                                info.cbSize = size_of_val(&info) as u32;
+                                if GetGUIThreadInfo(0, &mut info) != 0
+                                    && info.hwndFocus == hwnd as HWND
+                                {
+                                    // conhost's ID_CONSOLE_PASTE reads CF_UNICODETEXT and handles
+                                    // newline conversion and bracketed paste. Post asynchronously
+                                    // so a busy console cannot stall the low-level keyboard hook.
+                                    PostMessageW(hwnd as HWND, WM_COMMAND, 0xFFF1, 0);
+                                    FORWARDED.with(|v| v.borrow_mut().insert(key, parent));
+                                    return 1;
+                                }
+                                return CallNextHookEx(null_mut(), code, wparam, lparam);
+                            }
+                            ShellShortcut::Forward(chord) => chord,
+                        };
                         SetForegroundWindow(parent as HWND);
                         SetFocus(parent as HWND);
                         if let Ok(stroke) = gpui_kit::Keystroke::parse(chord) {

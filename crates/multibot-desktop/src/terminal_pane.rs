@@ -956,6 +956,13 @@ impl TerminalPaneState {
     }
 }
 
+fn is_paste_key(ev: &KeyDownEvent) -> bool {
+    let modifiers = ev.keystroke.modifiers;
+    ev.keystroke.key.eq_ignore_ascii_case("v")
+        && (modifiers.platform || modifiers.control)
+        && !modifiers.alt
+}
+
 /// Key bytes for a terminal keystroke, or `None` when GPUI should keep the key.
 ///
 /// `Alt+C` is deliberately absent: the global `ToggleTerminal` action must win so the
@@ -1156,12 +1163,9 @@ impl crate::app::MultibotView {
         if !focused {
             return false;
         }
-        let modifiers = ev.keystroke.modifiers;
         // Paste is the one chord the pane keeps for itself: Cmd+V on macOS, Ctrl+V (with or
         // without Shift) elsewhere. Everything else goes to the PTY.
-        let is_paste = ev.keystroke.key.eq_ignore_ascii_case("v")
-            && (modifiers.platform || modifiers.control);
-        if is_paste {
+        if is_paste_key(ev) {
             self.paste_into_terminal(cx);
             window.prevent_default();
             cx.stop_propagation();
@@ -1816,6 +1820,29 @@ mod tests {
     }
 
     #[test]
+    fn paste_chords_read_the_local_clipboard_instead_of_encoding_ctrl_v() {
+        for chord in ["ctrl-v", "ctrl-shift-v", "cmd-v", "cmd-shift-v"] {
+            let event = KeyDownEvent {
+                keystroke: gpui_kit::Keystroke::parse(chord).unwrap(),
+                is_held: false,
+                prefer_character_input: false,
+            };
+            assert!(is_paste_key(&event), "{chord}");
+            assert_eq!(encode_key(&event), None, "{chord}");
+        }
+        for chord in [
+            "v", "shift-v", "alt-v", "ctrl-alt-v", "ctrl-c", "ctrl-d", "ctrl-z", "escape",
+        ] {
+            let event = KeyDownEvent {
+                keystroke: gpui_kit::Keystroke::parse(chord).unwrap(),
+                is_held: false,
+                prefer_character_input: false,
+            };
+            assert!(!is_paste_key(&event), "{chord}");
+        }
+    }
+
+    #[test]
     fn alt_c_is_never_forwarded_to_the_pty() {
         let event = KeyDownEvent {
             keystroke: gpui_kit::Keystroke {
@@ -1887,7 +1914,21 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let session =
             spawn_stub_session(cx, TerminalSize::new(40, 8)).expect("stub PTY must start");
-        assert_eq!(session.paste_bytes("hi\r\nthere"), b"hi\nthere".to_vec());
+        for (text, normalised) in [
+            ("hi\r\nthere", "hi\nthere"),
+            ("one\r\ntwo\r\n", "one\ntwo\n"),
+            ("one\ntwo\rthree", "one\ntwo\rthree"),
+            ("héllo\r\n世界 🦀", "héllo\n世界 🦀"),
+            ("", ""),
+        ] {
+            session.state.lock().unwrap().advance(b"\x1b[?2004l");
+            assert_eq!(session.paste_bytes(text), normalised.as_bytes());
+            session.state.lock().unwrap().advance(b"\x1b[?2004h");
+            assert_eq!(
+                session.paste_bytes(text),
+                format!("\x1b[200~{normalised}\x1b[201~").as_bytes()
+            );
+        }
     }
 
     fn spawn_stub_session(cx: &mut TestAppContext, size: TerminalSize) -> Result<TerminalSession> {
