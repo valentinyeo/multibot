@@ -6,6 +6,7 @@ ships, move those bullets under its published version; keep older entries here.
 This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
+- Fix the docked Windows browser pane to fill the right side with full native Chrome using a shared Multibot profile, removing the duplicate address bar and buttons (MBRU-132).
 
 - Autocomplete natural language durations and dates with resolved date and time previews in Alt+H Hibernate (MBRU-131).
 - Show each session’s live worker count in the sidebar and chat, with expandable tickets, folders, models, and elapsed time (MBRU-117).

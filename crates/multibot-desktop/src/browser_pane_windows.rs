@@ -1,6 +1,8 @@
 use anyhow::{Context as _, Result, bail};
 use multibot_core::browser_pane::{
-    BrowserPaneRect, browser_profile_root, discover_browser, launch_args, session_profile,
+    BrowserPaneRect, beacon_url, browser_profile_root, client_to_screen_rect, discover_browser,
+    launch_args_with_bounds, locked_popup_style, shared_profile, toolwindow_ex_style,
+    window_matches_beacon,
 };
 use std::{
     cell::RefCell,
@@ -10,14 +12,20 @@ use std::{
     os::windows::{ffi::OsStrExt, fs::MetadataExt},
     path::{Path, PathBuf},
     ptr::{null, null_mut},
+    sync::{
+        Arc, LazyLock, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
 };
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{mpsc::UnboundedSender, oneshot};
 use windows_sys::Win32::{
     Foundation::*,
-    Graphics::Gdi::*,
+    Graphics::{Dwm::*, Gdi::*},
     Storage::Xps::{PW_CLIENTONLY, PrintWindow},
     System::{JobObjects::*, LibraryLoader::GetModuleHandleW, Threading::*},
     UI::{
+        Accessibility::*,
         Input::KeyboardAndMouse::{GetAsyncKeyState, SetFocus},
         WindowsAndMessaging::*,
     },
@@ -32,10 +40,48 @@ impl Drop for Handle {
     }
 }
 
+static LAUNCH_GENERATION: AtomicU64 = AtomicU64::new(1);
+// The OS closes this process-lifetime handle on exit, killing the entire shared browser job.
+static JOB: OnceLock<Result<usize, String>> = OnceLock::new();
+
+fn shared_job() -> Result<HANDLE> {
+    JOB.get_or_init(|| unsafe {
+        let job = Handle(CreateJobObjectW(null(), null()));
+        if job.0.is_null() {
+            return Err(io::Error::last_os_error().to_string());
+        }
+        let mut limit = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if SetInformationJobObject(
+            job.0,
+            JobObjectExtendedLimitInformation,
+            &limit as *const _ as _,
+            size_of_val(&limit) as u32,
+        ) == 0
+        {
+            return Err(io::Error::last_os_error().to_string());
+        }
+        let handle = job.0 as usize;
+        std::mem::forget(job);
+        Ok(handle)
+    })
+    .as_ref()
+    .map(|handle| *handle as HANDLE)
+    .map_err(|error| anyhow::anyhow!(error.clone()))
+}
+
+#[derive(Default)]
+struct LaunchWindow {
+    cancelled: AtomicBool,
+    hwnd: AtomicUsize,
+}
+
 pub(super) struct Process {
     handle: usize,
-    pid: u32,
-    _profile_lock: std::fs::File,
+    parent: usize,
+    nonce: String,
+    before: HashSet<usize>,
+    window: Arc<LaunchWindow>,
 }
 
 impl Drop for Process {
@@ -48,7 +94,8 @@ pub(super) struct Browser {
     hwnd: Option<usize>,
     rect: Option<BrowserPaneRect>,
     parent: usize,
-    _job: Handle,
+    window: Arc<LaunchWindow>,
+    pub(super) nonce: String,
     pub(super) cdp: crate::browser_cdp::BrowserController,
     pub(super) binding_id: String,
     pub(super) bridge: Option<(
@@ -57,7 +104,6 @@ pub(super) struct Browser {
         UnboundedSender<multibot_proto::ClientRequest>,
     )>,
 }
-
 fn wide(s: &OsStr) -> Vec<u16> {
     s.encode_wide().chain(Some(0)).collect()
 }
@@ -119,7 +165,7 @@ fn isolated_root() -> Result<PathBuf> {
 }
 
 impl Browser {
-    pub(super) fn launch(parent: usize, session: &str, url: &str) -> Result<(Self, Process)> {
+    pub(super) fn launch(parent: usize, rect: Option<BrowserPaneRect>) -> Result<(Self, Process)> {
         let roots = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
             .into_iter()
             .filter_map(std::env::var_os)
@@ -127,47 +173,25 @@ impl Browser {
             .collect::<Vec<_>>();
         let program = discover_browser(&roots, Path::is_file)
             .context("Install Google Chrome or Microsoft Edge to use the browser pane")?;
-        let profile = session_profile(&isolated_root()?, session);
+        let profile = shared_profile(&isolated_root()?);
         real_directory(&profile)?;
-        // Chromium otherwise forwards a second launch into the first window's process.
-        let profile_lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(profile.join("multibot-pane.lock"))?;
-        profile_lock.try_lock().context(
-            "This session's browser is already open in another window or is still closing",
-        )?;
-        match std::fs::remove_file(profile.join("DevToolsActivePort")) {
-            Ok(()) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
-        }
-        let mut command = command_line(&program, &launch_args(&profile, url));
+        let generation = LAUNCH_GENERATION.fetch_add(1, Ordering::Relaxed);
+        let nonce = format!("MBPANE-{}-{generation}", std::process::id());
+        let screen = rect.and_then(|rect| screen_rect(parent, rect));
+        let mut command = command_line(
+            &program,
+            &launch_args_with_bounds(&profile, &beacon_url(&nonce), screen),
+        );
         let program = wide(program.as_os_str());
-
-        // Assign the suspended process before it can start any Chromium children.
+        let job = shared_job()?;
+        let before = chrome_windows().into_iter().collect();
+        let window = Arc::new(LaunchWindow::default());
+        // Assign before Chromium starts children. Later launchers may forward and exit normally.
         unsafe {
-            let job = Handle(CreateJobObjectW(null(), null()));
-            if job.0.is_null() {
-                return Err(io::Error::last_os_error().into());
-            }
-            let mut limit = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            if SetInformationJobObject(
-                job.0,
-                JobObjectExtendedLimitInformation,
-                &limit as *const _ as _,
-                size_of_val(&limit) as u32,
-            ) == 0
-            {
-                return Err(io::Error::last_os_error().into());
-            }
             let mut startup = STARTUPINFOW::default();
             startup.cb = size_of_val(&startup) as u32;
             startup.dwFlags = STARTF_USESHOWWINDOW;
-            startup.wShowWindow = SW_HIDE as u16;
+            startup.wShowWindow = SW_SHOWNOACTIVATE as u16;
             let mut info = PROCESS_INFORMATION::default();
             if CreateProcessW(
                 program.as_ptr(),
@@ -187,25 +211,30 @@ impl Browser {
             let thread = Handle(info.hThread);
             let process = Process {
                 handle: info.hProcess as usize,
-                pid: info.dwProcessId,
-                _profile_lock: profile_lock,
+                parent,
+                nonce: nonce.clone(),
+                before,
+                window: window.clone(),
             };
-            if AssignProcessToJobObject(job.0, info.hProcess) == 0 {
+            if AssignProcessToJobObject(job, info.hProcess) == 0 {
                 let error = io::Error::last_os_error();
                 TerminateProcess(info.hProcess, 1);
                 return Err(error.into());
             }
             if ResumeThread(thread.0) == u32::MAX {
-                return Err(io::Error::last_os_error().into());
+                let error = io::Error::last_os_error();
+                TerminateProcess(info.hProcess, 1);
+                return Err(error.into());
             }
             Ok((
                 Self {
                     hwnd: None,
                     rect: None,
                     parent,
-                    _job: job,
+                    window,
+                    nonce: nonce.clone(),
                     cdp: crate::browser_cdp::BrowserController::new(profile),
-                    binding_id: format!("{}-{parent}-{}", std::process::id(), info.dwProcessId),
+                    binding_id: nonce,
                     bridge: None,
                 },
                 process,
@@ -229,25 +258,44 @@ impl Browser {
     pub(super) fn attach(&mut self, window: usize) -> Result<()> {
         let hwnd = window as HWND;
         unsafe {
+            if self.window.hwnd.load(Ordering::SeqCst) != window || IsWindow(hwnd) == 0 {
+                bail!("Browser window closed before docking");
+            }
             ShowWindowAsync(hwnd, SW_HIDE);
-            let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
-            let frame = WS_CAPTION
-                | WS_THICKFRAME
-                | WS_POPUP
-                | WS_SYSMENU
-                | WS_MINIMIZEBOX
-                | WS_MAXIMIZEBOX
-                | WS_VISIBLE;
-            SetLastError(0);
-            if SetWindowLongPtrW(hwnd, GWL_STYLE, ((style & !frame) | WS_CHILD) as isize) == 0
-                && GetLastError() != 0
-            {
-                return Err(io::Error::last_os_error().into());
-            }
-            SetLastError(0);
-            if SetParent(hwnd, self.parent as HWND).is_null() && GetLastError() != 0 {
-                return Err(io::Error::last_os_error().into());
-            }
+            set_window_long(
+                hwnd,
+                GWL_STYLE,
+                locked_popup_style(GetWindowLongPtrW(hwnd, GWL_STYLE) as u32) as isize,
+            )?;
+            set_window_long(
+                hwnd,
+                GWL_EXSTYLE,
+                toolwindow_ex_style(GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32) as isize,
+            )?;
+            set_window_long(hwnd, GWLP_HWNDPARENT, self.parent as isize)?;
+            let corners = 1u32;
+            let border = 0xFFFFFFFEu32;
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                &corners as *const _ as _,
+                size_of_val(&corners) as u32,
+            );
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR as u32,
+                &border as *const _ as _,
+                size_of_val(&border) as u32,
+            );
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
         }
         self.hwnd = Some(window);
         Ok(())
@@ -259,165 +307,411 @@ impl Browser {
             return;
         }
         let Some(hwnd) = self.hwnd else { return };
-        let old = self.rect.take();
-        unsafe {
-            if let Some(rect) = rect {
-                let flags = SWP_ASYNCWINDOWPOS
-                    | SWP_NOACTIVATE
-                    | SWP_NOZORDER
-                    | if old.is_none() {
-                        SWP_SHOWWINDOW | SWP_FRAMECHANGED
-                    } else {
-                        0
-                    };
-                if SetWindowPos(
-                    hwnd as HWND,
-                    null_mut(),
-                    rect.x,
-                    rect.y,
-                    rect.width,
-                    rect.height,
-                    flags,
-                ) != 0
-                {
-                    self.rect = Some(rect);
-                }
-            } else {
+        self.rect = rect;
+        if self.window.hwnd.load(Ordering::SeqCst) != hwnd {
+            return;
+        }
+        if let Some(dock) = DOCKED_BY_BROWSER_HWND.lock().unwrap().get_mut(&hwnd) {
+            dock.client_rect = rect;
+        }
+        if let Some(rect) = rect {
+            position(self.parent, hwnd, rect);
+        } else {
+            unsafe {
                 ShowWindowAsync(hwnd as HWND, SW_HIDE);
             }
         }
     }
 
     pub(super) fn visible_window(&self) -> Option<usize> {
-        self.rect.and(self.hwnd)
+        self.rect
+            .and(self.hwnd)
+            .filter(|hwnd| self.window.hwnd.load(Ordering::SeqCst) == *hwnd)
+    }
+
+    pub(super) fn close(&mut self) {
+        self.window.cancelled.store(true, Ordering::SeqCst);
+        self.place(None);
+        let hwnd = self.window.hwnd.load(Ordering::SeqCst);
+        if hwnd != 0 {
+            unsafe {
+                PostMessageW(hwnd as HWND, WM_CLOSE, 0, 0);
+            }
+        }
     }
 }
 
 impl Drop for Browser {
     fn drop(&mut self) {
+        self.close();
         if let Some((_, session_id, tx)) = self.bridge.take() {
             let _ = tx.send(multibot_proto::ClientRequest::BrowserUnbind {
                 session_id,
                 binding_id: self.binding_id.clone(),
             });
         }
-        self.place(None);
     }
 }
 
-impl Process {
-    pub(super) fn find_window(&self) -> Result<usize> {
-        struct Search {
-            pid: u32,
-            found: usize,
+fn set_window_long(hwnd: HWND, index: WINDOW_LONG_PTR_INDEX, value: isize) -> Result<()> {
+    unsafe {
+        SetLastError(0);
+        if SetWindowLongPtrW(hwnd, index, value) == 0 && GetLastError() != 0 {
+            return Err(io::Error::last_os_error().into());
         }
-        unsafe extern "system" fn find(hwnd: HWND, data: LPARAM) -> BOOL {
-            unsafe {
-                let search = &mut *(data as *mut Search);
-                let mut pid = 0;
-                GetWindowThreadProcessId(hwnd, &mut pid);
-                if pid != search.pid || !GetWindow(hwnd, GW_OWNER).is_null() {
-                    return 1;
-                }
-                let mut class = [0u16; 64];
-                let size = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
-                if size > 0
-                    && String::from_utf16_lossy(&class[..size as usize]) == "Chrome_WidgetWin_1"
-                {
-                    search.found = hwnd as usize;
-                    return 0;
-                }
-                1
-            }
-        }
+    }
+    Ok(())
+}
 
-        // Only discovery is polled, off the UI thread, and only during startup.
-        for _ in 0..120 {
-            let mut search = Search {
-                pid: self.pid,
-                found: 0,
-            };
-            unsafe {
-                EnumWindows(Some(find), &mut search as *mut Search as LPARAM);
-                if search.found != 0 {
-                    return Ok(search.found);
+fn chrome_windows() -> Vec<usize> {
+    unsafe extern "system" fn enumerate(hwnd: HWND, data: LPARAM) -> BOOL {
+        unsafe {
+            let mut class = [0u16; 64];
+            let len = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
+            if len > 0 && String::from_utf16_lossy(&class[..len as usize]) == "Chrome_WidgetWin_1" {
+                (*(data as *mut Vec<usize>)).push(hwnd as usize);
+            }
+        }
+        1
+    }
+    let mut windows = Vec::new();
+    unsafe {
+        EnumWindows(Some(enumerate), &mut windows as *mut Vec<usize> as LPARAM);
+    }
+    windows
+}
+
+impl Process {
+    pub(super) fn find_window(&self, exit_tx: oneshot::Sender<()>) -> Result<usize> {
+        let start = Instant::now();
+        // Startup-only discovery runs off the UI thread. Lifetime tracking uses WinEvents.
+        while start.elapsed() < Duration::from_secs(10) {
+            let cancelled = self.window.cancelled.load(Ordering::SeqCst);
+            for hwnd in chrome_windows() {
+                if self.before.contains(&hwnd)
+                    || DOCKED_BY_BROWSER_HWND.lock().unwrap().contains_key(&hwnd)
+                {
+                    continue;
                 }
-                if WaitForSingleObject(self.handle as HANDLE, 50) != WAIT_TIMEOUT {
-                    bail!("Browser exited before opening its window");
+                let mut rect = RECT::default();
+                let mut title = [0u16; 2048];
+                let (title, width, height, fallback) = unsafe {
+                    if GetWindowRect(hwnd as HWND, &mut rect) == 0 {
+                        continue;
+                    }
+                    let len = GetWindowTextW(hwnd as HWND, title.as_mut_ptr(), title.len() as i32);
+                    let title = String::from_utf16_lossy(&title[..len.max(0) as usize]);
+                    let fallback = !cancelled
+                        && start.elapsed() >= Duration::from_secs(2)
+                        && IsWindowVisible(hwnd as HWND) != 0
+                        && GetWindow(hwnd as HWND, GW_OWNER).is_null()
+                        && !title.is_empty()
+                        && !title.contains("MBPANE-");
+                    (
+                        title,
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
+                        fallback,
+                    )
+                };
+                if !window_matches_beacon("Chrome_WidgetWin_1", &title, &self.nonce, width, height)
+                    && !(fallback && width >= 100 && height >= 100)
+                {
+                    continue;
+                }
+                let mut docks = DOCKED_BY_BROWSER_HWND.lock().unwrap();
+                if docks.contains_key(&hwnd) {
+                    continue;
+                }
+                docks.insert(
+                    hwnd,
+                    Dock {
+                        parent: self.parent,
+                        client_rect: None,
+                        exit_tx: Some(exit_tx),
+                        window: self.window.clone(),
+                    },
+                );
+                self.window.hwnd.store(hwnd, Ordering::SeqCst);
+                drop(docks);
+                if unsafe { IsWindow(hwnd as HWND) } == 0 {
+                    DOCKED_BY_BROWSER_HWND.lock().unwrap().remove(&hwnd);
+                    self.window.hwnd.store(0, Ordering::SeqCst);
+                    bail!("Browser closed before docking");
+                }
+                if self.window.cancelled.load(Ordering::SeqCst) {
+                    unsafe {
+                        PostMessageW(hwnd as HWND, WM_CLOSE, 0, 0);
+                    }
+                    bail!("Browser opening cancelled");
+                }
+                return Ok(hwnd);
+            }
+            unsafe {
+                let mut code = 0;
+                if GetExitCodeProcess(self.handle as HANDLE, &mut code) != 0
+                    && code != STILL_ACTIVE as u32
+                    && code != 0
+                {
+                    bail!("Browser exited before opening its window (code {code})");
                 }
             }
+            std::thread::sleep(Duration::from_millis(50));
         }
         bail!("Browser window did not open")
-    }
-
-    pub(super) fn wait(&self) {
-        unsafe { WaitForSingleObject(self.handle as HANDLE, INFINITE) };
     }
 }
 
 type ShortcutSender = UnboundedSender<&'static str>;
-thread_local! {
-    static VISIBLE: RefCell<HashMap<usize, (usize, ShortcutSender)>> = RefCell::default();
-    static HELD: RefCell<HashSet<u32>> = RefCell::default();
+struct Dock {
+    parent: usize,
+    client_rect: Option<BrowserPaneRect>,
+    exit_tx: Option<oneshot::Sender<()>>,
+    window: Arc<LaunchWindow>,
+}
+static DOCKED_BY_BROWSER_HWND: LazyLock<Mutex<HashMap<usize, Dock>>> =
+    LazyLock::new(Mutex::default);
+struct VisibleDock {
+    browser_hwnd: usize,
+    client_rect: BrowserPaneRect,
+    sender: ShortcutSender,
+}
+static VISIBLE: LazyLock<Mutex<HashMap<usize, VisibleDock>>> = LazyLock::new(Mutex::default);
+static HOOK_THREAD: OnceLock<Result<u32, String>> = OnceLock::new();
+const UPDATE_HOOKS: u32 = WM_APP + 2;
+thread_local! { static HELD: RefCell<HashSet<u32>> = RefCell::default(); }
+
+fn screen_rect(parent: usize, rect: BrowserPaneRect) -> Option<BrowserPaneRect> {
+    let mut origin = POINT::default();
+    if unsafe { ClientToScreen(parent as HWND, &mut origin) } == 0 {
+        return None;
+    }
+    Some(client_to_screen_rect(rect, origin.x, origin.y))
+}
+
+fn position(parent: usize, browser: usize, rect: BrowserPaneRect) {
+    unsafe {
+        if IsIconic(parent as HWND) != 0 || IsWindowVisible(parent as HWND) == 0 {
+            ShowWindowAsync(browser as HWND, SW_HIDE);
+            return;
+        }
+        let Some(screen) = screen_rect(parent, rect) else {
+            return;
+        };
+        if IsZoomed(browser as HWND) != 0 {
+            ShowWindowAsync(browser as HWND, SW_RESTORE);
+        }
+        SetWindowPos(
+            browser as HWND,
+            null_mut(),
+            screen.x,
+            screen.y,
+            screen.width,
+            screen.height,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_ASYNCWINDOWPOS,
+        );
+    }
+}
+
+fn update_hooks() {
+    if let Some(Ok(thread)) = HOOK_THREAD.get() {
+        unsafe {
+            PostThreadMessageW(*thread, UPDATE_HOOKS, 0, 0);
+        }
+    }
+}
+
+fn hook_thread() -> Result<u32> {
+    HOOK_THREAD
+        .get_or_init(|| {
+            let (ready, started) = std::sync::mpsc::sync_channel(1);
+            std::thread::Builder::new()
+                .name("browser-window-hooks".into())
+                .spawn(move || unsafe {
+                    let mut message = MSG::default();
+                    PeekMessageW(&mut message, null_mut(), 0, 0, PM_NOREMOVE);
+                    let process = GetCurrentProcessId();
+                    let events = [
+                        (EVENT_OBJECT_LOCATIONCHANGE, process),
+                        (EVENT_SYSTEM_MINIMIZESTART, process),
+                        (EVENT_SYSTEM_MINIMIZEEND, process),
+                        (EVENT_SYSTEM_MOVESIZEEND, 0),
+                        (EVENT_OBJECT_DESTROY, 0),
+                    ];
+                    let mut hooks = Vec::new();
+                    for (event, pid) in events {
+                        let hook = SetWinEventHook(
+                            event,
+                            event,
+                            null_mut(),
+                            Some(win_event),
+                            pid,
+                            0,
+                            WINEVENT_OUTOFCONTEXT,
+                        );
+                        if hook.is_null() {
+                            let _ = ready.send(Err(io::Error::last_os_error().to_string()));
+                            for hook in hooks {
+                                UnhookWinEvent(hook);
+                            }
+                            return;
+                        }
+                        hooks.push(hook);
+                    }
+                    let _ = ready.send(Ok(GetCurrentThreadId()));
+                    let mut keyboard_hook: HHOOK = null_mut();
+                    while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
+                        if message.message == UPDATE_HOOKS {
+                            let needed = VISIBLE.lock().unwrap().keys().any(|parent| {
+                                IsIconic(*parent as HWND) == 0
+                                    && IsWindowVisible(*parent as HWND) != 0
+                            });
+                            if needed && keyboard_hook.is_null() {
+                                keyboard_hook = SetWindowsHookExW(
+                                    WH_KEYBOARD_LL,
+                                    Some(keyboard),
+                                    GetModuleHandleW(null()),
+                                    0,
+                                );
+                                if keyboard_hook.is_null() {
+                                    eprintln!(
+                                        "Could not install browser shortcuts: {}",
+                                        io::Error::last_os_error()
+                                    );
+                                }
+                            } else if !needed && !keyboard_hook.is_null() {
+                                UnhookWindowsHookEx(keyboard_hook);
+                                keyboard_hook = null_mut();
+                                HELD.with(|held| held.borrow_mut().clear());
+                            }
+                        } else {
+                            TranslateMessage(&message);
+                            DispatchMessageW(&message);
+                        }
+                    }
+                    if !keyboard_hook.is_null() {
+                        UnhookWindowsHookEx(keyboard_hook);
+                    }
+                    for hook in hooks {
+                        UnhookWinEvent(hook);
+                    }
+                })
+                .map_err(|error| error.to_string())?;
+            started.recv().map_err(|error| error.to_string())?
+        })
+        .as_ref()
+        .copied()
+        .map_err(|error| anyhow::anyhow!(error.clone()))
+}
+
+unsafe extern "system" fn win_event(
+    _: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    object: i32,
+    child: i32,
+    _: u32,
+    _: u32,
+) {
+    if matches!(event, EVENT_SYSTEM_MOVESIZEEND | EVENT_OBJECT_DESTROY) {
+        let mut docks = DOCKED_BY_BROWSER_HWND.lock().unwrap();
+        let Some(dock) = docks.get(&(hwnd as usize)) else {
+            return;
+        };
+        if event == EVENT_OBJECT_DESTROY {
+            if object != OBJID_WINDOW || child != 0 {
+                return;
+            }
+            let mut dock = docks.remove(&(hwnd as usize)).unwrap();
+            dock.window.hwnd.store(0, Ordering::SeqCst);
+            drop(docks);
+            let mut visible = VISIBLE.lock().unwrap();
+            if visible
+                .get(&dock.parent)
+                .is_some_and(|dock| dock.browser_hwnd == hwnd as usize)
+            {
+                visible.remove(&dock.parent);
+            }
+            drop(visible);
+            update_hooks();
+            if let Some(tx) = dock.exit_tx.take() {
+                let _ = tx.send(());
+            }
+        } else {
+            let (parent, rect) = (dock.parent, dock.client_rect);
+            drop(docks);
+            if let Some(rect) = rect {
+                position(parent, hwnd as usize, rect);
+            }
+        }
+        return;
+    }
+    if object != OBJID_WINDOW || child != 0 {
+        return;
+    }
+    let visible = VISIBLE
+        .lock()
+        .unwrap()
+        .get(&(hwnd as usize))
+        .map(|dock| (dock.browser_hwnd, dock.client_rect));
+    let Some((browser, rect)) = visible else {
+        return;
+    };
+    position(hwnd as usize, browser, rect);
+    update_hooks();
 }
 
 pub(crate) fn has_focus(parent: usize) -> bool {
-    VISIBLE.with(|entries| {
-        let entries = entries.borrow();
-        let Some((hwnd, _)) = entries.get(&parent) else {
-            return false;
-        };
-        unsafe {
-            let mut info = GUITHREADINFO {
-                cbSize: size_of::<GUITHREADINFO>() as u32,
-                ..Default::default()
-            };
-            GetGUIThreadInfo(0, &mut info) != 0
-                && (info.hwndFocus == *hwnd as HWND || IsChild(*hwnd as HWND, info.hwndFocus) != 0)
-        }
+    let fg = unsafe { GetForegroundWindow() };
+    VISIBLE.lock().unwrap().get(&parent).is_some_and(|dock| {
+        fg == dock.browser_hwnd as HWND || unsafe { IsChild(dock.browser_hwnd as HWND, fg) } != 0
     })
 }
 
 pub(super) struct Shortcuts {
     parent: usize,
-    hook: HHOOK,
     sender: ShortcutSender,
 }
-
 impl Shortcuts {
     pub(super) fn new(parent: usize, sender: ShortcutSender) -> Result<Self> {
-        let hook = unsafe {
-            SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), GetModuleHandleW(null()), 0)
-        };
-        if hook.is_null() {
-            return Err(io::Error::last_os_error().into());
-        }
-        Ok(Self {
-            parent,
-            hook,
-            sender,
-        })
+        hook_thread()?;
+        Ok(Self { parent, sender })
     }
-
     pub(super) fn set_visible(&self, hwnd: Option<usize>) {
-        VISIBLE.with(|entries| {
-            let mut entries = entries.borrow_mut();
-            if let Some(hwnd) = hwnd {
-                entries.insert(self.parent, (hwnd, self.sender.clone()));
-            } else {
-                entries.remove(&self.parent);
-            }
+        let next = hwnd.and_then(|hwnd| {
+            DOCKED_BY_BROWSER_HWND
+                .lock()
+                .unwrap()
+                .get(&hwnd)
+                .and_then(|dock| dock.client_rect)
+                .map(|rect| (hwnd, rect))
         });
+        let mut entries = VISIBLE.lock().unwrap();
+        if let Some((hwnd, rect)) = next {
+            if let Some(dock) = entries.get_mut(&self.parent)
+                && dock.browser_hwnd == hwnd
+            {
+                dock.client_rect = rect;
+                return;
+            }
+            entries.insert(
+                self.parent,
+                VisibleDock {
+                    browser_hwnd: hwnd,
+                    client_rect: rect,
+                    sender: self.sender.clone(),
+                },
+            );
+        } else {
+            entries.remove(&self.parent);
+        }
+        drop(entries);
+        update_hooks();
     }
 }
-
 impl Drop for Shortcuts {
     fn drop(&mut self) {
         self.set_visible(None);
-        if VISIBLE.with(|entries| entries.borrow().is_empty()) {
-            HELD.with(|keys| keys.borrow_mut().clear());
-        }
-        unsafe { UnhookWindowsHookEx(self.hook) };
     }
 }
 
@@ -433,20 +727,28 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                 if HELD.with(|keys| keys.borrow().contains(&key)) {
                     return 1;
                 }
-                let parent = GetForegroundWindow() as usize;
-                if has_focus(parent)
+                let fg = GetForegroundWindow() as usize;
+                let parent = DOCKED_BY_BROWSER_HWND
+                    .lock()
+                    .unwrap()
+                    .get(&fg)
+                    .and_then(|dock| dock.client_rect.map(|_| dock.parent));
+                let sender = parent.and_then(|parent| {
+                    VISIBLE
+                        .lock()
+                        .unwrap()
+                        .get(&parent)
+                        .filter(|dock| dock.browser_hwnd == fg)
+                        .map(|dock| dock.sender.clone())
+                });
+                if let Some(sender) = sender
                     && let Some(chord) = crate::shell_host::registered_native_shortcut(
                         key,
                         GetAsyncKeyState(0x11) < 0,
                         GetAsyncKeyState(0x12) < 0,
                         GetAsyncKeyState(0x10) < 0,
                     )
-                    && VISIBLE.with(|entries| {
-                        entries
-                            .borrow()
-                            .get(&parent)
-                            .is_some_and(|(_, sender)| sender.send(chord.gpui_key).is_ok())
-                    })
+                    && sender.send(chord.gpui_key).is_ok()
                 {
                     HELD.with(|keys| keys.borrow_mut().insert(key));
                     return 1;
@@ -464,13 +766,13 @@ pub(super) fn focus(hwnd: usize) {
         let current = GetCurrentThreadId();
         let attached =
             thread != 0 && thread != current && AttachThreadInput(current, thread, 1) != 0;
+        SetForegroundWindow(hwnd);
         SetFocus(hwnd);
         if attached {
             AttachThreadInput(current, thread, 0);
         }
     }
 }
-
 // Include Chromium's software-composited content in the client image.
 const RENDER_FULL_CONTENT: u32 = 0x2;
 

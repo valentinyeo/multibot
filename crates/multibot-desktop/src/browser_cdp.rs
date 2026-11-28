@@ -14,6 +14,7 @@ use tokio_tungstenite::{
 pub(crate) struct BrowserController {
     profile: PathBuf,
     active_target: Arc<Mutex<Option<String>>>,
+    window_id: Arc<Mutex<Option<i64>>>,
 }
 
 impl BrowserController {
@@ -21,7 +22,82 @@ impl BrowserController {
         Self {
             profile,
             active_target: Arc::new(Mutex::new(None)),
+            window_id: Arc::new(Mutex::new(None)),
         }
+    }
+
+    async fn connect(&self) -> Result<Cdp> {
+        let contents = tokio::fs::read_to_string(self.profile.join("DevToolsActivePort"))
+            .await
+            .context("Browser CDP endpoint is not ready")?;
+        let (port, path) =
+            parse_devtools_active_port(&contents).context("Invalid DevToolsActivePort")?;
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(2 * 1024 * 1024))
+            .max_frame_size(Some(2 * 1024 * 1024));
+        // The browser UUID pins this connection to the launched process, not just a reusable port.
+        let (socket, _) =
+            connect_async_with_config(format!("ws://127.0.0.1:{port}{path}"), Some(config), true)
+                .await?;
+        Ok(Cdp { socket, next_id: 0 })
+    }
+
+    pub(crate) async fn bind_beacon_and_navigate(
+        &self,
+        nonce: &str,
+        target_url: &str,
+    ) -> Result<()> {
+        ensure!(!nonce.is_empty(), "Missing browser beacon");
+        let url = if target_url.trim().is_empty() {
+            "about:blank"
+        } else {
+            target_url
+        };
+        validate_url(url)?;
+        let mut active = self.active_target.lock().await;
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                if let Ok(mut cdp) = self.connect().await
+                    && let Ok(targets) = cdp.call("Target.getTargets", json!({}), None).await
+                    && let Some(target) = targets["targetInfos"]
+                        .as_array()
+                        .and_then(|pages| beacon_target(pages, nonce))
+                {
+                    let id = target["targetId"]
+                        .as_str()
+                        .context("Missing beacon target ID")?;
+                    let attached = cdp
+                        .call(
+                            "Target.attachToTarget",
+                            json!({"targetId": id, "flatten": true}),
+                            None,
+                        )
+                        .await?;
+                    let session = attached["sessionId"]
+                        .as_str()
+                        .context("Missing CDP session")?;
+                    let result = cdp
+                        .call("Page.navigate", json!({"url": url}), Some(session))
+                        .await?;
+                    if let Some(error) = result["errorText"].as_str() {
+                        bail!("Navigation failed: {error}");
+                    }
+                    let window = cdp
+                        .call("Browser.getWindowForTarget", json!({"targetId": id}), None)
+                        .await?;
+                    *self.window_id.lock().await = Some(
+                        window["windowId"]
+                            .as_i64()
+                            .context("Missing browser window ID")?,
+                    );
+                    *active = Some(id.to_owned());
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        })
+        .await
+        .context("Could not find this pane's Chrome tab")?
     }
 
     pub(crate) async fn execute(&self, command: BrowserCommand) -> BrowserResponse {
@@ -46,24 +122,30 @@ impl BrowserController {
     async fn run(&self, command: BrowserCommand) -> Result<BrowserResponse> {
         // Serializing requests also makes tab activation deterministic for this pane only.
         let mut active = self.active_target.lock().await;
-        let contents = tokio::fs::read_to_string(self.profile.join("DevToolsActivePort"))
-            .await
-            .context("Browser CDP endpoint is not ready")?;
-        let (port, path) =
-            parse_devtools_active_port(&contents).context("Invalid DevToolsActivePort")?;
-        let config = WebSocketConfig::default()
-            .max_message_size(Some(2 * 1024 * 1024))
-            .max_frame_size(Some(2 * 1024 * 1024));
-        // The browser UUID pins this connection to the launched process, not just a reusable port.
-        let (socket, _) =
-            connect_async_with_config(format!("ws://127.0.0.1:{port}{path}"), Some(config), true)
-                .await?;
-        let mut cdp = Cdp { socket, next_id: 0 };
+        let mut cdp = self.connect().await?;
         let targets = cdp.call("Target.getTargets", json!({}), None).await?;
         let pages = targets["targetInfos"]
             .as_array()
             .context("Missing CDP targets")?;
-        let tabs: Vec<BrowserTarget> = pages
+        let window_id = self
+            .window_id
+            .lock()
+            .await
+            .context("This pane's browser tab is not bound yet")?;
+        let mut window_pages = Vec::new();
+        for page in pages.iter().filter(|page| page["type"] == "page") {
+            let owner = cdp
+                .call(
+                    "Browser.getWindowForTarget",
+                    json!({"targetId": page["targetId"]}),
+                    None,
+                )
+                .await;
+            if owner.is_ok_and(|owner| owner["windowId"].as_i64() == Some(window_id)) {
+                window_pages.push(page.clone());
+            }
+        }
+        let tabs: Vec<BrowserTarget> = window_pages
             .iter()
             .filter(|p| p["type"] == "page")
             .filter_map(|p| {
@@ -150,6 +232,21 @@ impl BrowserController {
         };
         Ok(BrowserResponse::Value { value })
     }
+}
+
+fn beacon_target<'a>(pages: &'a [Value], nonce: &str) -> Option<&'a Value> {
+    if nonce.is_empty() {
+        return None;
+    }
+    pages.iter().find(|page| {
+        page["type"] == "page"
+            && page["targetId"].is_string()
+            && ["title", "url"].iter().any(|key| {
+                page[*key]
+                    .as_str()
+                    .is_some_and(|value| value.contains(nonce))
+            })
+    })
 }
 
 fn validate_url(url: &str) -> Result<()> {
@@ -255,6 +352,22 @@ mod tests {
     use super::*;
     use tokio::net::TcpListener;
 
+    #[test]
+    fn beacon_matches_only_its_page_target() {
+        let pages = vec![
+            json!({"targetId":"worker", "type":"service_worker", "title":"MBPANE-a"}),
+            json!({"targetId":"other", "type":"page", "title":"MBPANE-b"}),
+            json!({"targetId":"ours", "type":"page", "title":"MBPANE-a - Chrome"}),
+        ];
+        assert_eq!(
+            beacon_target(&pages, "MBPANE-a").unwrap()["targetId"],
+            "ours"
+        );
+        assert!(beacon_target(&pages, "").is_none());
+        assert!(beacon_target(&pages, "MBPANE-c").is_none());
+        assert!(beacon_target(&[json!({"targetId":"url", "type":"page", "url":"data:text/html,<title>MBPANE-a</title>"})], "MBPANE-a").is_some());
+    }
+
     #[tokio::test]
     async fn loopback_cdp_commands_and_target_isolation() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -276,7 +389,10 @@ mod tests {
                         let method = req["method"].as_str().unwrap();
                         let result = match method {
                             "Target.getTargets" => {
-                                json!({"targetInfos":[{"targetId":"page-a","type":"page","url":"about:blank","title":"A"}]})
+                                json!({"targetInfos":[{"targetId":"page-b","type":"page","url":"about:blank","title":"Other chat"},{"targetId":"page-a","type":"page","url":"about:blank","title":"MBPANE-test"}]})
+                            }
+                            "Browser.getWindowForTarget" => {
+                                json!({"windowId": if req["params"]["targetId"] == "page-a" { 1 } else { 2 }})
                             }
                             "Target.attachToTarget" => {
                                 assert_eq!(req["params"]["targetId"], "page-a");
@@ -320,6 +436,20 @@ mod tests {
             }
         });
         let controller = BrowserController::new(dir.clone());
+        controller
+            .bind_beacon_and_navigate("MBPANE-test", "https://example.com")
+            .await
+            .unwrap();
+        assert_eq!(
+            controller.execute(BrowserCommand::Tabs).await,
+            BrowserResponse::Tabs {
+                tabs: vec![BrowserTarget {
+                    target_id: "page-a".into(),
+                    url: "about:blank".into(),
+                    title: "MBPANE-test".into()
+                }]
+            }
+        );
         assert_eq!(
             controller
                 .execute(BrowserCommand::Navigate {
