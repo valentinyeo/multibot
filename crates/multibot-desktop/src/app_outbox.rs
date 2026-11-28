@@ -415,12 +415,13 @@ impl MultibotView {
             cx.notify();
             return;
         }
-        let sent = tx
-            .send(ClientRequest::InterruptSession {
-                session_id: sid.into(),
-                agent,
-            })
-            .is_ok()
+        let sent = (agent == AgentKind::Antigravity
+            || tx
+                .send(ClientRequest::InterruptSession {
+                    session_id: sid.into(),
+                    agent,
+                })
+                .is_ok())
             && tx
                 .send(ClientRequest::SendPrompt {
                     session_id: sid.into(),

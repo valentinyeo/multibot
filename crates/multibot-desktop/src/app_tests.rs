@@ -10125,3 +10125,28 @@ fn sparse_history_backfill_stops_at_visible_count_eof_or_page_cap(cx: &mut TestA
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+fn antigravity_background_worker_sends_directly_and_force_send_never_interrupts(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_view_with_entity(cx);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    cx.update_window(handle, |_, _, cx| {
+        view.update(cx, |v, cx| {
+            let mut session = make_session("agy-delivery", AgentKind::Antigravity, "AGY", false);
+            session.subworkers = vec![multibot_proto::SubworkerInfo { pid: 101, ..Default::default() }];
+            v.connection.daemon_tx = Some(tx);
+            v.connection.sessions = vec![session.clone()];
+            v.select_session(session.clone(), cx);
+            while rx.try_recv().is_ok() {}
+            v.send_or_queue_prompt(&session, "direct".into(), "hello".into());
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "hello"));
+            assert!(v.outbox.chat_outbox.entries.is_empty());
+            session.working = true;
+            v.send_or_queue_prompt(&session, "queued".into(), "urgent".into());
+            let id = v.outbox.chat_outbox.entries[0].id.clone();
+            v.force_send_queued_entry(&id, cx);
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, agent: AgentKind::Antigravity, .. }) if text == "urgent"));
+            assert!(rx.try_recv().is_err(), "Antigravity must not be interrupted");
+        });
+    }).unwrap();
+}

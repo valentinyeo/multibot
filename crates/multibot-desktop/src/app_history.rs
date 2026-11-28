@@ -123,6 +123,7 @@ impl MultibotView {
             .entry(key.clone())
             .or_default();
         pending.push(PendingSentMessage {
+            sent_at_ms: now_unix_ms(),
             awaiting_reply: true,
             message: ChatMessage {
                 id: id.clone(),

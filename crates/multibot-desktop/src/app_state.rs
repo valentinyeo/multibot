@@ -29,6 +29,7 @@ pub(crate) struct SessionSelectionState {
 }
 
 pub(crate) struct PendingSentMessage {
+    pub(crate) sent_at_ms: i64,
     pub(crate) message: ChatMessage,
     pub(crate) awaiting_reply: bool,
     pub(crate) baseline_server_user_count: usize,

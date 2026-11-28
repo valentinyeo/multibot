@@ -920,37 +920,70 @@ impl MultibotView {
                     );
                 }
 
+                if is_user
+                    && failed_send.is_none()
+                    && let Some(pending) = self
+                        .selection
+                        .selected_session
+                        .as_ref()
+                        .and_then(|session| {
+                            self.history
+                                .pending_sent_messages
+                                .get(&self.session_key_for(session))
+                        })
+                        .and_then(|pending| pending.iter().find(|p| p.message.id == msg.id))
+                {
+                    let overdue = now_unix_ms() - pending.sent_at_ms >= 10_000;
+                    let resend_id = msg.id.clone();
+                    msg_wrapper = msg_wrapper.child(
+                        h_flex().w_full().justify_end().child(
+                            div()
+                                .id(SharedString::from(format!("pending-delivery-{orig_idx}")))
+                                .test_support()
+                                .when(overdue, |el| {
+                                    el.role(Role::Button)
+                                        .px_3()
+                                        .py_1()
+                                        .rounded(RADIUS_CHIP)
+                                        .bg(rgba(0xD9A44118))
+                                        .cursor_pointer()
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.resend_pending_message(&resend_id, cx);
+                                            }),
+                                        )
+                                })
+                                .child(
+                                    Label::new(if overdue {
+                                        "Not received yet · Resend"
+                                    } else {
+                                        "Sending…"
+                                    })
+                                    .text_xs()
+                                    .text_color(if overdue {
+                                        rgb(0xD9A441).into()
+                                    } else {
+                                        theme::text_muted()
+                                    }),
+                                ),
+                        ),
+                    );
+                }
+
                 msg_col = msg_col.child(msg_wrapper);
             }
         }
 
         let mut live_activity = None;
-        if is_working {
+        if is_working || self.has_active_subworkers() {
             let subworkers = self
                 .selection
                 .selected_session
                 .as_ref()
                 .map(|session| session.subworkers.as_slice())
                 .unwrap_or_default();
-            let label = activity_label(&self.history.messages);
-            let label = if subworkers.is_empty() {
-                label
-            } else {
-                let workers = format!(
-                    "{} {}",
-                    subworkers.len(),
-                    if subworkers.len() == 1 {
-                        "worker"
-                    } else {
-                        "workers"
-                    }
-                );
-                if label == "Thinking" {
-                    format!("{workers} running")
-                } else {
-                    format!("{workers} · {label}")
-                }
-            };
             let turn_start = self
                 .history
                 .messages
@@ -963,6 +996,48 @@ impl MultibotView {
                     .iter()
                     .any(|block| matches!(block, MessageBlock::ToolUse { .. }))
             });
+            let pending = self
+                .selection
+                .selected_session
+                .as_ref()
+                .and_then(|session| {
+                    self.history
+                        .pending_sent_messages
+                        .get(&self.session_key_for(session))
+                })
+                .and_then(|pending| {
+                    pending.iter().find(|p| {
+                        self.history
+                            .messages
+                            .get(turn_start.saturating_sub(1))
+                            .is_some_and(|message| message.id == p.message.id)
+                    })
+                });
+            let parent_label = if let Some(pending) = pending.filter(|_| !has_activity) {
+                if now_unix_ms() - pending.sent_at_ms >= 10_000 {
+                    "Waiting for agent to receive…".into()
+                } else {
+                    "Sending to agent…".into()
+                }
+            } else {
+                activity_label(&self.history.messages)
+            };
+            let workers = format!(
+                "{} {}",
+                subworkers.len(),
+                if subworkers.len() == 1 {
+                    "worker"
+                } else {
+                    "workers"
+                }
+            );
+            let label = if !is_working {
+                format!("Ready to chat · {workers} running")
+            } else if subworkers.is_empty() {
+                parent_label
+            } else {
+                format!("{parent_label} · {workers}")
+            };
             let expanded = self.chat_state.live_activity_expanded;
             let dot = |idx: u8| {
                 div()
@@ -1006,18 +1081,30 @@ impl MultibotView {
                         !this.chat_state.live_activity_expanded;
                     cx.notify();
                 }))
-                .child(
-                    h_flex()
-                        .id("chat-busy-dots")
-                        .test_support()
-                        .flex_shrink_0()
-                        .h(px(14.0))
-                        .items_center()
-                        .gap_1p5()
-                        .child(dot(0))
-                        .child(dot(1))
-                        .child(dot(2)),
-                )
+                .when(is_working, |el| {
+                    el.child(
+                        h_flex()
+                            .id("chat-busy-dots")
+                            .test_support()
+                            .flex_shrink_0()
+                            .h(px(14.0))
+                            .items_center()
+                            .gap_1p5()
+                            .child(dot(0))
+                            .child(dot(1))
+                            .child(dot(2)),
+                    )
+                })
+                .when(!is_working, |el| {
+                    el.child(
+                        div()
+                            .id("chat-worker-status-dot")
+                            .test_support()
+                            .size(px(5.0))
+                            .rounded(RADIUS_CHIP)
+                            .bg(theme::text_muted()),
+                    )
+                })
                 .child(
                     Label::new(label)
                         .id("chat-activity-label")
