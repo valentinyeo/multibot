@@ -851,7 +851,7 @@ impl MultibotView {
 mod tests {
     use super::*;
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::TestAppContext;
+    use gpui_kit::{AppContext, TestAppContext};
 
     /// A GPUI Kit `Medium` button (the size the nav tabs use) insets its label
     /// by `px_2p5`, so its label starts this far inside the button's left edge.
