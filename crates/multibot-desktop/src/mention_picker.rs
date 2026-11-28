@@ -216,7 +216,7 @@ pub(crate) fn mention_url(key: &str) -> String {
     format!("multibot-session://{hex}")
 }
 
-fn key_from_url(url: &str) -> Option<String> {
+pub(crate) fn key_from_url(url: &str) -> Option<String> {
     let hex = url.strip_prefix("multibot-session://")?;
     if hex.len() > 4096 || hex.len() % 2 != 0 {
         return None;
@@ -251,6 +251,51 @@ pub(crate) fn render_mentions(text: &str, targets: &[MentionTarget]) -> String {
         rendered.replace_range(mention.range, &replacement);
     }
     rendered
+}
+
+pub(crate) fn bare_mention(
+    label: SharedString,
+    key: &str,
+    line_height: gpui_kit::Pixels,
+) -> gpui_kit::Div {
+    let agent = parse_session_key(key).map(|(_, agent, _)| agent);
+    let kind = match agent {
+        Some("claude") => AgentKind::Claude,
+        Some("codex") => AgentKind::Codex,
+        Some("antigravity") => AgentKind::Antigravity,
+        Some("pi") => AgentKind::Pi,
+        Some("cursor") => AgentKind::Cursor,
+        _ => AgentKind::Shell,
+    };
+    let tint = MultibotView::agent_color(kind);
+    let initial = label
+        .trim_start_matches('@')
+        .chars()
+        .next()
+        .unwrap_or('B')
+        .to_uppercase()
+        .to_string();
+    h_flex()
+        .items_center()
+        .gap_1()
+        .h(line_height)
+        .line_height(line_height)
+        .text_color(tint)
+        .child(
+            div()
+                .size(px(14.0))
+                .flex_shrink_0()
+                .rounded_full()
+                .bg(tint.opacity(0.16))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(9.0))
+                .line_height(px(14.0))
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .child(initial),
+        )
+        .child(label)
 }
 
 impl MultibotView {
@@ -394,7 +439,9 @@ impl MultibotView {
         let input = self.inputs.prompt_input.read(cx);
         let mut text = input.value().to_string();
         for span in input.tokens().iter().rev() {
-            if let Some((_, _, sid)) = parse_session_key(span.token().id()) {
+            if !span.token().id().starts_with("skill:")
+                && let Some((_, _, sid)) = parse_session_key(span.token().id())
+            {
                 text.replace_range(span.range(), &format!("{}{{{sid}}}", span.token().text()));
             }
         }

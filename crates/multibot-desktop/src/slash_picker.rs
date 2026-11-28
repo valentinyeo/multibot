@@ -377,6 +377,107 @@ pub fn detect_trigger(text: &str, caret_byte: usize, agent: AgentKind) -> Option
     }
 }
 
+/// Slash commands in prose, excluding code, links and filesystem paths.
+pub(crate) fn skill_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let urls = crate::external_url::url_ranges(text);
+    let mut ranges = Vec::new();
+    let mut fence = None;
+    let mut ticks = 0;
+    let mut brackets = 0usize;
+    let mut destination = 0usize;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start_matches(' ');
+        let indent = line.len() - trimmed.len();
+        let marker = trimmed.as_bytes().first().copied().unwrap_or_default();
+        let count = trimmed.bytes().take_while(|b| *b == marker).count();
+        if indent <= 3 && matches!(marker, b'`' | b'~') && count >= 3 && ticks == 0 {
+            match fence {
+                Some((open, length))
+                    if open == marker && count >= length && trimmed[count..].trim().is_empty() =>
+                {
+                    fence = None
+                }
+                None => fence = Some((marker, count)),
+                _ => {}
+            }
+            offset += line.len();
+            continue;
+        }
+        if fence.is_some() || indent >= 4 || line.starts_with('\t') {
+            offset += line.len();
+            continue;
+        }
+        let mut i = 0;
+        while i < line.len() {
+            let ch = line[i..].chars().next().unwrap();
+            if ch == '\\' {
+                i += 1;
+                i += line[i..].chars().next().map_or(0, char::len_utf8);
+                continue;
+            }
+            if ch == '`' {
+                let count = line[i..].bytes().take_while(|b| *b == b'`').count();
+                if ticks == 0 {
+                    ticks = count;
+                } else if ticks == count {
+                    ticks = 0;
+                }
+                i += count;
+                continue;
+            }
+            if ticks == 0 {
+                match ch {
+                    '[' => brackets += 1,
+                    ']' => brackets = brackets.saturating_sub(1),
+                    '(' if destination > 0 || (i > 0 && line.as_bytes()[i - 1] == b']') => {
+                        destination += 1
+                    }
+                    ')' => destination = destination.saturating_sub(1),
+                    '/' if brackets == 0
+                        && destination == 0
+                        && (offset + i == 0
+                            || text[..offset + i]
+                                .chars()
+                                .next_back()
+                                .is_some_and(char::is_whitespace))
+                        && !urls.iter().any(|r| r.contains(&(offset + i))) =>
+                    {
+                        let start = i;
+                        i += 1;
+                        while i < line.len()
+                            && (line.as_bytes()[i].is_ascii_alphanumeric()
+                                || matches!(line.as_bytes()[i], b'-' | b'_' | b':'))
+                        {
+                            i += 1;
+                        }
+                        if i > start + 1
+                            && line.as_bytes()[start + 1].is_ascii_alphanumeric()
+                            && !line[i..].starts_with(['/', '\\'])
+                        {
+                            ranges.push(offset + start..offset + i);
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            i += ch.len_utf8();
+        }
+        offset += line.len();
+    }
+    ranges
+}
+
+pub(crate) fn render_skills(text: &str) -> String {
+    let mut rendered = text.to_string();
+    for range in skill_ranges(text).into_iter().rev() {
+        let name = &text[range.start + 1..range.end];
+        rendered.replace_range(range, &format!("[/{name}](multibot-skill://{name})"));
+    }
+    rendered
+}
+
 /// 7-tier fuzzy/prefix command scorer matching legacy `chat_complete.zig`.
 /// Lower score is better (`0` = exact match, `6` = empty query).
 pub fn score_command(name: &str, description: &str, query: &str) -> Option<u16> {
@@ -676,12 +777,31 @@ impl MultibotView {
             end_byte: current.len(),
             query: String::new(),
         });
-        let (next_text, _caret) = insert_slash_command(&current, &trigger, &item);
+        let (next_text, caret) = insert_slash_command(&current, &trigger, &item);
+        let mut start = clamp_char_boundary(&current, trigger.start_byte);
+        let mut end = clamp_char_boundary(&current, trigger.end_byte).max(start);
+        if current[end..].starts_with(' ') {
+            end += 1;
+        }
+        let leading_space = next_text[start..caret].starts_with(' ');
+        let label = next_text[start..caret].trim().to_string();
+        let token =
+            gpui_kit::component::input::InlineToken::new(format!("skill:{}", item.name), label);
         self.slash_picker_state.promote_mru(&item.name);
         self.slash_picker_state.close();
         self.inputs.prompt_input.update(cx, |state, cx| {
-            state.select_all(window, cx);
-            state.replace(next_text, window, cx);
+            if leading_space {
+                state.set_selected_range(start..start, cx);
+                state.replace(" ", window, cx);
+                start += 1;
+                end += 1;
+            }
+            if state
+                .replace_range_with_token(start..end, token, window, cx)
+                .is_ok()
+            {
+                state.replace(" ", window, cx);
+            }
             state.focus(window, cx);
         });
         cx.notify();
@@ -877,6 +997,42 @@ impl MultibotView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_skills_are_linked_only_in_prose() {
+        let text = "/commit then /poteto-mode and /foo_bar, café /plan.";
+        let labels: Vec<_> = skill_ranges(text).into_iter().map(|r| &text[r]).collect();
+        assert_eq!(labels, ["/commit", "/poteto-mode", "/foo_bar", "/plan"]);
+        assert_eq!(
+            render_skills("/foo_bar"),
+            "[/foo_bar](multibot-skill://foo_bar)"
+        );
+        for text in [
+            "https://example.com/foo/bar http://example.com/plan",
+            "`/plan` and `` `/commit` ``",
+            "```rust\n/plan\n```",
+            "~~~\n/plan\n~~~",
+            "````\n```\n/plan\n````",
+            "`multiline\n/plan`",
+            "[label /plan](https://example.com/foo/bar)",
+            "[label]( /plan)",
+            "    /plan\n\t/commit",
+            "\\/plan /usr/bin foo/plan //host/path",
+        ] {
+            assert!(skill_ranges(text).is_empty(), "{text:?}");
+            assert_eq!(render_skills(text), text);
+        }
+        let text = "`/plan` /commit\n~~~\n/foo_bar\n~~~\n/poteto-mode";
+        assert_eq!(
+            skill_ranges(text)
+                .into_iter()
+                .map(|r| &text[r])
+                .collect::<Vec<_>>(),
+            ["/commit", "/poteto-mode"]
+        );
+        let once = render_skills("/plan");
+        assert_eq!(render_skills(&once), once);
+    }
 
     #[test]
     fn trigger_detection_gates_slash_and_dollar_by_agent() {

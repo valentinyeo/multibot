@@ -674,7 +674,20 @@ impl MultibotView {
                         .child(
                             div().id("prompt-input").test_support().flex_1().min_w_0().child(
                                 Textarea::new(&self.inputs.prompt_input)
-                                    .appearance(false),
+                                    .appearance(false)
+                                    .token(|ctx, _, _| {
+                                        let token = ctx.token();
+                                        let element = if !token.id().starts_with("skill:") && multibot_core::workspaces::parse_session_key(token.id()).is_some() {
+                                            crate::mention_picker::bare_mention(token.label().clone(), token.id(), ctx.line_height())
+                                        } else {
+                                            div().h(ctx.line_height()).line_height(ctx.line_height())
+                                                .when(token.id().starts_with("skill:"), |el| el
+                                                    .text_color(theme::accent_blue())
+                                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD))
+                                                .child(token.label().clone())
+                                        };
+                                        element.when(ctx.is_selected(), |el| el.bg(rgba(0x60A5FA24)))
+                                    }),
                             ),
                         )
                         .when(self.voice.phase != multibot_core::voice::DictationPhase::Off || self.voice.error.is_some(), |el| {
