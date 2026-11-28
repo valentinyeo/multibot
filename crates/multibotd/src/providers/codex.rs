@@ -370,6 +370,13 @@ impl AgentProvider for CodexProvider {
                     }
                 }
                 "turn_context" => {
+                    meta.effort = super::reported_effort(
+                        payload
+                            .get("effort")
+                            .or_else(|| payload.get("reasoning_effort"))
+                            .and_then(Value::as_str),
+                    )
+                    .or(meta.effort);
                     if meta.cwd.is_none() {
                         meta.cwd = payload
                             .get("cwd")
@@ -470,6 +477,13 @@ impl AgentProvider for CodexProvider {
                     }
                 }
                 "turn_context" => {
+                    parsed.effort = super::reported_effort(
+                        payload
+                            .get("effort")
+                            .or_else(|| payload.get("reasoning_effort"))
+                            .and_then(Value::as_str),
+                    )
+                    .or(parsed.effort);
                     if let Some(model) = payload
                         .get("model")
                         .and_then(Value::as_str)
@@ -488,6 +502,20 @@ impl AgentProvider for CodexProvider {
                 "event_msg" => {
                     let ptype = payload.get("type").and_then(Value::as_str).unwrap_or("");
                     match ptype {
+                        "token_count" => {
+                            if let Some(info) = payload.get("info").filter(|v| !v.is_null()) {
+                                parsed.context_tokens = info
+                                    .get("last_token_usage")
+                                    .and_then(|usage| usage.get("total_tokens"))
+                                    .and_then(Value::as_u64)
+                                    .or(parsed.context_tokens);
+                                parsed.context_limit = info
+                                    .get("model_context_window")
+                                    .and_then(Value::as_u64)
+                                    .filter(|n| *n > 0)
+                                    .or(parsed.context_limit);
+                            }
+                        }
                         "user_message" => {
                             let raw = payload.get("message").and_then(Value::as_str).unwrap_or("");
                             let cleaned = strip_system_reminders(raw);

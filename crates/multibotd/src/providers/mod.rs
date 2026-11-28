@@ -8,8 +8,8 @@ pub mod pi;
 
 use anyhow::Result;
 use multibot_proto::{
-    AgentKind, ChatMessage, DiffBlock, MessageBlock, MessageRole, PromptOption, PromptQuestion,
-    SessionSummary, TodoItem, TodoStatus,
+    AgentKind, ChatMessage, DiffBlock, EffortLevel, MessageBlock, MessageRole, PromptOption,
+    PromptQuestion, SessionSummary, TodoItem, TodoStatus,
 };
 use crate::server_workspaces::ServerWorkspaceIndex;
 use regex::Regex;
@@ -77,6 +77,7 @@ pub struct HeaderMeta {
     pub cwd: Option<String>,
     pub title_hint: Option<String>,
     pub model: Option<String>,
+    pub effort: Option<EffortLevel>,
 }
 
 /// Complete output of parsing a byte slice `[slice_start..slice_end)` of a transcript.
@@ -85,6 +86,9 @@ pub struct ParsedSlice {
     pub messages: Vec<ChatMessage>,
     pub todos: Vec<TodoItem>,
     pub model: Option<String>,
+    pub effort: Option<EffortLevel>,
+    pub context_tokens: Option<u64>,
+    pub context_limit: Option<u64>,
     pub cwd: Option<String>,
     pub title_hint: Option<String>,
     pub session_id_hint: Option<String>,
@@ -709,10 +713,20 @@ pub fn summarize_session(
             .get(&id)
             .is_some_and(|entry| entry.kill_process),
         model: tail.model.or(header.model),
-        workspace: ctx
-            .server_workspaces
-            .workspace_for(&id)
-            .map(str::to_string),
+        effort: tail.effort.or(header.effort),
+        context_tokens: tail.context_tokens,
+        context_limit: tail.context_limit,
+        workspace: ctx.server_workspaces.workspace_for(&id).map(str::to_string),
+    }
+}
+
+fn reported_effort(value: Option<&str>) -> Option<EffortLevel> {
+    match value? {
+        "low" => Some(EffortLevel::Low),
+        "medium" => Some(EffortLevel::Medium),
+        "high" => Some(EffortLevel::High),
+        "max" | "xhigh" => Some(EffortLevel::Max),
+        _ => None,
     }
 }
 
@@ -2959,6 +2973,47 @@ pub fn truncate_title(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summaries_forward_reported_effort_and_context() {
+        let dir = unique_temp_dir("chat-info-stats");
+        let codex = dir.join("codex.jsonl");
+        let claude = dir.join("claude.jsonl");
+        fs::write(&codex, concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"stats-codex\",\"cwd\":\"/repo\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.3-codex\",\"effort\":\"xhigh\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":200000,\"last_token_usage\":{\"total_tokens\":42000},\"total_token_usage\":{\"total_tokens\":999999}}}}\n",
+        )).unwrap();
+        fs::write(&claude, concat!(
+            "{\"type\":\"assistant\",\"uuid\":\"a1\",\"effort\":\"high\",\"message\":{\"model\":\"claude-opus-4-6\",\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}],\"usage\":{\"input_tokens\":1000,\"cache_read_input_tokens\":40000,\"cache_creation_input_tokens\":1000}}}\n",
+        )).unwrap();
+        let none = HashSet::new();
+        let metadata = MetadataStore::default();
+        let archive = ArchiveStore::default();
+        let live = LiveActivity::default();
+        let workspaces = ServerWorkspaceIndex::default();
+        let ctx = DiscoveryContext {
+            active_session_ids: &none,
+            connected_session_ids: &none,
+            metadata: &metadata,
+            archive: &archive,
+            live: &live,
+            include_archived: true,
+            server_workspaces: &workspaces,
+        };
+        let codex = summarize_session(&CodexProvider, &codex, 0, &ctx);
+        assert_eq!(codex.model.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(codex.effort, Some(EffortLevel::Max));
+        assert_eq!(codex.context_tokens, Some(42_000));
+        assert_eq!(codex.context_limit, Some(200_000));
+        let claude = summarize_session(&ClaudeProvider, &claude, 0, &ctx);
+        assert_eq!(claude.model.as_deref(), Some("Opus 4.6"));
+        assert_eq!(claude.effort, Some(EffortLevel::High));
+        assert_eq!(claude.context_tokens, Some(42_000));
+        assert_eq!(claude.context_limit, None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
 
     #[test]
     fn missing_history_is_empty_for_every_agent_but_other_io_errors_survive() {

@@ -1032,6 +1032,7 @@ impl MultibotView {
                             MouseButton::Right,
                             cx.listener(move |this, _, window, cx| {
                                 this.open_palette_tab_context(key_right.clone(), window, cx);
+                                cx.stop_propagation();
                             }),
                         )
                         .child(
@@ -1537,6 +1538,7 @@ impl MultibotView {
                 MouseButton::Right,
                 cx.listener(move |this, _, window, cx| {
                     this.open_palette_tab_context(key_right.clone(), window, cx);
+                                cx.stop_propagation();
                 }),
             )
             .child(
@@ -1822,6 +1824,7 @@ impl MultibotView {
                         MouseButton::Right,
                         cx.listener(move |this, _, window, cx| {
                             this.open_palette_tab_context(key_right.clone(), window, cx);
+                                cx.stop_propagation();
                         }),
                     )
                     .child(if let Some(digit) = badge {

@@ -134,6 +134,13 @@ mod windows {
     }
 
     impl MultibotView {
+        pub(crate) fn browser_address_focused(&self, window: &Window, cx: &Context<Self>) -> bool {
+            self.browser.shown.is_some()
+                && self.browser.address.as_ref().is_some_and(|address| {
+                    address.input.read(cx).focus_handle(cx).is_focused(window)
+                })
+        }
+
         fn browser_session(&self) -> Option<String> {
             (self.main_surface == MainSurface::Chat
                 && self.active_modal == ActiveModal::None

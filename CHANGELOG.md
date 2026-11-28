@@ -16,6 +16,10 @@ This file is embedded in Multibot so Changelog works offline.
 - Grow the chat composer upward as text wraps, up to ten lines, then scroll within it; Enter still sends and Shift+Enter adds a line.
 - Keep live server shells beside the docked browser or Computer View, with working keyboard focus in both panes.
 - Search keyboard shortcuts by action, section, or key combination; F1 and Esc still close the modal.
+- Follow the latest messages when typing, pasting, dictating, or sending; keep the new-message button only while reading earlier messages.
+- Use a dark circular dictation mic, a recording timer pill, and a copper arrow send button.
+- Open Chat Info from the chat or shell title, or Ctrl+K, to see the directory, runtime, model, effort, and reported context use; copy the directory in one click.
+- Restore typing in Windows live shells after switching back to Multibot or clicking the shell, without taking focus from dialogs or other inputs.
 
 - Hide tool calls behind a compact expandable chip; show or hide all details through Ctrl+K → Chat: Show / hide tool call details.
 - Open chat links with a click and terminal or native shell URLs with Ctrl+click; only HTTP and HTTPS links can open.

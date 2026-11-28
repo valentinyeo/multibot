@@ -12,9 +12,10 @@ use gpui_kit::{
     base::text::CodeBlock,
     component::{
         Disableable, Selectable, Sizable,
-        button::{Button, ButtonVariants},
+        button::{Button, ButtonCustomVariant, ButtonVariants},
         h_flex,
         input::{self, Textarea},
+        label::Label,
         text::{TableData, TextView},
         v_flex,
     },
@@ -1974,6 +1975,13 @@ impl MultibotView {
         cx.notify();
     }
 
+    pub(crate) fn follow_chat_from_composer(&mut self, cx: &mut Context<Self>) {
+        self.chat_state.scroll.sent_message();
+        self.chat_state.prepend_scroll_anchor = None;
+        self.chat_state.scroll_handle.scroll_to_bottom();
+        cx.notify();
+    }
+
     pub(crate) fn jump_to_newest(&mut self, cx: &mut Context<Self>) {
         self.chat_state.scroll.jump_to_bottom();
         self.chat_state.focused_message_idx = None;
@@ -2215,8 +2223,7 @@ impl MultibotView {
                 .is_some_and(|s| s.id == session.id && s.agent == session.agent);
         let msg_id = format!("local-msg-{}", self.messages.len());
         if is_selected {
-            self.chat_state.scroll.sent_message();
-            self.chat_state.prepend_scroll_anchor = None;
+            self.follow_chat_from_composer(cx);
             self.messages.push(ChatMessage {
                 id: msg_id.clone(),
                 role: MessageRole::User,
@@ -2456,6 +2463,7 @@ impl MultibotView {
     }
 
     pub(crate) fn send_current_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.follow_chat_from_composer(cx);
         match self.voice.phase {
             multibot_core::voice::DictationPhase::Listening => {
                 self.voice.submit_after_finish = true;
@@ -5479,28 +5487,51 @@ impl MultibotView {
                                     .appearance(false),
                             ),
                         )
-                        .child(Button::new("composer-voice").small()
-                            .icon(lucide_icon(icons::MIC, 16.0))
-                            .text_color(if self.voice.phase == multibot_core::voice::DictationPhase::Listening {
-                                gpui_kit::rgb(0xEF4444).into()
-                            } else { theme::text_secondary() })
-                            .accessibility_label("Voice dictation").tooltip("Start / stop dictation · Ctrl+D / Ctrl+Shift+Space · Esc cancels")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_dictation(window, cx);
-                            })))
-                        .when(self.voice.phase != multibot_core::voice::DictationPhase::Off, |el| el.child(
-                            div().id("dictation-status").test_support().text_xs()
-                                .text_color(theme::accent_amber()).child(self.voice.phase.label())
-                        ))
+                        .child(
+                            Button::new("composer-voice")
+                                .small()
+                                .custom(ButtonCustomVariant::new(cx).foreground(rgb(0xA3A3A3).into())
+                                    .hover(rgb(0x333333).into()).active(rgb(0x333333).into()))
+                                .h(px(32.0))
+                                .rounded(RADIUS_CHIP)
+                                .bg(rgb(0x262626))
+                                .text_color(rgb(0xA3A3A3))
+                                .accessibility_label("Voice dictation")
+                                .tooltip(self.voice.error.clone().unwrap_or_else(|| "Start / stop dictation · Ctrl+D / Ctrl+Shift+Space · Esc cancels".into()))
+                                .when(self.voice.phase == multibot_core::voice::DictationPhase::Off && self.voice.error.is_none(), |el| {
+                                    el.w(px(32.0)).icon(lucide_icon(icons::MIC, 16.0))
+                                })
+                                .when(self.voice.phase != multibot_core::voice::DictationPhase::Off || self.voice.error.is_some(), |el| {
+                                    el.px_3().py_1().child(
+                                        h_flex().id("dictation-status").test_support().gap(px(6.0)).items_center().text_xs()
+                                            .text_color(rgb(0xF5F5F5))
+                                            .when(self.voice.phase == multibot_core::voice::DictationPhase::Listening, |el| el
+                                                .child(div().id("dictation-stop").test_support().size(px(9.0)).rounded(px(2.0)).bg(rgb(0xF5F5F5)))
+                                                .child(div().id("dictation-timer").test_support().font_family("monospace").child(Label::new(self.voice.elapsed_label()).text_color(rgb(0xF5F5F5))))
+                                                .child(div().child(Label::new("·····").text_color(rgb(0x737373)))))
+                                            .when(self.voice.phase == multibot_core::voice::DictationPhase::Finishing, |el| el.child("Transcribing..."))
+                                            .when(self.voice.error.is_some(), |el| el.text_color(theme::accent_amber()).child("Mic unavailable")),
+                                    )
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_dictation(window, cx);
+                                })),
+                        )
                         .child(
                             Button::new("send-prompt")
                                 .small()
-                                .primary()
+                                .custom(ButtonCustomVariant::new(cx).foreground(rgb(0xFFFFFF).into())
+                                    .hover(rgb(0xB56E3B).into()).active(rgb(0xB56E3B).into()))
+                                .size(px(32.0))
+                                .rounded(RADIUS_CHIP)
+                                .bg(rgb(0xA66335))
+                                .text_color(rgb(0xFFFFFF))
                                 .icon(lucide_icon(
                                     if is_working { icons::SQUARE } else { icons::ARROW_UP },
                                     16.0,
                                 ))
-                                .label(if is_working { "Stop" } else { "Send" })
+                                .accessibility_label(if is_working { "Stop" } else { "Send" })
+                                .tooltip(if is_working { "Stop response" } else { "Send message" })
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     if this.selected_session.as_ref().is_some_and(|s| s.working) {
                                         this.interrupt_active_session(cx);
@@ -6238,6 +6269,287 @@ mod tests {
             assert_eq!(view.read(cx).chat_state.scroll.unread_divider_msg_idx, None);
             assert_eq!(view.read(cx).chat_state.scroll.pending_scroll, PendingScrollTarget::None);
             assert!(window.try_find("chat-unread-divider").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn chat_info_palette_title_copy_and_escape(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_chat_window(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.selected_session = Some(SessionSummary {
+                    id: "info-session".into(),
+                    title: "Daily work".into(),
+                    cwd: Some("/srv/multibot".into()),
+                    model: Some("gpt-5.3-codex".into()),
+                    agent: AgentKind::Codex,
+                    effort: Some(EffortLevel::High),
+                    context_tokens: Some(42_000),
+                    context_limit: Some(200_000),
+                    ..Default::default()
+                });
+                v.connected_host = Some("work-vps".into());
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.press("ctrl-k", cx);
+            window.input("Chat info", cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::ChatInfo);
+            assert!(window.find("chat-info-panel").visible());
+            let row_text = |id: &str| {
+                gpui_kit::base::test_support::texts(window)
+                    .into_iter()
+                    .filter(|text| {
+                        text.path()
+                            .contains(&gpui_kit::ElementId::from(SharedString::from(
+                                id.to_string(),
+                            )))
+                    })
+                    .map(|text| text.text().to_string())
+                    .collect::<String>()
+            };
+            for (id, expected) in [
+                ("chat-info-title", "Daily work"),
+                ("chat-info-id", "info-session"),
+                ("chat-info-cwd", "/srv/multibot"),
+                ("chat-info-runtime", "Codex · work-vps"),
+                ("chat-info-model", "gpt-5.3-codex"),
+                ("chat-info-effort", "High"),
+                ("chat-info-context", "42k / 200k (21%)"),
+            ] {
+                assert_eq!(row_text(id), expected);
+            }
+            window.click("copy-chat-cwd", cx);
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+                Some("/srv/multibot")
+            );
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("chat-info-panel").is_none());
+            window.click("header-title-pill", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).active_modal, ActiveModal::ChatInfo);
+            assert!(window.find("chat-info-panel").visible());
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("chat-info-panel").is_none());
+
+            view.update(cx, |v, cx| {
+                v.selected_session.as_mut().unwrap().agent = AgentKind::Shell;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.click("shell-title", cx);
+            window.render_frame(cx);
+            assert!(window.find("chat-info-panel").visible());
+            window.click("close-chat-info", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("chat-info-panel").is_none());
+            window.click("shell-title", cx);
+            window.render_frame(cx);
+            window.click_at("chat-info-backdrop", gpui_kit::point(px(2.0), px(2.0)), cx);
+            window.render_frame(cx);
+            assert!(window.try_find("chat-info-panel").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn dictation_reference_controls_toggle_and_render(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_chat_window(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.selected_session = Some(SessionSummary {
+                    id: "voice-ui".into(),
+                    ..Default::default()
+                });
+                v.settings.voice.api_key = "invalid key".into();
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let mic = window.find("composer-voice").bounds();
+            let send = window.find("send-prompt").bounds();
+            assert_eq!(mic.size, gpui_kit::size(px(32.0), px(32.0)));
+            assert_eq!(send.size, gpui_kit::size(px(32.0), px(32.0)));
+            assert_eq!(window.find("send-prompt").label(), Some("Send"));
+            for (bounds, color) in [(mic, 0x262626), (send, 0xA66335)] {
+                assert!(
+                    window.painted_quads().into_iter().any(|q| {
+                        q.bounds == bounds.scale(window.scale_factor())
+                            && q.background == gpui_kit::Background::from(rgb(color))
+                            && q.corner_radii.top_left >= q.bounds.size.height / 2.0
+                    }),
+                    "painted circular control in the reference color"
+                );
+            }
+            assert!(window.try_find("dictation-status").is_none());
+            window.click("composer-voice", cx);
+            assert!(view.read(cx).notice.is_some());
+            window.render_frame(cx);
+            assert!(window.find("dictation-status").visible());
+            view.update(cx, |v, cx| {
+                v.begin_listening(window, cx);
+                v.voice.started_at = Some(Instant::now() - std::time::Duration::from_secs(5));
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.find("dictation-stop").visible());
+            assert!(window.find("dictation-status").bounds().size.width > px(32.0));
+            let text: String = gpui_kit::base::test_support::texts(window)
+                .into_iter()
+                .filter(|text| {
+                    text.path()
+                        .contains(&gpui_kit::ElementId::from("dictation-status"))
+                })
+                .map(|text| text.text().to_string())
+                .collect();
+            assert_eq!(text, "0:05·····");
+            window.click("composer-voice", cx);
+            assert_eq!(
+                view.read(cx).voice.phase,
+                multibot_core::voice::DictationPhase::Finishing
+            );
+            window.render_frame(cx);
+            assert!(window.try_find("dictation-stop").is_none());
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("dictation-status").is_none());
+            view.update(cx, |v, cx| {
+                v.selected_session.as_mut().unwrap().working = true;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert_eq!(window.find("send-prompt").label(), Some("Stop"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn pasted_and_dictated_text_follow_bottom_but_reading_history_does_not(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_chat_window(cx);
+        for paste in [true, false] {
+            cx.update_window(handle, |_, window, cx| {
+                view.update(cx, |v, cx| {
+                    v.selected_session = Some(SessionSummary { id: "paste-scroll".into(), ..Default::default() });
+                    v.messages = chat_scroll_messages();
+                    v.prompt_input.update(cx, |input, cx| { input.set_value("", window, cx); input.focus(window, cx); });
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                view.update(cx, |v, cx| {
+                    v.chat_state.scroll_handle.set_offset(gpui_kit::point(px(0.0), px(-100.0)));
+                    v.chat_state.scroll.sync_position(200.0);
+                    v.chat_state.scroll.appended(2);
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                assert!(window.try_find("chat-jump-to-bottom-btn").is_some());
+                if paste {
+                    cx.write_to_clipboard(ClipboardItem::new_string("Pasted text".into()));
+                    window.press("ctrl-v", cx);
+                } else {
+                    view.update(cx, |v, cx| v.prompt_input.update(cx, |input, cx| input.replace_all("Dictated text", window, cx)));
+                }
+            }).unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                let scroll = view.read(cx).chat_state.scroll_handle.clone();
+                assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+                assert!(window.try_find("chat-jump-to-bottom-btn").is_none());
+                assert!(!view.read(cx).prompt_input.read(cx).value().is_empty());
+                view.update(cx, |v, cx| {
+                    scroll.set_offset(gpui_kit::point(px(0.0), px(-100.0)));
+                    v.chat_state.scroll.sync_position(200.0);
+                    v.chat_state.scroll.appended(1);
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                assert_eq!(scroll.offset().y, px(-100.0));
+                assert!(window.find("chat-jump-to-bottom-btn").visible());
+            }).unwrap();
+        }
+    }
+
+    #[gpui_kit::test]
+    fn composer_entry_and_send_follow_bottom_without_new_message_pill(cx: &mut TestAppContext) {
+        use multibot_proto::ServerEvent;
+        let (handle, view) = open_test_chat_window(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.selected_session = Some(SessionSummary {
+                    id: "entry-scroll".into(),
+                    ..Default::default()
+                });
+                v.messages = chat_scroll_messages();
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let scroll = view.read(cx).chat_state.scroll_handle.clone();
+            view.update(cx, |v, cx| {
+                scroll.set_offset(gpui_kit::point(px(0.0), px(-100.0)));
+                v.chat_state.scroll.sync_position(200.0);
+                v.chat_state.scroll.appended(2);
+                v.chat_state.scroll.unread_divider_msg_idx = Some(10);
+                v.prompt_input
+                    .update(cx, |input, cx| input.focus(window, cx));
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("chat-jump-to-bottom-btn").is_some());
+            window.input("Hello", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let scroll = view.read(cx).chat_state.scroll_handle.clone();
+            assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+            assert!(window.try_find("chat-jump-to-bottom-btn").is_none());
+            assert!(window.try_find("chat-unread-divider").is_none());
+
+            // Even a populated draft can be sent after deliberately scrolling back up.
+            view.update(cx, |v, cx| {
+                scroll.set_offset(gpui_kit::point(px(0.0), px(-100.0)));
+                v.chat_state.scroll.sync_position(200.0);
+                v.chat_state.scroll.appended(2);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.click("send-prompt", cx);
+            window.render_frame(cx);
+            assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+            assert!(window.try_find("chat-jump-to-bottom-btn").is_none());
+            for text in [
+                "Streaming reply".to_string(),
+                "Long streaming reply. ".repeat(400),
+            ] {
+                view.update(cx, |v, cx| {
+                    v.handle_daemon_server_event(
+                        ServerEvent::HistoryAppend {
+                            session_id: "entry-scroll".into(),
+                            messages: vec![ChatMessage {
+                                id: "stream".into(),
+                                role: MessageRole::Assistant,
+                                text,
+                                ..Default::default()
+                            }],
+                            latest_offset: None,
+                            working: Some(true),
+                            todos: vec![],
+                            probe_sha256: None,
+                        },
+                        cx,
+                    )
+                });
+                window.render_frame(cx);
+                assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+                assert!(window.try_find("chat-jump-to-bottom-btn").is_none());
+            }
         })
         .unwrap();
     }

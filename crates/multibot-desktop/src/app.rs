@@ -16,7 +16,7 @@ use crate::theme::{self, RADIUS_CHIP};
 use crate::update_ui::{UpdateUiAction, UpdateUiState};
 use gpui_kit::{
     App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyDownEvent, ModifiersChangedEvent, ParentElement, Render, Styled, Subscription,
+    IntoElement, KeyDownEvent, ModifiersChangedEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Subscription,
     Task, TestSupportExt, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
     component::{
         Sizable,
@@ -357,6 +357,8 @@ pub struct MultibotView {
     pub(crate) pending_spawn_open: bool,
     pub(crate) _shared_store_sub: Subscription,
     pub(crate) _prompt_focus_sub: Subscription,
+    _prompt_change_sub: Subscription,
+    _window_activation_sub: Subscription,
     pub(crate) _host_focus_sub: Subscription,
     pub(crate) _daemon_event_task: Task<()>,
 
@@ -587,6 +589,17 @@ impl MultibotView {
                 cx.notify();
             }
         });
+        let _window_activation_sub = cx.observe_window_activation(window, |this, window, cx| {
+            this.restore_embedded_shell_focus(window, cx);
+        });
+        let _prompt_change_sub = cx.subscribe(&prompt_input, |this, input, event, cx| {
+            if matches!(event, gpui_kit::component::input::InputEvent::Change)
+                && this.main_surface == MainSurface::Chat
+                && !input.read(cx).value().is_empty()
+            {
+                this.follow_chat_from_composer(cx);
+            }
+        });
         let prompt_fh = prompt_input.read(cx).focus_handle(cx);
         let _prompt_focus_sub = cx.on_focus(&prompt_fh, window, |this, _window, cx| {
             if this.sidebar_state.rename.is_some()
@@ -742,6 +755,8 @@ impl MultibotView {
             pending_spawn_open: false,
             _shared_store_sub,
             _prompt_focus_sub,
+            _prompt_change_sub,
+            _window_activation_sub,
             _host_focus_sub,
             _daemon_event_task,
             update_action_tx,
@@ -5064,6 +5079,17 @@ impl MultibotView {
                         div()
                             .id("header-title-pill")
                             .test_support()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::bg_hover()))
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new("Show chat info")
+                                    .build(window, cx)
+                            })
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.toggle_chat_info(window, cx)
+                                }),
+                            )
                             .px_4()
                             .py_1p5()
                             .rounded(RADIUS_CHIP)
@@ -5685,7 +5711,10 @@ impl Render for MultibotView {
                 this.toggle_dictation(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseOverlay, window, cx| {
-                if this.voice.phase != multibot_core::voice::DictationPhase::Off {
+                if this.active_modal == ActiveModal::ChatInfo {
+                    this.active_modal = ActiveModal::None;
+                    this.focus_active_surface_default(window, cx);
+                } else if this.voice.phase != multibot_core::voice::DictationPhase::Off {
                     this.voice.cancel();
                 } else if this.table_modal_state.is_open() {
                     // 1. Topmost overlay: expanded table modal
@@ -6323,6 +6352,9 @@ impl Render for MultibotView {
             })
             .when(self.active_modal == ActiveModal::Changelog, |el| {
                 el.child(self.render_changelog_modal(cx))
+            })
+            .when(self.active_modal == ActiveModal::ChatInfo, |el| {
+                el.child(self.render_chat_info(cx))
             })
             .when_some(self.render_table_modal(cx), |el, modal| el.child(modal))
     }

@@ -22,6 +22,7 @@ pub(crate) enum ActiveModal {
     Palette,
     Shortcuts,
     Changelog,
+    ChatInfo,
 }
 
 pub(crate) enum UiBridgeEvent {

@@ -131,6 +131,7 @@ impl AgentProvider for PiProvider {
                     .map(|m| truncate_title(&m.text, 64))
             }),
             model: parsed.model,
+            effort: parsed.effort,
         }
     }
 

@@ -360,6 +360,12 @@ impl AgentProvider for ClaudeProvider {
             if is_filtered_claude_entry(&val) {
                 continue;
             }
+            meta.effort = super::reported_effort(
+                val.get("effort")
+                    .or_else(|| val.get("reasoning_effort"))
+                    .and_then(Value::as_str),
+            )
+            .or(meta.effort);
             if meta.cwd.is_none() {
                 meta.cwd = val
                     .get("cwd")
@@ -440,6 +446,12 @@ impl ClaudeProvider {
                 continue;
             }
 
+            parsed.effort = super::reported_effort(
+                val.get("effort")
+                    .or_else(|| val.get("reasoning_effort"))
+                    .and_then(Value::as_str),
+            )
+            .or(parsed.effort);
             if let Some(cwd) = val
                 .get("cwd")
                 .and_then(Value::as_str)
@@ -714,6 +726,31 @@ impl ClaudeProvider {
                         .filter(|s| !s.trim().is_empty())
                     {
                         parsed.model = Some(format_claude_model(m));
+                    }
+
+                    if let Some(usage) = msg_obj.get("usage") {
+                        if let Some(input) = usage.get("input_tokens").and_then(Value::as_u64) {
+                            parsed.context_tokens = Some(
+                                input
+                                    .saturating_add(
+                                        usage
+                                            .get("cache_read_input_tokens")
+                                            .and_then(Value::as_u64)
+                                            .unwrap_or(0),
+                                    )
+                                    .saturating_add(
+                                        usage
+                                            .get("cache_creation_input_tokens")
+                                            .and_then(Value::as_u64)
+                                            .unwrap_or(0),
+                                    ),
+                            );
+                        }
+                        parsed.context_limit = usage
+                            .get("context_window")
+                            .and_then(Value::as_u64)
+                            .filter(|n| *n > 0)
+                            .or(parsed.context_limit);
                     }
 
                     let content = msg_obj.get("content").unwrap_or(&Value::Null);

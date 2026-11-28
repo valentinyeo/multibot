@@ -3,7 +3,8 @@ use crate::state::{ActiveModal, MainSurface};
 use crate::theme;
 use anyhow::{Result, bail};
 use gpui_kit::{
-    Context, InteractiveElement, IntoElement, ParentElement, Styled, TestSupportExt, Window,
+    Context, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
+    TestSupportExt, Window,
     component::{Sizable, button::Button, h_flex, v_flex},
     div,
     prelude::FluentBuilder,
@@ -121,6 +122,21 @@ pub(crate) fn should_show_embedded_shell(
         && agent == Some(AgentKind::Shell)
         && !find_open
         && !rename_open
+}
+
+#[cfg(any(windows, test))]
+fn should_restore_shell_focus(
+    window_active: bool,
+    surface: MainSurface,
+    modal: ActiveModal,
+    agent: Option<AgentKind>,
+    find_open: bool,
+    rename_open: bool,
+    browser_url_focused: bool,
+) -> bool {
+    window_active
+        && !browser_url_focused
+        && should_show_embedded_shell(surface, modal, agent, find_open, rename_open)
 }
 
 #[cfg(any(windows, test))]
@@ -300,6 +316,42 @@ impl MultibotView {
         ) && !self.table_modal_state.is_open()
             && !self.slash_picker_state.is_open()
             && !(self.sidebar_rendered() && self.sidebar_state.dev_stats_expanded)
+    }
+
+    pub(crate) fn restore_embedded_shell_focus(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(windows)]
+        {
+            if should_restore_shell_focus(
+                window.is_window_active(),
+                self.main_surface,
+                self.active_modal,
+                self.selected_session.as_ref().map(|s| s.agent),
+                self.chat_state.find_open,
+                self.sidebar_state.rename.is_some()
+                    || self.sidebar_state.new_workspace_draft.is_some(),
+                self.browser_address_focused(window, cx),
+            ) && !self.table_modal_state.is_open()
+                && !self.computer.is_open()
+                && !self.slash_picker_state.is_open()
+                && !(self.sidebar_rendered() && self.sidebar_state.dev_stats_expanded)
+                && !self
+                    .terminal
+                    .focus_handle
+                    .as_ref()
+                    .is_some_and(|h| h.is_focused(window))
+            {
+                self.sync_embedded_shell(window, cx);
+                if let Some(host) = &self.shell_host.native {
+                    host.focus_visible();
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = (window, cx);
     }
 
     pub(crate) fn reconnect_embedded_shell(&mut self, cx: &mut Context<Self>) {
@@ -548,11 +600,28 @@ impl MultibotView {
                     .child(if let Some(draft) = header_rename {
                         div()
                             .id("header-rename-input")
+                            .test_support()
                             .text_sm()
                             .child(format!("{draft}|"))
                     } else {
                         div()
                             .id("shell-title")
+                            .test_support()
+                            .cursor_pointer()
+                            .rounded(theme::RADIUS_CHIP)
+                            .px_3()
+                            .py_1()
+                            .bg(theme::bg_surface())
+                            .hover(|s| s.bg(theme::bg_hover()))
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new("Show chat info")
+                                    .build(window, cx)
+                            })
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.toggle_chat_info(window, cx)
+                                }),
+                            )
                             .text_sm()
                             .max_w(px(250.0))
                             .truncate()
@@ -589,6 +658,16 @@ impl MultibotView {
             .when_some(self.render_find_bar(cx), |el, bar| el.child(bar))
             .child(
                 div()
+                    .id("shell-viewport")
+                    .test_support()
+                    .on_mouse_down(
+                        gpui_kit::MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.root_focus_handle.focus(window, cx);
+                            this.restore_embedded_shell_focus(window, cx);
+                        }),
+                    )
                     .flex_1()
                     .min_h_0()
                     .p_3()
@@ -647,7 +726,93 @@ mod tests {
         }
         assert_eq!(console_url_at_cell(&[], 0, 0, 0), None);
         let unsafe_url: Vec<_> = "file:///etc/passwd".encode_utf16().collect();
-        assert_eq!(console_url_at_cell(&unsafe_url, unsafe_url.len(), 0, 4), None);
+        assert_eq!(
+            console_url_at_cell(&unsafe_url, unsafe_url.len(), 0, 4),
+            None
+        );
+    }
+
+    #[test]
+    fn activation_restores_only_visible_shell_without_editing_overlays() {
+        let eligible = |active, surface, modal, agent, find, rename, url| {
+            should_restore_shell_focus(active, surface, modal, agent, find, rename, url)
+        };
+        assert!(eligible(
+            true,
+            MainSurface::Chat,
+            ActiveModal::None,
+            Some(AgentKind::Shell),
+            false,
+            false,
+            false
+        ));
+        assert!(!eligible(
+            false,
+            MainSurface::Chat,
+            ActiveModal::None,
+            Some(AgentKind::Shell),
+            false,
+            false,
+            false
+        ));
+        for modal in [
+            ActiveModal::Palette,
+            ActiveModal::Shortcuts,
+            ActiveModal::Changelog,
+            ActiveModal::ChatInfo,
+        ] {
+            assert!(!eligible(
+                true,
+                MainSurface::Chat,
+                modal,
+                Some(AgentKind::Shell),
+                false,
+                false,
+                false
+            ));
+        }
+        for (find, rename, url) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            assert!(!eligible(
+                true,
+                MainSurface::Chat,
+                ActiveModal::None,
+                Some(AgentKind::Shell),
+                find,
+                rename,
+                url
+            ));
+        }
+        assert!(!eligible(
+            true,
+            MainSurface::Inbox,
+            ActiveModal::None,
+            Some(AgentKind::Shell),
+            false,
+            false,
+            false
+        ));
+        assert!(!eligible(
+            true,
+            MainSurface::Chat,
+            ActiveModal::None,
+            Some(AgentKind::Claude),
+            false,
+            false,
+            false
+        ));
+        assert!(!eligible(
+            true,
+            MainSurface::Chat,
+            ActiveModal::None,
+            None,
+            false,
+            false,
+            false
+        ));
     }
 
     #[test]

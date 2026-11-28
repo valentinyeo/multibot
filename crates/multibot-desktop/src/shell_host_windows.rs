@@ -137,6 +137,19 @@ impl NativeHost {
             })
         }
     }
+    pub(super) fn focus_visible(&self) {
+        let hwnd = VISIBLE.with(|v| v.borrow().get(&self.parent).map(|s| s.hwnd).unwrap_or(0));
+        unsafe {
+            if hwnd != 0
+                && IsWindowVisible(hwnd as HWND) != 0
+                && GetAncestor(GetForegroundWindow(), GA_ROOT) == self.parent as HWND
+                && !crate::browser_pane::native::has_focus(self.parent)
+            {
+                SetFocus(hwnd as HWND);
+            }
+        }
+    }
+
     pub(super) fn focus_parent(&self) {
         unsafe {
             SetFocus(self.parent as HWND);
@@ -222,6 +235,21 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         if code >= 0 {
             if wparam as u32 == WM_LBUTTONUP && URL_CLICK.replace(false) {
                 return 1;
+            }
+            if wparam as u32 == WM_LBUTTONDOWN {
+                let event = &*(lparam as *const MSLLHOOKSTRUCT);
+                let target = WindowFromPoint(event.pt);
+                let shell = VISIBLE.with(|visible| {
+                    visible.borrow().iter().find_map(|(parent, shell)| {
+                        let hwnd = shell.hwnd as HWND;
+                        (!hwnd.is_null() && (target == hwnd || IsChild(hwnd, target) != 0))
+                            .then_some((*parent, shell.hwnd))
+                    })
+                });
+                if let Some((parent, hwnd)) = shell {
+                    SetForegroundWindow(parent as HWND);
+                    SetFocus(hwnd as HWND);
+                }
             }
             if wparam as u32 == WM_LBUTTONDOWN && GetAsyncKeyState(0x11) < 0 {
                 let event = &*(lparam as *const MSLLHOOKSTRUCT);

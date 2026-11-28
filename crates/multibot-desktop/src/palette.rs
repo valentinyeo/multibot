@@ -604,6 +604,26 @@ impl MultibotView {
             },
             // Debug and repair
             PaletteCommandSpec {
+                id: "pal-cmd-chat-info".into(),
+                label: "Chat: Chat info".into(),
+                chord: String::new(),
+                category: PaletteCategory::ChatView,
+                destructive: false,
+                aliases: [
+                    "chat info",
+                    "session info",
+                    "working directory",
+                    "cwd",
+                    "model",
+                    "context window",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+                tab_context: true,
+                global: true,
+            },
+            PaletteCommandSpec {
                 id: "pal-cmd-copy-id".into(),
                 label: "Copy Chat ID".into(),
                 chord: String::new(),
@@ -1177,6 +1197,12 @@ impl MultibotView {
                         if let Some(win) = window {
                             self.focus_inbox(win, cx);
                         }
+                    }
+                    "pal-cmd-chat-info" => {
+                        if let Some(win) = window {
+                            self.toggle_chat_info(win, cx);
+                        }
+                        return;
                     }
                     "pal-cmd-dictation" => {
                         if let Some(win) = window {

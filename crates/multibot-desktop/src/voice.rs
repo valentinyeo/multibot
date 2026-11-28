@@ -8,10 +8,24 @@ pub(crate) struct VoiceState {
     capture: Option<Capture>,
     task: Option<Task<()>>,
     pub submit_after_finish: bool,
+    pub started_at: Option<std::time::Instant>,
+    timer: Option<Task<()>>,
+    pub error: Option<String>,
 }
 
 impl VoiceState {
+    pub fn elapsed_label(&self) -> String {
+        let seconds = self
+            .started_at
+            .map(|start| start.elapsed().as_secs())
+            .unwrap_or(0);
+        format!("{}:{:02}", seconds / 60, seconds % 60)
+    }
+
     pub fn cancel(&mut self) {
+        self.timer = None;
+        self.started_at = None;
+        self.error = None;
         #[cfg(target_os = "windows")]
         if let Some(capture) = self.capture.as_mut() {
             capture.cancel();
@@ -46,10 +60,36 @@ impl MultibotView {
         });
     }
 
+    pub(crate) fn begin_listening(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.voice.phase.start();
+        self.voice.started_at = Some(std::time::Instant::now());
+        self.voice.error = None;
+        self.voice.timer = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                if !this
+                    .update_in(cx, |view, _, cx| {
+                        if view.voice.phase != DictationPhase::Listening {
+                            return false;
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
     pub(crate) fn toggle_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.voice.phase {
             DictationPhase::Listening => {
                 self.voice.phase.stop();
+                self.voice.timer = None;
                 self.voice.capture = None;
                 cx.notify();
                 return;
@@ -64,6 +104,7 @@ impl MultibotView {
             cx.global::<crate::state::SharedAppStore>().account.deepgram_key.as_deref(),
         );
         if let Err(err) = config.validate() {
+            self.voice.error = Some(err.to_string());
             self.notice = Some(err.to_string());
             cx.notify();
             return;
@@ -72,12 +113,13 @@ impl MultibotView {
         match Capture::start(config, events_tx) {
             Ok(capture) => self.voice.capture = Some(capture),
             Err(err) => {
+                self.voice.error = Some(err.to_string());
                 self.notice = Some(err.to_string());
                 cx.notify();
                 return;
             }
         }
-        self.voice.phase.start();
+        self.begin_listening(window, cx);
         self.notice = None;
         self.voice.task = Some(cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events_rx.recv().await {
@@ -91,12 +133,17 @@ impl MultibotView {
                             VoiceEvent::Error(error) => {
                                 view.voice.capture = None;
                                 view.voice.phase.finish();
+                                view.voice.timer = None;
+                                view.voice.started_at = None;
                                 view.voice.submit_after_finish = false;
+                                view.voice.error = Some(error.clone());
                                 view.notice = Some(error);
                             }
                             VoiceEvent::Finished => {
                                 view.voice.capture = None;
                                 view.voice.phase.finish();
+                                view.voice.timer = None;
+                                view.voice.started_at = None;
                                 if std::mem::take(&mut view.voice.submit_after_finish) {
                                     view.send_current_prompt(window, cx);
                                 }
@@ -423,5 +470,53 @@ mod windows_capture {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit::{AppContext, TestAppContext, WindowOptions};
+    use std::{sync::Arc, time::Duration};
+
+    #[gpui_kit::test]
+    fn recording_clock_is_cancelled_on_stop_and_cancel(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::theme::apply_multibot_dark_theme(cx);
+        });
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let (handle, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| MultibotView::new(runtime, window, cx))
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                assert!(v.voice.timer.is_none());
+                v.begin_listening(window, cx);
+                assert!(v.voice.timer.is_some());
+                v.toggle_dictation(window, cx);
+                assert!(v.voice.timer.is_none());
+                assert_eq!(v.voice.phase, DictationPhase::Finishing);
+                v.voice.cancel();
+                v.begin_listening(window, cx);
+                assert!(v.voice.timer.is_some());
+                v.voice.cancel();
+                assert!(v.voice.timer.is_none());
+                assert_eq!(v.voice.phase, DictationPhase::Off);
+                assert!(v.voice.started_at.is_none());
+            });
+        })
+        .unwrap();
+        cx.executor().advance_clock(Duration::from_secs(2));
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.voice.timer.is_none()));
     }
 }

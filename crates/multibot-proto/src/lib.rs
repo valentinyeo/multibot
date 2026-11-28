@@ -245,6 +245,12 @@ pub struct SessionSummary {
     pub archive_kill_process: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<EffortLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_limit: Option<u64>,
     /// Workspace name recorded by the server-side session metadata (`multiprompt`
     /// `chat-names.json`). The desktop maps this name onto a local workspace so a live
     /// session lands where the server says it belongs instead of the catch-all bucket.
@@ -271,6 +277,9 @@ impl Default for SessionSummary {
             archived: false,
             archive_kill_process: false,
             model: None,
+            effort: None,
+            context_tokens: None,
+            context_limit: None,
             workspace: None,
         }
     }
@@ -526,6 +535,23 @@ pub fn decode_line<T: for<'de> Deserialize<'de>>(line: &str) -> Result<T, serde_
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_stats_are_optional_and_roundtrip() {
+        let legacy = r#"{"id":"old","agent":"claude","title":"Old","cwd":null,"source_path":"old.jsonl","updated_at_ms":0,"working":false}"#;
+        let mut session: SessionSummary = serde_json::from_str(legacy).unwrap();
+        assert_eq!(session.effort, None);
+        assert_eq!(session.context_tokens, None);
+        assert_eq!(session.context_limit, None);
+        session.effort = Some(EffortLevel::High);
+        session.context_tokens = Some(42_000);
+        session.context_limit = Some(200_000);
+        let json = serde_json::to_string(&session).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SessionSummary>(&json).unwrap(),
+            session
+        );
+    }
 
     #[test]
     fn shell_agent_wire_label_and_glyph() {
@@ -983,6 +1009,9 @@ mod tests {
             archived: false,
             archive_kill_process: false,
             model: Some("claude-opus".into()),
+            effort: Some(EffortLevel::High),
+            context_tokens: Some(42_000),
+            context_limit: Some(200_000),
             workspace: Some("Yeo UX".into()),
         };
 
