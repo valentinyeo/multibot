@@ -7,6 +7,7 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 - Add Ctrl+Shift+Enter to force send queued messages and show keyboard shortcuts in mouse-over tooltips on icon buttons (MBRU-136).
+- Detect live subworkers in Antigravity sessions using the conversation flag and sibling processes (MBRU-135).
 - Give each live server shell session its own native console window so switching between full-screen btop and other shells is instant without reloads or cross-session bleed (MBRU-134).
 - Fix the docked Windows browser pane to fill the right side with full native Chrome using a shared Multibot profile, removing the duplicate address bar and buttons (MBRU-132).
 

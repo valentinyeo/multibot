@@ -1,4 +1,4 @@
-//! A silent tmux control client receives lifecycle events, not a timer or transcript scan.
+//! Tmux lifecycle events plus a low-frequency process check for quiet background workers.
 use crate::process::ProcessManager;
 use crate::providers::{
     ArchiveStore, DiscoveryContext, LiveActivity, MetadataStore, discover_live_sessions_with_ctx,
@@ -73,6 +73,8 @@ pub fn start(
         let mut watched_dir = false;
         let mut previous = Vec::new();
         let mut attach_retries = 0;
+        let mut worker_tick = tokio::time::interval(std::time::Duration::from_secs(3));
+        worker_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             // No output subscription, terminal size influence, or mutations to legacy hooks.
             let mut command = tokio::process::Command::new("tmux");
@@ -162,6 +164,29 @@ pub fn start(
                     }
                 }
                 tokio::select! {
+                    _ = worker_tick.tick(), if !previous.is_empty() => {
+                        let home = home.clone();
+                        let process = Arc::clone(&process);
+                        let old = previous.clone();
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        if disk.send(Box::new(move || {
+                            let mut sessions = old.clone();
+                            crate::subworkers::populate(
+                                &mut sessions,
+                                &MetadataStore::load(&home),
+                                &process.active_session_pids(),
+                            );
+                            let changed = sessions.iter().zip(&old)
+                                .any(|(new, old)| new.subworkers != old.subworkers);
+                            let _ = tx.send(changed);
+                        })).is_err() {
+                            return;
+                        }
+                        // Rediscover only on a worker change so working state is recomputed
+                        // from the transcript when the last background worker exits.
+                        let Ok(changed) = rx.await else { return };
+                        refresh = changed;
+                    }
                     wake = wakes.recv() => {
                         if wake.is_none() { return; }
                         while wakes.try_recv().is_ok() {}

@@ -164,7 +164,8 @@ fn owner_id<'a>(args: &[&'a str]) -> Option<&'a str> {
             .iter()
             .position(|s| *s == "--agent-host")
             .and_then(|i| args.get(i + 2).copied()),
-        "claude" | "claude.js" | "agy" => flag(args, "--resume"),
+        "agy" => flag(args, "--conversation").or_else(|| flag(args, "--resume")),
+        "claude" | "claude.js" => flag(args, "--resume").or_else(|| flag(args, "--session-id")),
         "codex" | "codex.js" => args
             .iter()
             .position(|s| *s == "resume")
@@ -368,26 +369,15 @@ pub(crate) fn populate_from_snapshot(
             .get(&session.id)
             .and_then(|m| m.native_session_id.as_deref());
         let mut pids = Vec::new();
-        if let Some(pid) = active
-            .get(&session.id)
-            .or_else(|| native.and_then(|id| active.get(id)))
-        {
-            pids.push(*pid);
-        } else {
-            pids.extend(
-                owners
-                    .get(session.id.as_str())
-                    .into_iter()
-                    .flatten()
-                    .copied(),
-            );
-            if let Some(native) = native {
-                pids.extend(owners.get(native).into_iter().flatten().copied());
-            }
+        for id in std::iter::once(session.id.as_str()).chain(native) {
+            pids.extend(active.get(id).copied());
+            pids.extend(owners.get(id).into_iter().flatten().copied());
         }
         if session.agent == AgentKind::Shell {
             pids.extend(panes.get(&session.id).into_iter().flatten().copied());
         }
+        pids.sort_unstable();
+        pids.dedup();
         let mut workers = HashMap::new();
         for pid in pids {
             for info in tree.workers(pid) {
@@ -489,6 +479,157 @@ mod tests {
             snapshot,
         );
         sessions.remove(0)
+    }
+
+    #[test]
+    fn postbox_conversation_workers_survive_newer_active_sibling() {
+        let native = "de860fa4-e66e-4380-910d-baae1dec5b07";
+        let command = format!(
+            "/home/valentin/.local/bin/agy --input-format stream-json --output-format stream-json --dangerously-skip-permissions --print= --conversation {native}"
+        );
+        let mut snapshot = vec![
+            process(10, 1, &command, "/repo"),
+            process(11, 1, &command, "/repo"),
+        ];
+        for (pid, key) in [(20, "PORU-30"), (30, "PORU-32"), (40, "PORU-27")] {
+            snapshot.push(process(
+                pid,
+                10,
+                &format!("python3 /home/valentin/.local/share/vstack/skills/hypertask-work/lease {key} run -- /home/valentin/.local/bin/plan-pick --run"),
+                "/repo",
+            ));
+            snapshot.push(process(
+                pid + 1,
+                pid,
+                "/home/valentin/.local/bin/plan-pick --run",
+                "/repo",
+            ));
+        }
+        let mut metadata = MetadataStore::default();
+        metadata.sessions.insert(
+            "postbox".into(),
+            SessionMetaEntry {
+                native_session_id: Some(native.into()),
+                ..Default::default()
+            },
+        );
+        let mut sessions = vec![SessionSummary {
+            id: "postbox".into(),
+            title: "Postbox Rust 2".into(),
+            agent: AgentKind::Antigravity,
+            ..Default::default()
+        }];
+        for active in [
+            HashMap::new(),
+            HashMap::from([("postbox".into(), 11)]),
+            HashMap::from([(native.into(), 11)]),
+            HashMap::from([("postbox".into(), 11), (native.into(), 10)]),
+        ] {
+            populate_from_snapshot(
+                &mut sessions,
+                &metadata,
+                &active,
+                &HashMap::new(),
+                &snapshot,
+            );
+            assert!(sessions[0].working);
+            assert_eq!(
+                sessions[0]
+                    .subworkers
+                    .iter()
+                    .map(|w| (w.pid, w.label.as_str(), w.runtime.as_deref()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (20, "PORU-30", Some("plan-pick")),
+                    (30, "PORU-32", Some("plan-pick")),
+                    (40, "PORU-27", Some("plan-pick"))
+                ]
+            );
+        }
+        let workers = sessions[0].subworkers.clone();
+        snapshot.reverse();
+        populate_from_snapshot(
+            &mut sessions,
+            &metadata,
+            &HashMap::new(),
+            &HashMap::new(),
+            &snapshot,
+        );
+        assert_eq!(sessions[0].subworkers, workers);
+        snapshot.retain(|p| p.pid < 20);
+        populate_from_snapshot(
+            &mut sessions,
+            &metadata,
+            &HashMap::new(),
+            &HashMap::new(),
+            &snapshot,
+        );
+        assert!(sessions[0].subworkers.is_empty());
+    }
+
+    #[test]
+    fn active_session_and_native_pids_are_both_searched() {
+        let snapshot = vec![
+            process(10, 1, "hax -p task", "/repo"),
+            process(11, 10, "plan-pick --run", "/repo/first"),
+            process(20, 1, "hax -p task", "/repo"),
+            process(21, 20, "plan-pick --run", "/repo/second"),
+        ];
+        let mut metadata = MetadataStore::default();
+        metadata.sessions.insert(
+            "alias".into(),
+            SessionMetaEntry {
+                native_session_id: Some("native".into()),
+                ..Default::default()
+            },
+        );
+        let mut sessions = vec![SessionSummary {
+            id: "alias".into(),
+            ..Default::default()
+        }];
+        populate_from_snapshot(
+            &mut sessions,
+            &metadata,
+            &HashMap::from([("alias".into(), 10), ("native".into(), 20)]),
+            &HashMap::new(),
+            &snapshot,
+        );
+        assert_eq!(
+            sessions[0]
+                .subworkers
+                .iter()
+                .map(|w| w.pid)
+                .collect::<Vec<_>>(),
+            vec![11, 21]
+        );
+    }
+
+    #[test]
+    fn fresh_claude_session_id_owns_workers() {
+        for command in [
+            "claude",
+            "node /bin/claude.js",
+            "node /opt/@anthropic-ai/claude-code/cli.js",
+        ] {
+            let snapshot = vec![
+                process(
+                    10,
+                    1,
+                    &format!("{command} --session-id de860fa4-e66e-4380-910d-baae1dec5b07"),
+                    "/repo",
+                ),
+                process(11, 10, "plan-pick --run", "/repo/worker"),
+            ];
+            let session = discover(
+                &snapshot,
+                "de860fa4-e66e-4380-910d-baae1dec5b07",
+                AgentKind::Claude,
+                HashMap::new(),
+                HashMap::new(),
+            );
+            assert_eq!(session.subworkers.len(), 1);
+            assert_eq!(session.subworkers[0].pid, 11);
+        }
     }
 
     #[test]
