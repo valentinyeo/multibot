@@ -168,9 +168,11 @@ impl AgentProvider for CursorProvider {
     fn parse_lines(&self, lines: &[LineSlice<'_>]) -> ParsedSlice {
         let mut meta = HeaderMeta::default();
         let mut ended = false;
+        let mut has_session_header = false;
         let mut parsed = parse_normalized_messages(lines, "cursor", |value| {
             match value.get("type").and_then(Value::as_str) {
                 Some("multibot_meta") => {
+                    has_session_header = true;
                     meta.session_id_hint = value
                         .get("session_id")
                         .and_then(Value::as_str)
@@ -180,6 +182,9 @@ impl AgentProvider for CursorProvider {
                         .get("title")
                         .and_then(Value::as_str)
                         .map(|s| truncate_title(s, 64));
+                }
+                Some("system") if value.get("subtype").and_then(Value::as_str) == Some("init") => {
+                    has_session_header = true;
                 }
                 Some("result") => ended = true,
                 _ => {}
@@ -193,7 +198,7 @@ impl AgentProvider for CursorProvider {
         parsed.session_id_hint = meta.session_id_hint;
         parsed.cwd = meta.cwd.or(parsed.cwd);
         parsed.title_hint = meta.title_hint.or(parsed.title_hint);
-        if ended {
+        if ended || (has_session_header && parsed.tail_activity == TailActivity::Unknown) {
             parsed.tail_activity = TailActivity::Idle;
         }
         parsed

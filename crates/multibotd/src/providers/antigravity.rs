@@ -883,6 +883,7 @@ impl AgentProvider for AntigravityProvider {
 
             // 1. Daemon-owned metadata header
             if top_type == "multibot_meta" {
+                parsed.tail_activity = TailActivity::Idle;
                 if let Some(sid) = val
                     .get("session_id")
                     .and_then(Value::as_str)

@@ -125,7 +125,7 @@ async fn shell_client_switches_a_real_tmux_client_in_place() {
             "-q",
             "-c",
             &format!(
-                "sleep 0.1; tty > '{}' && exec tmux -S '{socket}' attach-session -t '=a'",
+                "stty rows 37 cols 109; sleep 0.1; tty > '{}' && exec tmux -S '{socket}' attach-session -t '=a'",
                 registration.display()
             ),
             "/dev/null",
@@ -151,9 +151,61 @@ async fn shell_client_switches_a_real_tmux_client_in_place() {
             .unwrap();
         String::from_utf8(output.stdout).unwrap()
     };
+    assert!(
+        Command::new("tmux")
+            .env_remove("TMUX")
+            .args([
+                "-S",
+                socket,
+                "set-window-option",
+                "-t",
+                "=b",
+                "window-size",
+                "manual"
+            ])
+            .status()
+            .await
+            .unwrap()
+            .success()
+    );
     switch_shell_client_at(&home, "client", "b", Some(socket))
         .await
         .unwrap();
+    let size_policy = Command::new("tmux")
+        .env_remove("TMUX")
+        .args([
+            "-S",
+            socket,
+            "show-window-options",
+            "-t",
+            "=b",
+            "-v",
+            "window-size",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(size_policy.stdout).unwrap().trim(),
+        "latest"
+    );
+    let size = Command::new("tmux")
+        .env_remove("TMUX")
+        .args([
+            "-S",
+            socket,
+            "list-windows",
+            "-t",
+            "=b",
+            "-F",
+            "#{window_width}x#{window_height}",
+        ])
+        .output()
+        .await
+        .unwrap();
+    // The terminal's 37th row belongs to tmux's status bar.
+    assert_eq!(String::from_utf8(size.stdout).unwrap().trim(), "109x36");
+
     let initial = clients().await;
     assert_eq!(initial.lines().count(), 1);
     assert!(initial.trim().ends_with(" b"));
@@ -684,6 +736,129 @@ async fn cursor_output_is_bounded_scrubbed_and_records_native_resume_id() {
 }
 
 #[test]
+fn default_permissions_bypass_for_claude_and_codex_with_or_without_other_options() {
+    let defaults = SessionOptions::default();
+    let model_only = SessionOptions {
+        model: Some("custom-model".into()),
+        ..Default::default()
+    };
+    for options in [None, Some(&defaults), Some(&model_only)] {
+        for is_new in [true, false] {
+            let claude = build_claude_args("session", "hello", is_new, options).unwrap();
+            assert!(
+                claude
+                    .windows(2)
+                    .any(|a| a == ["--permission-mode", "bypassPermissions"])
+            );
+            let codex = build_codex_args("session", "hello", is_new, options).unwrap();
+            assert!(codex.contains(&"sandbox_mode=\"danger-full-access\"".into()));
+            assert!(codex.contains(&"approval_policy=\"never\"".into()));
+        }
+    }
+}
+
+#[test]
+fn permission_overrides_are_accepted_for_all_agent_harnesses() {
+    for agent in [
+        AgentKind::Claude,
+        AgentKind::Codex,
+        AgentKind::Pi,
+        AgentKind::Cursor,
+        AgentKind::Antigravity,
+    ] {
+        for permission in [
+            PermissionLevel::FullAccess,
+            PermissionLevel::Auto,
+            PermissionLevel::Ask,
+        ] {
+            let options = SessionOptions {
+                permission: Some(permission),
+                ..Default::default()
+            };
+            assert!(
+                validate_options(agent, Some(&options)).is_ok(),
+                "{agent:?}: {permission:?}"
+            );
+        }
+    }
+    for agent in [AgentKind::Pi, AgentKind::Cursor, AgentKind::Antigravity] {
+        let options = SessionOptions {
+            effort: Some(EffortLevel::High),
+            permission: Some(PermissionLevel::FullAccess),
+            ..Default::default()
+        };
+        assert!(validate_options(agent, Some(&options)).is_err());
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_and_cursor_only_bypass_permissions_when_requested_or_defaulted() {
+    use std::os::unix::fs::PermissionsExt;
+    for agent in [AgentKind::Antigravity, AgentKind::Cursor, AgentKind::Pi] {
+        for permission in [
+            None,
+            Some(PermissionLevel::FullAccess),
+            Some(PermissionLevel::Auto),
+            Some(PermissionLevel::Ask),
+        ] {
+            let home = temp_home("permission-args");
+            let bin = home.join("fake-agent");
+            let log = home.join("argv");
+            fs::write(&bin, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nif [ \"$1\" = --input-format ]; then IFS= read -r input; fi\n", log.display())).unwrap();
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let mgr = ProcessManager::new(home.clone(), tx);
+            mgr.set_test_bin_override(Some(bin));
+            let options = permission.map(|permission| SessionOptions {
+                permission: Some(permission),
+                ..Default::default()
+            });
+            mgr.dispatch_prompt_internal(
+                "session",
+                agent,
+                Some(home.to_str().unwrap()),
+                "hello",
+                true,
+                options.as_ref(),
+            )
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(event) = rx.recv().await {
+                    if matches!(
+                        event,
+                        ServerEvent::HistoryAppend {
+                            working: Some(false),
+                            ..
+                        }
+                    ) {
+                        return;
+                    }
+                }
+                panic!("missing exit event");
+            })
+            .await
+            .unwrap();
+            let args = fs::read_to_string(log).unwrap();
+            let bypass = matches!(permission, None | Some(PermissionLevel::FullAccess));
+            if agent == AgentKind::Antigravity {
+                assert_eq!(
+                    args.lines().any(|a| a == "--dangerously-skip-permissions"),
+                    bypass
+                );
+            } else if agent == AgentKind::Cursor {
+                assert_eq!(args.lines().any(|a| a == "--force"), bypass);
+            } else {
+                assert!(!args.contains("--force"));
+                assert!(!args.contains("--dangerously-skip-permissions"));
+            }
+            assert!(args.ends_with("--\nhello\n") || agent == AgentKind::Antigravity);
+            fs::remove_dir_all(home).unwrap();
+        }
+    }
+}
+
+#[test]
 fn composer_options_map_to_provider_flags_before_prompt_separator() {
     let options = SessionOptions {
         model: Some("opus".into()),
@@ -965,6 +1140,7 @@ async fn spawn_session_validates_cwd_and_creates_agy_history() {
         ServerEvent::SessionSpawned { session } => {
             assert_eq!(session.agent, AgentKind::Antigravity);
             assert_eq!(session.title, "My Agy Chat");
+            assert!(!session.working);
             assert!(Path::new(&session.source_path).is_file());
             assert!(
                 Path::new(&session.source_path).starts_with(home.join(".multibot").join("history"))
@@ -1230,10 +1406,12 @@ fn cli_arg_builders_insert_double_dash_and_reject_leading_dash_session_id() {
     assert!(build_claude_args("", "hello", true, None).is_err());
 
     let x_new = build_codex_args("ignored", "- fix tests", true, None).unwrap();
-    assert_eq!(x_new, vec!["exec", "--", "- fix tests"]);
+    assert_eq!(x_new[0], "exec");
+    assert_eq!(&x_new[x_new.len() - 2..], ["--", "- fix tests"]);
 
     let x_res = build_codex_args("codex-1", "--version", false, None).unwrap();
-    assert_eq!(x_res, vec!["exec", "resume", "codex-1", "--", "--version"]);
+    assert_eq!(&x_res[..3], ["exec", "resume", "codex-1"]);
+    assert_eq!(&x_res[x_res.len() - 2..], ["--", "--version"]);
 
     assert!(build_codex_args("--evil", "hello", false, None).is_err());
 }

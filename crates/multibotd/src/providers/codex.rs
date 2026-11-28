@@ -461,6 +461,9 @@ impl AgentProvider for CodexProvider {
 
             match top_type {
                 "session_meta" => {
+                    if parsed.tail_activity == TailActivity::Unknown {
+                        parsed.tail_activity = TailActivity::Idle;
+                    }
                     if let Some(id) = payload
                         .get("id")
                         .and_then(Value::as_str)

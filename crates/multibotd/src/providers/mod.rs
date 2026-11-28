@@ -447,6 +447,7 @@ pub fn discover_all_sessions_with_ctx(
             agent,
             title,
             cwd: meta.cwd.clone(),
+            cwd_exists: meta.cwd.as_deref().map(|p| Path::new(p).is_dir()),
             source_path: source_path.clone(),
             workspace: meta.workspace.clone(),
             updated_at_ms: meta.updated_at_ms,
@@ -756,6 +757,7 @@ pub fn summarize_session(
         id: id.clone(),
         agent: provider.kind(),
         title,
+        cwd_exists: cwd.as_deref().map(|p| Path::new(p).is_dir()),
         cwd,
         source_path: path.to_string_lossy().to_string(),
         updated_at_ms: file_mtime_ms,
@@ -3049,6 +3051,153 @@ pub fn truncate_title(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_only_sessions_are_idle_even_immediately_after_creation() {
+        let home = unique_temp_dir("metadata-idle");
+        let ids = HashSet::new();
+        let metadata = MetadataStore::default();
+        let archive = ArchiveStore::default();
+        let live = LiveActivity::default();
+        let workspaces = ServerWorkspaceIndex::default();
+        let ctx = DiscoveryContext {
+            active_session_ids: &ids,
+            connected_session_ids: &ids,
+            metadata: &metadata,
+            archive: &archive,
+            live: &live,
+            include_archived: true,
+            server_workspaces: &workspaces,
+        };
+        for (agent, header) in [
+            (
+                AgentKind::Antigravity,
+                json!({"type":"multibot_meta", "session_id":"empty"}),
+            ),
+            (
+                AgentKind::Claude,
+                json!({"type":"system", "subtype":"init", "session_id":"empty"}),
+            ),
+            (
+                AgentKind::Claude,
+                json!({"type":"multibot_meta", "session_id":"empty"}),
+            ),
+            (
+                AgentKind::Codex,
+                json!({"type":"session_meta", "payload":{"id":"empty"}}),
+            ),
+            (
+                AgentKind::Pi,
+                json!({"type":"session", "version":3, "id":"empty"}),
+            ),
+            (
+                AgentKind::Cursor,
+                json!({"type":"multibot_meta", "session_id":"empty"}),
+            ),
+            (
+                AgentKind::Cursor,
+                json!({"type":"system", "subtype":"init", "session_id":"empty"}),
+            ),
+        ] {
+            let provider = provider_for(agent);
+            let content = format!("{header}\n");
+            let parsed = provider.parse_slice(content.as_bytes(), 0);
+            assert_eq!(parsed.tail_activity, TailActivity::Idle, "{agent:?}");
+            assert!(parsed.messages.is_empty());
+            let path = home.join(format!("{agent:?}.jsonl"));
+            fs::write(&path, &content).unwrap();
+            let mtime = now_ms();
+            for age in [0, 10, 4_999] {
+                assert!(
+                    !compute_semantic_working(false, parsed.tail_activity, mtime, mtime + age),
+                    "{agent:?} at {age}ms"
+                );
+            }
+            assert!(
+                !summarize_session(provider.as_ref(), &path, mtime, &ctx).working,
+                "{agent:?}"
+            );
+            match read_history_delta(agent, &path, 0, None).unwrap() {
+                DeltaRead::Appended { tail_activity, .. } => {
+                    assert_eq!(tail_activity, TailActivity::Idle, "{agent:?}");
+                }
+                other => panic!("expected metadata delta, got {other:?}"),
+            }
+            let prompt = match agent {
+                AgentKind::Codex => {
+                    json!({"type":"response_item", "payload":{"type":"message", "role":"user", "content":[{"type":"input_text", "text":"hello"}]}})
+                }
+                AgentKind::Pi => {
+                    json!({"type":"message", "id":"u1", "message":{"role":"user", "content":[{"type":"text", "text":"hello"}]}})
+                }
+                AgentKind::Antigravity => {
+                    json!({"type":"multibot_history", "row":{"role":"user", "text":"hello"}})
+                }
+                _ => json!({"type":"user", "message":{"content":"hello"}}),
+            };
+            let content = format!("{content}{prompt}\n");
+            assert_eq!(
+                provider.parse_slice(content.as_bytes(), 0).tail_activity,
+                TailActivity::Working,
+                "{agent:?} after prompt"
+            );
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn summaries_report_directory_existence_on_the_server() {
+        let home = unique_temp_dir("cwd-exists");
+        let ids = HashSet::new();
+        let metadata = MetadataStore::default();
+        let archive = ArchiveStore::default();
+        let live = LiveActivity::default();
+        let workspaces = ServerWorkspaceIndex::default();
+        let ctx = DiscoveryContext {
+            active_session_ids: &ids,
+            connected_session_ids: &ids,
+            metadata: &metadata,
+            archive: &archive,
+            live: &live,
+            include_archived: true,
+            server_workspaces: &workspaces,
+        };
+        let cwd = home.join("repo");
+        fs::create_dir(&cwd).unwrap();
+        let path = home.join("session.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{}\n",
+                json!({"type":"session_meta", "payload":{"id":"session", "cwd":cwd}})
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            summarize_session(&CodexProvider, &path, now_ms(), &ctx).cwd_exists,
+            Some(true)
+        );
+        fs::remove_dir(&cwd).unwrap();
+        assert_eq!(
+            summarize_session(&CodexProvider, &path, now_ms(), &ctx).cwd_exists,
+            Some(false)
+        );
+        fs::write(&cwd, "not a directory").unwrap();
+        assert_eq!(
+            summarize_session(&CodexProvider, &path, now_ms(), &ctx).cwd_exists,
+            Some(false)
+        );
+        fs::write(
+            &path,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"session\"}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            summarize_session(&CodexProvider, &path, now_ms(), &ctx).cwd_exists,
+            None
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn summaries_forward_reported_effort_and_context() {

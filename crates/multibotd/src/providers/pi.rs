@@ -1,7 +1,7 @@
 use super::{
-    AgentProvider, HeaderMeta, LineSlice, ParsedSlice, cap_chars, is_safe_transcript_path,
-    parse_normalized_messages, read_header_lines_bounded, strip_base64_in_str, system_time_ms,
-    truncate_title,
+    AgentProvider, HeaderMeta, LineSlice, ParsedSlice, TailActivity, cap_chars,
+    is_safe_transcript_path, parse_normalized_messages, read_header_lines_bounded,
+    strip_base64_in_str, system_time_ms, truncate_title,
 };
 use multibot_proto::AgentKind;
 use serde_json::{Value, json};
@@ -136,9 +136,11 @@ impl AgentProvider for PiProvider {
 
     fn parse_lines(&self, lines: &[LineSlice<'_>]) -> ParsedSlice {
         let mut meta = HeaderMeta::default();
+        let mut has_session_header = false;
         let mut parsed = parse_normalized_messages(lines, "pi", |value| {
             match value.get("type").and_then(Value::as_str) {
                 Some("session") => {
+                    has_session_header = true;
                     meta.session_id_hint =
                         value.get("id").and_then(Value::as_str).map(str::to_string);
                     meta.cwd = value.get("cwd").and_then(Value::as_str).map(str::to_string);
@@ -160,6 +162,9 @@ impl AgentProvider for PiProvider {
             }
             normalize(value)
         });
+        if has_session_header && parsed.tail_activity == TailActivity::Unknown {
+            parsed.tail_activity = TailActivity::Idle;
+        }
         parsed.session_id_hint = meta.session_id_hint;
         parsed.cwd = meta.cwd;
         parsed.title_hint = meta.title_hint;

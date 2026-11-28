@@ -345,6 +345,8 @@ pub struct SessionSummary {
     pub agent: AgentKind,
     pub title: String,
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd_exists: Option<bool>,
     pub source_path: String,
     pub updated_at_ms: i64,
     pub working: bool,
@@ -389,6 +391,7 @@ impl Default for SessionSummary {
             agent: AgentKind::Claude,
             title: String::new(),
             cwd: None,
+            cwd_exists: None,
             source_path: String::new(),
             updated_at_ms: 0,
             working: false,
@@ -723,6 +726,14 @@ mod tests {
     fn session_stats_are_optional_and_roundtrip() {
         let legacy = r#"{"id":"old","agent":"claude","title":"Old","cwd":null,"source_path":"old.jsonl","updated_at_ms":0,"working":false}"#;
         let mut session: SessionSummary = serde_json::from_str(legacy).unwrap();
+        assert_eq!(session.cwd_exists, None);
+        assert!(
+            serde_json::to_value(&session)
+                .unwrap()
+                .get("cwd_exists")
+                .is_none()
+        );
+        session.cwd_exists = Some(false);
         assert_eq!(session.effort, None);
         assert_eq!(session.context_tokens, None);
         assert_eq!(session.context_limit, None);
@@ -1184,6 +1195,7 @@ mod tests {
             agent: AgentKind::Claude,
             title: "Rich session".into(),
             cwd: Some("/repo".into()),
+            cwd_exists: Some(true),
             source_path: "/p.jsonl".into(),
             updated_at_ms: 999,
             working: false,

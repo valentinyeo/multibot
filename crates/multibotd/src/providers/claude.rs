@@ -343,7 +343,13 @@ impl AgentProvider for ClaudeProvider {
         for root in claude_discovery_roots(home) {
             for entry in WalkDir::new(&root).max_depth(3).into_iter().flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl")
+                    || path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|s| s.starts_with("agent-"))
+                    || path.components().any(|c| c.as_os_str() == "subagents")
+                {
                     continue;
                 }
                 if let Ok(meta) = fs::metadata(path)
@@ -501,6 +507,14 @@ impl ClaudeProvider {
                 .unwrap_or_else(|| format!("claude-{}", line.start_offset));
 
             match kind {
+                "multibot_meta" | "system"
+                    if kind == "multibot_meta"
+                        || val.get("subtype").and_then(Value::as_str) == Some("init") =>
+                {
+                    if parsed.tail_activity == TailActivity::Unknown {
+                        parsed.tail_activity = TailActivity::Idle;
+                    }
+                }
                 "custom-title" => {
                     // Already captured customTitle above.
                 }
@@ -1173,6 +1187,27 @@ mod tests {
     use super::*;
     use crate::providers::{discover_all_sessions, read_messages_from_file};
     use serde_json::json;
+
+    #[test]
+    fn discovery_skips_subagent_names_and_subagent_directories() {
+        let home =
+            std::env::temp_dir().join(format!("multibotd-claude-subagents-{}", std::process::id()));
+        let root = home.join(".claude/projects/repo");
+        let normal = root.join("12345678-1234-1234-1234-123456789abc.jsonl");
+        for path in [
+            normal.clone(),
+            root.join("agent-aaa761564f448a3d2.jsonl"),
+            root.join("subagents/normal-uuid.jsonl"),
+            root.join("subagents/agent-nested.jsonl"),
+        ] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "{}\n").unwrap();
+        }
+        let paths = ClaudeProvider.discover_paths(&home, 10, &|_, _| true);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].0, normal);
+        fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn claude_filters_sidechain_meta_compact_and_cleans_user_tags() {
