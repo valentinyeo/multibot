@@ -408,6 +408,9 @@ fn queued_message_edit_remove_and_force_send_are_clickable(cx: &mut TestAppConte
             ("queue-remove-0", "Remove queued message"),
         ] {
             assert_eq!(window.find(id).label(), Some(label));
+            let bounds = window.find(id).bounds();
+            assert_eq!(bounds.size.width, px(24.0));
+            assert_eq!(bounds.size.height, px(24.0));
             let id = gpui_kit::ElementId::from(id);
             assert!(!gpui_kit::base::test_support::texts(window)
                 .iter().any(|text| text.path().contains(&id)));
@@ -697,7 +700,13 @@ fn daily_driver_session_switch_paths_focus_composer(cx: &mut TestAppContext) {
                     .is_focused(window),
                 "{path}"
             );
-            let before = view.read(cx).inputs.prompt_input.read(cx).value().to_string();
+            let before = view
+                .read(cx)
+                .inputs
+                .prompt_input
+                .read(cx)
+                .value()
+                .to_string();
             window.input("ready", cx);
             assert_eq!(
                 view.read(cx).inputs.prompt_input.read(cx).value(),
@@ -4503,6 +4512,24 @@ fn load_older_history_sends_none_probe_and_clears_pending_on_select_or_tail(
                 other => panic!("unexpected request: {other:?}"),
             }
 
+            assert!(v.is_loading_older_history());
+            assert!(!v.load_older_history(cx));
+            assert!(
+                req_rx.try_recv().is_err(),
+                "in-flight requests are deduplicated"
+            );
+
+            v.handle_bridge_event(
+                UiBridgeEvent::Server(ServerEvent::Error {
+                    code: "read_history_failed".into(),
+                    message: "temporary read failure".into(),
+                }),
+                cx,
+            );
+            assert!(!v.is_loading_older_history());
+            assert!(v.load_older_history(cx), "failed pages can be retried");
+            assert!(req_rx.try_recv().is_ok());
+
             // Older page response prepends cleanly and clears pending_older_page_before
             v.handle_bridge_event(
                 UiBridgeEvent::Server(ServerEvent::History {
@@ -7672,81 +7699,100 @@ fn test_round4_gfm_markdown_pipe_table_expand_click_focuses_modal_and_scrolls(
     cx: &mut TestAppContext,
 ) {
     let (handle, view) = open_test_view_with_entity(cx);
-    cx.update_window(handle, |_, window, cx| {
-        let mut md_lines = vec![
-            "| Metric | Value | Notes |".to_string(),
-            "| :-- | :-- | :-- |".to_string(),
-        ];
-        for i in 1..=25 {
-            md_lines.push(format!("| Row {i:02} | {i}00ms | Detail line {i:02} |"));
-        }
-        let table_md = md_lines.join("\n");
-        let expected_hash = crate::chat_view::fnv1a_64(table_md.as_bytes());
-        let expand_btn_id = format!("expand-md-table-0-{expected_hash:016x}");
+    for (width, structured) in [(1280.0, false), (390.0, false), (390.0, true)] {
+        cx.simulate_window_resize(handle, gpui_kit::size(px(width), px(900.0)));
+        cx.update_window(handle, |_, window, cx| {
+            let mut md_lines = vec![
+                "| Metric | Value | Notes |".to_string(),
+                "| :-- | :-- | :-- |".to_string(),
+            ];
+            for i in 1..=25 {
+                md_lines.push(format!("| Row {i:02} | {i}00ms | Detail line {i:02} |"));
+            }
+            let table_md = md_lines.join("\n");
+            let expected_hash = crate::chat_view::fnv1a_64(table_md.as_bytes());
+            let expand_btn_id = format!("expand-md-table-0-{expected_hash:016x}");
 
-        let sess = make_session("s-gfm-table", AgentKind::Claude, "GFM Table", false);
-        view.update(cx, |v, cx| {
-            v.connection.sessions = vec![sess.clone()];
-            v.selection.selected_session = Some(sess);
-            v.history.messages = vec![ChatMessage {
-                id: "m-table".into(),
-                role: MessageRole::Assistant,
-                text: table_md.clone(),
-                timestamp_ms: Some(1_700_000_005_000),
-                blocks: Vec::new(),
-                todos: Vec::new(),
-                source_byte_range: None,
-                quoted_message_id: None,
-            }];
-            window.focus(&v.focus.root_focus_handle, cx);
-            cx.notify();
-        });
-        window.render_frame(cx);
-        // Scroll chat-scroll to bottom so the below-table `Expand` action row is in view
-        view.update(cx, |v, cx| {
-            v.chat_state.scroll_handle.scroll_to_bottom();
-            cx.notify();
-        });
-        window.render_frame(cx);
+            let sess = make_session("s-gfm-table", AgentKind::Claude, "GFM Table", false);
+            view.update(cx, |v, cx| {
+                if width < 680.0 {
+                    v.set_sidebar_mode_synced(multibot_core::SidebarMode::Hidden, cx);
+                }
+                v.connection.sessions = vec![sess.clone()];
+                v.selection.selected_session = Some(sess);
+                v.history.messages = vec![ChatMessage {
+                    id: "m-table".into(),
+                    role: MessageRole::Assistant,
+                    text: table_md.clone(),
+                    timestamp_ms: Some(1_700_000_005_000),
+                    blocks: if structured {
+                        vec![MessageBlock::Text {
+                            text: table_md.clone(),
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    todos: Vec::new(),
+                    source_byte_range: None,
+                    quoted_message_id: None,
+                }];
+                window.focus(&v.focus.root_focus_handle, cx);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            // Scroll chat-scroll to bottom so the below-table `Expand` action row is in view
+            view.update(cx, |v, cx| {
+                v.chat_state.scroll_handle.scroll_to_bottom();
+                cx.notify();
+            });
+            window.render_frame(cx);
 
-        assert!(
-            window.try_find(expand_btn_id.clone()).is_some(),
-            "GFM pipe table must render Expand button `{expand_btn_id}`"
-        );
+            assert!(
+                window.try_find(expand_btn_id.clone()).is_some(),
+                "GFM pipe table must render Expand button `{expand_btn_id}`"
+            );
 
-        // Click the GFM pipe table's Expand button
-        window.click(expand_btn_id, cx);
-        window.render_frame(cx);
+            let bubble = window.find("msg-bubble-0").bounds();
+            let expand = window.find(expand_btn_id.clone());
+            assert!(bubble.size.width <= px(680.0));
+            assert!(expand.visible(), "Expand must remain visible at width {width}");
+            assert!(expand.bounds().left() >= bubble.left());
+            assert!(expand.bounds().right() <= bubble.right());
 
-        assert!(
-            view.read(cx).table_modal_state.is_open(),
-            "Clicking GFM pipe table Expand button must open table_modal_state"
-        );
-        assert!(
-            view.read(cx)
-                .table_modal_state
-                .focus_handle
-                .as_ref()
-                .is_some_and(|fh| fh.is_focused(window)),
-            "Clicking GFM pipe table Expand button must focus table_modal_state.focus_handle"
-        );
+            // Click the GFM pipe table's Expand button
+            window.click(expand_btn_id, cx);
+            window.render_frame(cx);
 
-        // Verify keyboard scrolling works immediately without extra clicks
-        let y_before = view.read(cx).table_modal_state.scroll.y;
-        window.press("down", cx);
-        window.render_frame(cx);
-        assert!(
-            view.read(cx).table_modal_state.scroll.y > y_before,
-            "Pressing Down after clicking GFM pipe table Expand must scroll table_modal_state.scroll.y (before={y_before}, after={})",
-            view.read(cx).table_modal_state.scroll.y
-        );
+            assert!(
+                view.read(cx).table_modal_state.is_open(),
+                "Clicking GFM pipe table Expand button must open table_modal_state"
+            );
+            assert!(
+                view.read(cx)
+                    .table_modal_state
+                    .focus_handle
+                    .as_ref()
+                    .is_some_and(|fh| fh.is_focused(window)),
+                "Clicking GFM pipe table Expand button must focus table_modal_state.focus_handle"
+            );
 
-        // Escape closes Table Modal cleanly
-        window.press("escape", cx);
-        window.render_frame(cx);
-        assert!(!view.read(cx).table_modal_state.is_open());
-    })
-    .unwrap();
+            // Verify keyboard scrolling works immediately without extra clicks
+            let y_before = view.read(cx).table_modal_state.scroll.y;
+            window.press("down", cx);
+            window.render_frame(cx);
+            assert!(
+                view.read(cx).table_modal_state.scroll.y > y_before,
+                "Pressing Down after clicking GFM pipe table Expand must scroll table_modal_state.scroll.y (before={y_before}, after={})",
+                view.read(cx).table_modal_state.scroll.y
+            );
+
+            // Escape closes Table Modal cleanly
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(!view.read(cx).table_modal_state.is_open());
+        })
+        .unwrap();
+    }
 }
 
 #[gpui_kit::test]
@@ -9992,4 +10038,90 @@ fn force_send_accepts_attachment_or_reply_without_typed_text(cx: &mut TestAppCon
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text.contains("Quoted reply")));
         assert!(rx.try_recv().is_err());
     }).unwrap();
+}
+
+#[gpui_kit::test]
+fn sparse_history_backfill_stops_at_visible_count_eof_or_page_cap(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_view_with_entity(cx);
+    cx.update_window(handle, |_, _, cx| {
+        for (agent, file_size, page_messages, eof_page, expected_pages) in [
+            (AgentKind::Antigravity, 512 * 1024, 1, None, 6),
+            (AgentKind::Antigravity, 512 * 1024, 12, None, 2),
+            (AgentKind::Antigravity, 512 * 1024, 1, Some(2), 2),
+            (AgentKind::Antigravity, 1000, 1, None, 0),
+            (AgentKind::Claude, 1000, 1, None, 0),
+            (AgentKind::Claude, 512 * 1024, 1, Some(1), 1),
+        ] {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            view.update(cx, |v, cx| {
+                let session = make_session("sparse", agent, "Sparse", false);
+                v.connection.daemon_tx = Some(tx);
+                v.connection.sessions = vec![session.clone()];
+                v.history
+                    .chat_cache
+                    .remove_memory(&CacheKey::new("local", agent, "sparse"));
+                v.select_session(session, cx);
+                while rx.try_recv().is_ok() {}
+                let message = |id: String| ChatMessage {
+                    id,
+                    role: MessageRole::User,
+                    text: "Visible message".into(),
+                    ..Default::default()
+                };
+                let history = |messages, oldest, latest, has_more| ServerEvent::History {
+                    session_id: "sparse".into(),
+                    messages,
+                    oldest_offset: Some(oldest),
+                    latest_offset: Some(latest),
+                    has_more,
+                    file_size: Some(file_size),
+                    file_mtime_ms: None,
+                    probe_sha256: None,
+                    todos: vec![],
+                };
+                v.handle_bridge_event(
+                    UiBridgeEvent::Server(history(
+                        vec![message("tail".into())],
+                        10000,
+                        file_size,
+                        true,
+                    )),
+                    cx,
+                );
+                for page in 0..expected_pages {
+                    let before = 10000 - page as u64 * 100;
+                    assert!(matches!(rx.try_recv(), Ok(ClientRequest::ReadHistory {
+                        before_offset: Some(offset), ..
+                    }) if offset == before));
+                    assert!(rx.try_recv().is_err());
+                    assert!(v.chat_state.scroll.follow_bottom);
+                    assert!(v.chat_state.prepend_scroll_anchor.is_none());
+                    let messages = (0..page_messages)
+                        .map(|i| message(format!("page-{page}-{i}")))
+                        .collect();
+                    v.handle_bridge_event(
+                        UiBridgeEvent::Server(history(
+                            messages,
+                            before - 100,
+                            before,
+                            eof_page != Some(page + 1),
+                        )),
+                        cx,
+                    );
+                }
+                assert!(rx.try_recv().is_err(), "backfill must stop");
+                assert_eq!(v.history.auto_backfill_pages, expected_pages);
+                assert!(!v.is_loading_older_history());
+                assert!(v.chat_state.scroll.follow_bottom);
+                assert_eq!(
+                    v.chat_state.scroll.pending_scroll,
+                    PendingScrollTarget::Bottom
+                );
+                assert!(v.chat_state.prepend_scroll_anchor.is_none());
+                v.clear_active_session_view(cx);
+                assert_eq!(v.history.auto_backfill_pages, 0);
+            });
+        }
+    })
+    .unwrap();
 }

@@ -317,12 +317,17 @@ impl MultibotView {
                 .is_some_and(|s| s.id == *session_id)
             {
                 if added_count > 0 {
-                    if self.chat_state.scroll.pending_scroll == PendingScrollTarget::None {
+                    if !self.chat_state.scroll.follow_bottom
+                        && self.chat_state.scroll.pending_scroll == PendingScrollTarget::None
+                    {
                         let handle = &self.chat_state.scroll_handle;
                         self.chat_state.prepend_scroll_anchor =
                             Some((handle.max_offset().y, handle.offset()));
                     }
                     self.chat_state.scroll.prepended(added_count);
+                    if self.chat_state.scroll.follow_bottom {
+                        self.chat_state.scroll.pending_scroll = PendingScrollTarget::Bottom;
+                    }
                 }
                 self.history.messages = self.preserve_local_messages(&session_key, cached.messages);
                 self.chat_state
@@ -706,6 +711,55 @@ impl MultibotView {
             .is_some_and(|c| c.has_more && c.oldest_offset > 0)
     }
 
+    pub(crate) fn is_loading_older_history(&self) -> bool {
+        self.selection
+            .selected_session
+            .as_ref()
+            .is_some_and(|session| {
+                self.history
+                    .pending_older_page_before
+                    .contains_key(&session.id)
+            })
+    }
+
+    pub(crate) fn auto_backfill_history(&mut self, cx: &mut Context<Self>) {
+        if !self.has_unloaded_older_history()
+            || self.is_loading_older_history()
+            || self.history.auto_backfill_pages >= 6
+        {
+            return;
+        }
+        let Some(cached) = self
+            .history
+            .active_switch_token
+            .as_ref()
+            .and_then(|token| self.history.chat_cache.get(&token.key))
+        else {
+            return;
+        };
+        // Small fixtures and ordinary short chats must not initiate extra reads.
+        if cached.file_size < 256 * 1024 {
+            return;
+        }
+        let visible_count = crate::chat_view::project_visible_messages_with_overrides(
+            &self.history.messages,
+            &self.chat_state.local_reactions,
+            &self.chat_state.local_reaction_removals,
+            false,
+        )
+        .iter()
+        .filter(|message| {
+            matches!(
+                message.message.role,
+                MessageRole::User | MessageRole::Assistant
+            )
+        })
+        .count();
+        if visible_count < 25 && self.load_older_history(cx) {
+            self.history.auto_backfill_pages += 1;
+        }
+    }
+
     pub(crate) fn load_older_history(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(ref sess) = self.selection.selected_session else {
             return false;
@@ -724,6 +778,9 @@ impl MultibotView {
         }
         let before = cached.oldest_offset;
         let sess_id = sess.id.clone();
+        if self.history.pending_older_page_before.get(&sess_id) == Some(&before) {
+            return false;
+        }
         let ok = tx
             .send(ClientRequest::ReadHistory {
                 session_id: sess_id.clone(),

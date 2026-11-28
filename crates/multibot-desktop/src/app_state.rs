@@ -42,6 +42,7 @@ pub(crate) struct TranscriptState {
     pub(crate) active_switch_token: Option<SwitchToken>,
     pub(crate) pending_switch_tokens: HashMap<String, SwitchToken>,
     pub(crate) pending_older_page_before: HashMap<String, u64>,
+    pub(crate) auto_backfill_pages: u8,
     pub(crate) next_search_request_seq: u64,
     pub(crate) remote_search_request_id: Option<String>,
     pub(crate) remote_search_hits: Vec<SearchHit>,

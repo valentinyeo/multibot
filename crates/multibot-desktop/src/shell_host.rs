@@ -956,7 +956,7 @@ impl MultibotView {
                         )
                     }),
             )
-            .when_some(self.render_find_bar(cx), |el, bar| el.child(bar))
+            .when_some(self.render_find_bar(760.0, cx), |el, bar| el.child(bar))
             .child(
                 div()
                     .id("shell-viewport")
