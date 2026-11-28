@@ -144,6 +144,11 @@ pub(super) fn launch_google_signin(mut session: SigninProcess) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+    match std::fs::remove_file(profile.join("DevToolsActivePort")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("Remove stale Chrome debugging port file"),
+    }
     let mut command = command_line(&program, &signin_launch_args(&profile));
     let program = wide(program.as_os_str());
     unsafe {
