@@ -2,6 +2,8 @@ use super::*;
 
 impl MultibotView {
     pub(crate) fn clear_active_session_view(&mut self) {
+        self.chat_state.busy_timer = None;
+        self.chat_state.busy_timer_key = None;
         self.chat_state.pending_harness_switch = None;
         self.voice.cancel();
         self.selection.selected_session = None;
@@ -111,6 +113,7 @@ impl MultibotView {
             .insert(session.id.clone(), token);
         self.selection.selected_session_host = Some(host.clone());
         self.selection.selected_session = Some(session.clone());
+        self.sync_busy_dots_timer(cx);
         let full_width = self
             .sidebar_state
             .workspace_store
@@ -179,7 +182,9 @@ impl MultibotView {
             })
             .is_ok();
         if ok {
-            self.notice = Some(format!("Stop requested for {}.", sess.title));
+            let key = self.session_key_for(sess);
+            self.finish_turn_without_reply(&key, "Stopped");
+            self.sync_busy_dots_timer(cx);
         }
         cx.notify();
         ok

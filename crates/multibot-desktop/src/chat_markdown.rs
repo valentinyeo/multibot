@@ -159,15 +159,6 @@ pub(crate) fn visible_diff_slice(diff: &DiffBlock, expanded: bool) -> (&[String]
     (&diff.lines[..shown_len], remaining)
 }
 
-pub(super) fn truncate_tool_text(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    let mut out: String = text.chars().take(max_chars).collect();
-    out.push('…');
-    out
-}
-
 pub(crate) fn effective_todos(
     messages: &[ChatMessage],
     session: Option<&SessionSummary>,

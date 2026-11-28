@@ -19,12 +19,17 @@ impl MultibotView {
             }
         }
 
+        let mut should_flush = false;
+        let event_host = self.current_host_label().to_string();
         if let UiBridgeEvent::Server(ref server_event) = event {
             let host = self.current_host_label().to_string();
             if let Ok(mut shared) = self.outbox.shared_chat_outbox.lock() {
                 shared.outbox.observe_server_event(&host, server_event);
             }
-            self.handle_outbox_event(&host, server_event);
+            if !is_older_page_hint {
+                self.observe_turn_event(&host, server_event);
+            }
+            should_flush = self.handle_outbox_event(&host, server_event);
         }
         match event {
             UiBridgeEvent::Connected { host_label, req_tx } => {
@@ -508,6 +513,10 @@ impl MultibotView {
                 }
             },
         }
+        if should_flush {
+            self.flush_outbox_for_host(&event_host);
+        }
+        self.sync_busy_dots_timer(cx);
         cx.notify();
     }
 

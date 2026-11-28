@@ -63,6 +63,7 @@ use gpui_kit::{
         button::{Button, ButtonCustomVariant, ButtonVariants},
         h_flex,
         input::{InputEvent, InputState, TextareaState},
+        label::Label,
     },
     div,
     prelude::FluentBuilder,
@@ -608,18 +609,33 @@ impl MultibotView {
                     })
                     .when_some(self.render_update_pill(cx), |el, pill| el.child(pill))
                     .when(
-                        self.main_surface == MainSurface::Chat
-                            && self
-                                .selection
-                                .selected_session
-                                .as_ref()
-                                .is_some_and(|s| s.working),
+                        self.main_surface == MainSurface::Chat && self.is_active_chat_working(),
                         |el| {
                             el.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme::text_muted())
-                                    .child("Agent is working"),
+                                div().child(
+                                    div()
+                                        .id("chat-activity-pill")
+                                        .test_support()
+                                        .px_2p5()
+                                        .py_0p5()
+                                        .rounded(RADIUS_CHIP)
+                                        .bg(theme::bg_surface())
+                                        .border_1()
+                                        .border_color(theme::border_subtle())
+                                        .text_xs()
+                                        .text_color(theme::text_secondary())
+                                        .max_w(px(360.0))
+                                        .truncate()
+                                        .child(
+                                            Label::new(crate::chat_view::activity_label(
+                                                &self.history.messages,
+                                            ))
+                                            .text_xs()
+                                            .line_height(px(14.0))
+                                            .text_color(theme::text_secondary())
+                                            .truncate(),
+                                        ),
+                                ),
                             )
                         },
                     ),
@@ -690,6 +706,7 @@ impl MultibotView {
 
 impl Render for MultibotView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_busy_dots_timer(cx);
         if self.active_modal == ActiveModal::None
             && (self.sidebar_state.rename.is_some()
                 || self.sidebar_state.new_workspace_draft.is_some())

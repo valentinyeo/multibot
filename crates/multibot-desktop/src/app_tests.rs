@@ -190,6 +190,7 @@ fn force_sent_message_survives_quiet_interrupt_and_history(cx: &mut TestAppConte
                     session_id: session.id.clone(), ok, detail: detail.into(),
                 }), cx);
                 assert!(v.notice.is_none());
+                assert!(v.is_active_chat_working(), "an old interrupt acknowledgement must not end the newly sent prompt");
             }
             v.apply_history_append_event(ServerEvent::HistoryAppend {
                 session_id: session.id.clone(), messages: vec![], latest_offset: None,

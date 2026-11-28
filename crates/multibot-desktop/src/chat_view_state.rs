@@ -122,12 +122,17 @@ pub(crate) enum MessageNavOutcome {
     ReturnedToComposer,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ChatViewState {
     pub scroll_handle: ScrollHandle,
     pub scroll: ChatScrollTracker,
     pub prepend_scroll_anchor: Option<(Pixels, Point<Pixels>)>,
     pub busy_tick_phase: u8,
+    pub busy_timer: Option<gpui_kit::Task<()>>,
+    pub busy_timer_key: Option<String>,
+    pub awaiting_reply_sessions: HashMap<String, AwaitingReply>,
+    pub turn_notices: HashMap<String, String>,
+    pub image_fetch_state: HashMap<String, ImageFetchState>,
     pub failed_sends: HashMap<String, FailedSend>,
     pub expanded_tools: HashSet<String>,
     pub show_all_tools: HashSet<String>,
@@ -172,6 +177,11 @@ impl Default for ChatViewState {
             scroll: ChatScrollTracker::default(),
             prepend_scroll_anchor: None,
             busy_tick_phase: 0,
+            busy_timer: None,
+            busy_timer_key: None,
+            awaiting_reply_sessions: HashMap::new(),
+            turn_notices: HashMap::new(),
+            image_fetch_state: HashMap::new(),
             failed_sends: HashMap::new(),
             expanded_tools: HashSet::new(),
             show_all_tools: HashSet::new(),

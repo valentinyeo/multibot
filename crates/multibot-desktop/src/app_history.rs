@@ -112,6 +112,7 @@ impl MultibotView {
                     Vec::new()
                 }
             });
+        self.begin_awaiting_reply(&key, host, session, &id, &text, &server_msgs);
         let server_user_count = server_msgs
             .iter()
             .filter(|m| m.role == MessageRole::User)
@@ -122,6 +123,7 @@ impl MultibotView {
             .entry(key.clone())
             .or_default();
         pending.push(PendingSentMessage {
+            awaiting_reply: true,
             message: ChatMessage {
                 id: id.clone(),
                 role: MessageRole::User,
@@ -146,6 +148,7 @@ impl MultibotView {
         session_key: &str,
         server_msgs: Vec<ChatMessage>,
     ) -> Vec<ChatMessage> {
+        self.observe_turn_snapshot(session_key, &server_msgs);
         let mut out = server_msgs;
         if let Some(pending) = self.history.pending_sent_messages.get_mut(session_key) {
             let users: Vec<_> = out.iter().filter(|m| m.role == MessageRole::User).collect();
@@ -585,6 +588,15 @@ impl MultibotView {
             }
         }
 
+        if let Some(session) = self
+            .selection
+            .selected_session
+            .as_ref()
+            .filter(|s| s.id == *session_id)
+        {
+            let key = self.session_key_for(session);
+            self.observe_turn_history(&key, messages, working);
+        }
         let mut sessions_changed = false;
         if let Some(is_working) = working {
             for s in self

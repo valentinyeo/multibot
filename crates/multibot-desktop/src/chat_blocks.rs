@@ -189,11 +189,7 @@ impl MultibotView {
             ToolStatus::Completed => theme::accent_green(),
             ToolStatus::Error => accent_red(),
         };
-        let label = if !summary.trim().is_empty() {
-            summary.to_string()
-        } else {
-            name.to_string()
-        };
+        let label = format!("{} · {}", name, tool_activity_label(name, summary, detail));
         let diff_counts = diff.map(|d| (d.added, d.removed));
         let toggle_key = key.clone();
         let diff_toggle_key = key.clone();
@@ -301,7 +297,14 @@ impl MultibotView {
                         .bg(code_bg())
                         .text_xs()
                         .text_color(theme::text_secondary())
-                        .child(truncate_tool_text(detail, MAX_TOOL_TEXT_CHARS)),
+                        .child(
+                            Label::new(detail.to_string())
+                                .id(SharedString::from(format!(
+                                    "tool-detail-{msg_idx}-{block_idx}"
+                                )))
+                                .text_xs()
+                                .text_color(theme::text_secondary()),
+                        ),
                 );
             }
 
@@ -401,7 +404,14 @@ impl MultibotView {
                         .bg(code_bg())
                         .text_xs()
                         .text_color(theme::text_muted())
-                        .child(truncate_tool_text(out, MAX_TOOL_TEXT_CHARS)),
+                        .child(
+                            Label::new(out.to_string())
+                                .id(SharedString::from(format!(
+                                    "tool-output-{msg_idx}-{block_idx}"
+                                )))
+                                .text_xs()
+                                .text_color(theme::text_muted()),
+                        ),
                 );
             }
 
@@ -416,6 +426,7 @@ impl MultibotView {
         url: Option<&str>,
         local_path: Option<&str>,
         alt: &str,
+        id: &str,
     ) -> AnyElement {
         let resolved_local = local_path
             .map(PathBuf::from)
@@ -429,6 +440,20 @@ impl MultibotView {
             });
 
         let mut card = div()
+            .id(SharedString::from(format!("chat-image-{id}")))
+            .test_support()
+            .when_some(
+                url.filter(|u| crate::external_url::is_http_url(u))
+                    .map(str::to_string),
+                |el, url| {
+                    el.cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            let _ = crate::external_url::open_external_url(&url);
+                        })
+                },
+            )
             .max_w(px(320.0))
             .max_h(px(480.0))
             .rounded(RADIUS_ROW)

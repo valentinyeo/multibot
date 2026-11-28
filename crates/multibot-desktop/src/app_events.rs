@@ -11,7 +11,10 @@ impl MultibotView {
         cx: &mut Context<Self>,
     ) {
         self.sync_from_shared_store(cx);
-        self.handle_outbox_event(host_label, &event);
+        if !is_older_page_hint {
+            self.observe_turn_event(host_label, &event);
+        }
+        let should_flush = self.handle_outbox_event(host_label, &event);
         if let ServerEvent::Error { code, message } = &event
             && code == "switch_shell_client_failed"
         {
@@ -37,6 +40,9 @@ impl MultibotView {
                     | ServerEvent::Error { .. }
             )
         {
+            if should_flush {
+                self.flush_outbox_for_host(host_label);
+            }
             return;
         }
         let mut changed = false;
@@ -299,10 +305,13 @@ impl MultibotView {
                         .chat_cache
                         .reconcile_server_event(&token, "", &ev);
                 }
-                if code == "send_failed"
-                    && let Some((msg_id, text)) = self.selection.last_dispatched_prompt.take()
-                {
-                    self.record_send_failure(msg_id, text, message.clone(), cx);
+                if code == "send_failed" {
+                    if let Some((msg_id, text)) = self.selection.last_dispatched_prompt.take() {
+                        self.record_send_failure(msg_id, text, message.clone(), cx);
+                    } else if let Some(session) = &self.selection.selected_session {
+                        let key = self.session_key_for(session);
+                        self.finish_turn_without_reply(&key, "Message delivery failed");
+                    }
                 }
                 if code == "switch_harness_failed" {
                     self.chat_state.pending_harness_switch = None;
@@ -315,6 +324,11 @@ impl MultibotView {
             | ServerEvent::SessionArchived { .. }
             | ServerEvent::SessionInterrupted { .. } => {}
         }
+        // Reconcile the completed turn before starting the next queued prompt.
+        if should_flush {
+            self.flush_outbox_for_host(host_label);
+        }
+        self.sync_busy_dots_timer(cx);
         if changed {
             self.cleanup_unmounted_surface_state();
             cx.notify();

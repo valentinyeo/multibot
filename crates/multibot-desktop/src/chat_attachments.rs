@@ -456,3 +456,383 @@ impl MultibotView {
         true
     }
 }
+
+pub(crate) const MAX_REMOTE_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImageFetchState {
+    Loading,
+    Cached,
+    Failed,
+}
+
+fn remote_image_url_allowed(value: &str) -> bool {
+    url::Url::parse(value).is_ok_and(|url| {
+        url.username().is_empty()
+            && url.password().is_none()
+            && (url.scheme() == "https"
+                || (url.scheme() == "http"
+                    && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))))
+    })
+}
+
+pub(crate) fn message_image_urls(message: &ChatMessage) -> Vec<String> {
+    let mut seen: HashSet<String> = message
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            MessageBlock::Image { url: Some(url), .. } => Some(url.clone()),
+            _ => None,
+        })
+        .collect();
+    let texts: Vec<&str> = if message.blocks.is_empty() {
+        vec![&message.text]
+    } else {
+        message
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                MessageBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut urls = Vec::new();
+    for text in texts {
+        for range in crate::external_url::url_ranges(text) {
+            let value = &text[range];
+            if remote_image_url_allowed(value)
+                && url::Url::parse(value).is_ok_and(|url| is_supported_image_ext(url.path()))
+                && seen.insert(value.to_string())
+            {
+                urls.push(value.to_string());
+            }
+        }
+    }
+    urls
+}
+
+fn has_image_magic(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        || bytes.starts_with(b"\xff\xd8\xff")
+        || bytes.starts_with(b"GIF87a")
+        || bytes.starts_with(b"GIF89a")
+        || (bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"))
+}
+
+pub(crate) fn fetch_remote_image(url: &str, cache_path: &Path) -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+    static PART_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .max_redirects(0)
+            .timeout_connect(Some(Duration::from_secs(5)))
+            .timeout_global(Some(Duration::from_secs(15)))
+            .build(),
+    );
+    let mut current = url::Url::parse(url)?;
+    let mut response = None;
+    for _ in 0..=5 {
+        anyhow::ensure!(
+            remote_image_url_allowed(current.as_str()),
+            "Unsupported image URL"
+        );
+        let candidate = agent
+            .get(current.as_str())
+            .header("User-Agent", "Multibot/0.1 image-preview")
+            .call()?;
+        if candidate.status().is_redirection() {
+            let location = candidate
+                .headers()
+                .get("location")
+                .ok_or_else(|| anyhow::anyhow!("Missing image redirect"))?
+                .to_str()?;
+            current = current.join(location)?;
+        } else {
+            anyhow::ensure!(candidate.status().is_success(), "Image request failed");
+            response = Some(candidate);
+            break;
+        }
+    }
+    let mut response = response.ok_or_else(|| anyhow::anyhow!("Too many image redirects"))?;
+    if let Some(length) = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        anyhow::ensure!(length <= MAX_REMOTE_IMAGE_BYTES, "Image exceeds 10 MB");
+    }
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(MAX_REMOTE_IMAGE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_REMOTE_IMAGE_BYTES,
+        "Image exceeds 10 MB"
+    );
+    anyhow::ensure!(has_image_magic(&bytes), "Response is not an image");
+    let parent = cache_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Missing image cache directory"))?;
+    std::fs::create_dir_all(parent)?;
+    // Windows cannot replace an open file; distinct parts also isolate sibling windows.
+    let part = cache_path.with_extension(format!(
+        "{}.{}.part",
+        std::process::id(),
+        PART_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| -> anyhow::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&part)?;
+        file.write_all(&bytes)?;
+        drop(file);
+        std::fs::rename(&part, cache_path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    result
+}
+
+impl MultibotView {
+    pub(crate) fn sync_remote_image_fetches(&mut self, cx: &mut Context<Self>) {
+        let urls: HashSet<_> = self
+            .history
+            .messages
+            .iter()
+            .flat_map(|message| {
+                let mut urls = message_image_urls(message);
+                urls.extend(message.blocks.iter().filter_map(|block| match block {
+                    MessageBlock::Image {
+                        url: Some(url),
+                        local_path,
+                        ..
+                    } if !local_path.as_ref().is_some_and(|p| Path::new(p).is_file()) => {
+                        Some(url.clone())
+                    }
+                    _ => None,
+                }));
+                urls
+            })
+            .collect();
+        for url in urls {
+            self.ensure_remote_image_fetch(&url, cx);
+        }
+    }
+
+    pub(crate) fn ensure_remote_image_fetch(&mut self, url: &str, cx: &mut Context<Self>) {
+        let path = image_cache_path(url, image_ext_from_url(url));
+        if path.is_file()
+            || !remote_image_url_allowed(url)
+            || self.chat_state.image_fetch_state.contains_key(url)
+        {
+            return;
+        }
+        self.chat_state
+            .image_fetch_state
+            .insert(url.into(), ImageFetchState::Loading);
+        let url = url.to_string();
+        let worker_url = url.clone();
+        let fetch = cx
+            .background_executor()
+            .spawn(async move { fetch_remote_image(&worker_url, &path) });
+        cx.spawn(async move |this, cx| {
+            let state = if fetch.await.is_ok() {
+                ImageFetchState::Cached
+            } else {
+                ImageFetchState::Failed
+            };
+            let _ = this.update(cx, |view, cx| {
+                view.chat_state.image_fetch_state.insert(url, state);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
+#[cfg(test)]
+mod remote_image_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    pub(super) const PNG: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 4,
+        0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 100, 248, 15, 0, 1, 5,
+        1, 1, 39, 24, 227, 102, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+
+    pub(super) fn serve_once(
+        body: Vec<u8>,
+        content_type: &str,
+        declared_size: Option<u64>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/screenshot.png", listener.local_addr().unwrap());
+        let content_type = content_type.to_string();
+        let thread = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            let length = declared_size
+                .map(|size| format!("Content-Length: {size}\r\n"))
+                .unwrap_or_default();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{length}Connection: close\r\n\r\n").unwrap();
+            let _ = stream.write_all(&body);
+        });
+        (url, thread)
+    }
+
+    #[test]
+    fn remote_image_fetch_caches_png_atomically_and_rejects_html_and_oversized_payloads() {
+        let dir = std::env::temp_dir().join(format!("multibot-images-{}", now_unix_ms()));
+        for (body, content_type, length, expected) in [
+            (PNG.to_vec(), "image/png", Some(PNG.len() as u64), true),
+            (
+                b"<html>not an image</html>".to_vec(),
+                "image/png",
+                None,
+                false,
+            ),
+            (
+                PNG.to_vec(),
+                "image/png",
+                Some(MAX_REMOTE_IMAGE_BYTES + 1),
+                false,
+            ),
+            (
+                vec![0; MAX_REMOTE_IMAGE_BYTES as usize + 1],
+                "image/png",
+                None,
+                false,
+            ),
+        ] {
+            let (url, server) = serve_once(body, content_type, length);
+            let path = image_cache_path_in(&dir, &url, image_ext_from_url(&url));
+            assert_eq!(fetch_remote_image(&url, &path).is_ok(), expected);
+            server.join().unwrap();
+            assert_eq!(path.is_file(), expected);
+            if expected {
+                assert_eq!(std::fs::read(&path).unwrap(), PNG);
+            }
+        }
+        assert!(
+            std::fs::read_dir(&dir).unwrap().all(|entry| !entry
+                .unwrap()
+                .path()
+                .to_string_lossy()
+                .ends_with(".part"))
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn remote_image_url_policy_and_magic_reject_non_images() {
+        for url in [
+            "https://screencast2.com/x.png",
+            "http://127.0.0.1:3456/x.png",
+            "http://localhost/x.png",
+        ] {
+            assert!(remote_image_url_allowed(url));
+        }
+        for url in [
+            "http://example.com/x.png",
+            "file:///tmp/x.png",
+            "https://example.com:bad/x.png",
+        ] {
+            assert!(!remote_image_url_allowed(url));
+        }
+        for bytes in [PNG, b"\xff\xd8\xffabc", b"GIF89aabc", b"RIFF1234WEBPabc"] {
+            assert!(has_image_magic(bytes));
+        }
+        assert!(!has_image_magic(b"<html>image/png</html>"));
+        assert!(!has_image_magic(b"RIFF1234WAVE"));
+    }
+
+    #[gpui_kit::test]
+    fn remote_image_background_fetch_is_deduplicated_and_card_opens_original(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::{AppContext, test::TestWindowExt};
+        let (url, server) = serve_once(PNG.to_vec(), "image/png", Some(PNG.len() as u64));
+        let path = image_cache_path(&url, image_ext_from_url(&url));
+        let (handle, view) = super::super::tests::open_test_chat_window(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.selection.selected_session = Some(SessionSummary {
+                    id: "image-fetch".into(),
+                    ..Default::default()
+                });
+                v.history.messages = vec![ChatMessage {
+                    role: MessageRole::User,
+                    text: url.clone(),
+                    ..Default::default()
+                }];
+                v.ensure_remote_image_fetch(&url, cx);
+                v.ensure_remote_image_fetch(&url, cx);
+                assert_eq!(v.chat_state.image_fetch_state.len(), 1);
+                assert_eq!(
+                    v.chat_state.image_fetch_state[&url],
+                    ImageFetchState::Loading
+                );
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.find("chat-image-0-url-0").visible());
+        })
+        .unwrap();
+        cx.run_until_parked();
+        server.join().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), PNG);
+        cx.update_window(handle, |_, window, cx| {
+            assert_eq!(
+                view.read(cx).chat_state.image_fetch_state[&url],
+                ImageFetchState::Cached
+            );
+            view.update(cx, |v, cx| v.ensure_remote_image_fetch(&url, cx));
+            window.render_frame(cx);
+            let _ = crate::external_url::take_opened_urls();
+            window.click("chat-image-0-url-0", cx);
+            assert_eq!(crate::external_url::take_opened_urls(), vec![url.clone()]);
+        })
+        .unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        let (bad_url, server) =
+            serve_once(b"<html>not an image</html>".to_vec(), "text/html", None);
+        view.update(cx, |v, cx| {
+            v.ensure_remote_image_fetch(&bad_url, cx);
+            v.ensure_remote_image_fetch(&bad_url, cx);
+        });
+        cx.run_until_parked();
+        server.join().unwrap();
+        view.update(cx, |v, cx| {
+            assert_eq!(
+                v.chat_state.image_fetch_state[&bad_url],
+                ImageFetchState::Failed
+            );
+            v.ensure_remote_image_fetch(&bad_url, cx);
+            assert_eq!(
+                v.chat_state.image_fetch_state[&bad_url],
+                ImageFetchState::Failed
+            );
+        });
+        assert!(!image_cache_path(&bad_url, image_ext_from_url(&bad_url)).is_file());
+    }
+}

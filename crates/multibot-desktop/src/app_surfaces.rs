@@ -160,6 +160,8 @@ impl MultibotView {
     pub(crate) fn set_main_surface(&mut self, next: MainSurface) {
         self.chat_state.composer_menu_open = false;
         if self.main_surface != next {
+            self.chat_state.busy_timer = None;
+            self.chat_state.busy_timer_key = None;
             #[cfg(windows)]
             if next != MainSurface::Chat {
                 self.hide_browser_pane();

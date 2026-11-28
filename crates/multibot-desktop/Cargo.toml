@@ -24,6 +24,7 @@ portable-pty.workspace = true
 sysinfo.workspace = true
 tokio.workspace = true
 url.workspace = true
+ureq.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6"

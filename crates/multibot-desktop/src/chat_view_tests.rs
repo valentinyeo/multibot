@@ -601,7 +601,7 @@ fn font_zoom_clamps_10_to_28_and_resets_to_14() {
 // Headless GPUI Kit Integration Tests
 // ------------------------------------------------------------------------
 
-fn open_test_chat_window(
+pub(super) fn open_test_chat_window(
     cx: &mut TestAppContext,
 ) -> (gpui_kit::AnyWindowHandle, gpui_kit::Entity<MultibotView>) {
     cx.update(|cx| {
@@ -893,7 +893,7 @@ fn dictation_reference_controls_toggle_and_render(cx: &mut TestAppContext) {
         assert_eq!(mic.size, gpui_kit::size(px(32.0), px(32.0)));
         assert_eq!(send.size, gpui_kit::size(px(32.0), px(32.0)));
         assert_eq!(window.find("send-prompt").label(), Some("Send"));
-        for (bounds, color) in [(mic, 0x262626), (send, 0xA66335)] {
+        for (bounds, color) in [(mic, 0x262626), (send, 0x262626)] {
             assert!(
                 window.painted_quads().into_iter().any(|q| {
                     q.bounds == bounds.scale(window.scale_factor())
@@ -1725,14 +1725,19 @@ fn busy_indicator_has_three_readable_dots_and_disappears_when_idle(cx: &mut Test
             window.render_frame(cx);
             let indicator = window.find("chat-busy-dots");
             assert!(indicator.visible());
-            assert_eq!(indicator.bounds().size.height, px(32.0));
+            assert_eq!(indicator.bounds().size.height, px(26.0));
             let mut previous = None;
             for index in 0..3 {
                 let dot = window.find(format!("chat-busy-dot-{index}"));
                 assert!(dot.visible());
-                assert_eq!(dot.bounds().size, gpui_kit::size(px(16.0), px(16.0)));
+                assert_eq!(dot.bounds().size, gpui_kit::size(px(10.0), px(10.0)));
+                let peak = window.find(format!("chat-busy-dot-{phase}"));
+                assert_eq!(
+                    dot.bounds().top() - peak.bounds().top(),
+                    px(if index == phase { 0.0 } else { 3.0 })
+                );
                 if let Some(right) = previous {
-                    assert_eq!(dot.bounds().left() - right, px(8.0));
+                    assert_eq!(dot.bounds().left() - right, px(6.0));
                 }
                 previous = Some(dot.bounds().right());
             }
@@ -4966,4 +4971,437 @@ fn session_mentions_route_to_each_target_host_and_keep_same_host_sender_id(
             assert!(!std::iter::from_fn(|| rx_b.try_recv().ok()).any(|r| matches!(r, ClientRequest::SendCrossSession { .. })));
         });
     }).unwrap();
+}
+
+#[gpui_kit::test]
+fn prompt_echo_does_not_leave_chat_without_reply_or_busy_dots(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let session = SessionSummary {
+                id: "awaiting".into(),
+                ..Default::default()
+            };
+            v.selection.selected_session = Some(session.clone());
+            let host = v.active_session_host().to_string();
+            v.record_pending_sent_message(&host, &session, "local".into(), "hello".into());
+            v.handle_daemon_server_event(
+                multibot_proto::ServerEvent::HistoryAppend {
+                    session_id: session.id,
+                    messages: vec![ChatMessage {
+                        id: "echo".into(),
+                        role: MessageRole::User,
+                        text: "hello".into(),
+                        ..Default::default()
+                    }],
+                    latest_offset: None,
+                    working: Some(false),
+                    todos: vec![],
+                    probe_sha256: None,
+                },
+                cx,
+            );
+            assert!(v.history.pending_sent_messages.is_empty());
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(
+            window.try_find("chat-busy-dots").is_some(),
+            "the echo is not the assistant reply"
+        );
+    })
+    .unwrap();
+}
+
+fn activity_tool(name: &str, summary: &str, detail: &str, status: ToolStatus) -> MessageBlock {
+    MessageBlock::ToolUse {
+        call_id: name.into(),
+        name: name.into(),
+        summary: summary.into(),
+        detail: detail.into(),
+        status,
+        diff: None,
+        output: Some("Full tool output".into()),
+    }
+}
+
+#[test]
+fn activity_labels_are_short_plain_english_and_only_describe_current_turn() {
+    for (name, summary, detail, expected) in [
+        (
+            "read_file",
+            "",
+            r#"{"file_path":"/home/project/src/main.rs"}"#,
+            "Reading main.rs",
+        ),
+        ("Read", "Read C:\\project\\main.rs", "", "Reading main.rs"),
+        ("view_file", "", "", "Reading files"),
+        (
+            "read_file",
+            r#"{"path":"/tmp/source.rs"}"#,
+            "",
+            "Reading source.rs",
+        ),
+        (
+            "run_command",
+            "Checking dependencies",
+            "",
+            "Checking dependencies",
+        ),
+        ("MultiEdit", "", "/tmp/main.rs", "Editing main.rs"),
+        (
+            "run_command",
+            "Running tests",
+            "cargo test",
+            "Running tests",
+        ),
+        ("Bash", r#"{"command":"cargo test"}"#, "", "Running command"),
+        ("WebSearch", "", "", "Searching the web"),
+        ("Grep", "", "", "Searching codebase"),
+        ("Agent", "", "", "Running helper agent"),
+        ("Thinking", "private reasoning", "", "Thinking"),
+        ("System", "", "", "Updating context"),
+        ("Checkpoint", "", "", "Updating context"),
+    ] {
+        assert_eq!(
+            tool_activity_label(name, summary, detail),
+            expected,
+            "{name}"
+        );
+    }
+    let mut messages = vec![
+        ChatMessage {
+            blocks: vec![activity_tool(
+                "Read",
+                "",
+                "/tmp/old.rs",
+                ToolStatus::Running,
+            )],
+            ..Default::default()
+        },
+        ChatMessage {
+            role: MessageRole::User,
+            text: "new turn".into(),
+            ..Default::default()
+        },
+    ];
+    assert_eq!(activity_label(&messages), "Thinking");
+    messages.push(ChatMessage {
+        blocks: vec![
+            activity_tool("Read", "", "/tmp/new.rs", ToolStatus::Running),
+            activity_tool("Bash", "Running tests", "", ToolStatus::Completed),
+            activity_tool("Checkpoint", "", "", ToolStatus::Running),
+        ],
+        ..Default::default()
+    });
+    assert_eq!(activity_label(&messages), "Reading new.rs");
+    if let MessageBlock::ToolUse { status, .. } = &mut messages[2].blocks[0] {
+        *status = ToolStatus::Completed;
+    }
+    assert_eq!(activity_label(&messages), "Running tests");
+}
+
+#[gpui_kit::test]
+fn activity_pill_and_busy_timer_follow_active_session_and_surface(cx: &mut TestAppContext) {
+    use std::time::Duration;
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.selection.selected_session = Some(SessionSummary {
+                id: "activity".into(),
+                working: true,
+                ..Default::default()
+            });
+            v.history.messages = vec![ChatMessage {
+                role: MessageRole::Assistant,
+                blocks: vec![activity_tool(
+                    "read_file",
+                    "",
+                    "/tmp/chat.rs",
+                    ToolStatus::Running,
+                )],
+                ..Default::default()
+            }];
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.find("chat-activity-pill").visible());
+        assert!(
+            gpui_kit::base::test_support::texts(window)
+                .iter()
+                .any(|text| text.text() == "Reading chat.rs"),
+            "texts: {:?}",
+            gpui_kit::base::test_support::texts(window)
+                .iter()
+                .map(|t| t.text())
+                .collect::<Vec<_>>()
+        );
+        assert!(view.read(cx).chat_state.busy_timer.is_some());
+        for id in ["stop-agent", "send-prompt"] {
+            let button = window.find(id);
+            assert!(
+                window
+                    .painted_quads()
+                    .iter()
+                    .any(|q| q.bounds == button.bounds().scale(window.scale_factor())
+                        && q.background == gpui_kit::Background::from(rgb(0x262626)))
+            );
+        }
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(350));
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.chat_state.busy_tick_phase), 1);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let host = v.active_session_host().to_string();
+            let session = SessionSummary {
+                id: "other-active-chat".into(),
+                working: true,
+                ..Default::default()
+            };
+            let key = canonical_session_key(&host, session.agent, &session.id);
+            v.select_session_on_host(host, session, cx);
+            assert_eq!(v.chat_state.busy_timer_key.as_ref(), Some(&key));
+            assert_eq!(v.chat_state.busy_tick_phase, 0);
+            v.set_main_surface(MainSurface::Inbox);
+            assert!(v.chat_state.busy_timer.is_none());
+            cx.notify();
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.set_main_surface(MainSurface::Chat);
+            v.selection.selected_session.as_mut().unwrap().working = false;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(view.read(cx).chat_state.busy_timer.is_none());
+        assert!(window.try_find("chat-activity-pill").is_none());
+        assert!(window.try_find("chat-busy-dots").is_none());
+        assert!(window.try_find("stop-agent").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn awaiting_turn_ends_on_reply_error_stop_or_explicit_end_without_reply(cx: &mut TestAppContext) {
+    use multibot_proto::ServerEvent;
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let session = SessionSummary {
+                id: "turn".into(),
+                ..Default::default()
+            };
+            v.selection.selected_session = Some(session.clone());
+            let host = v.active_session_host().to_string();
+            let key = v.session_key_for(&session);
+            let old = ChatMessage {
+                id: "old".into(),
+                role: MessageRole::Assistant,
+                text: "Previous answer".into(),
+                ..Default::default()
+            };
+            v.history.messages = vec![old.clone()];
+            v.record_pending_sent_message(&host, &session, "send".into(), "hello".into());
+            v.observe_turn_history(&key, &[old], Some(false));
+            assert!(
+                v.is_active_chat_working(),
+                "a stale history refresh is not a reply"
+            );
+            v.selection.selected_session.as_mut().unwrap().working = false;
+            v.observe_turn_history(
+                &key,
+                &[ChatMessage {
+                    role: MessageRole::Assistant,
+                    blocks: vec![activity_tool("Thinking", "", "", ToolStatus::Completed)],
+                    ..Default::default()
+                }],
+                None,
+            );
+            assert!(
+                v.is_active_chat_working(),
+                "tool-only activity is not a text reply"
+            );
+            v.observe_turn_history(
+                &key,
+                &[ChatMessage {
+                    id: "reply".into(),
+                    role: MessageRole::Assistant,
+                    blocks: vec![MessageBlock::Text {
+                        text: "Answer".into(),
+                    }],
+                    ..Default::default()
+                }],
+                None,
+            );
+            assert!(!v.is_active_chat_working());
+            v.record_pending_sent_message(&host, &session, "send2".into(), "again".into());
+            v.handle_daemon_server_event(
+                ServerEvent::HistoryAppend {
+                    session_id: session.id.clone(),
+                    messages: vec![],
+                    latest_offset: None,
+                    working: Some(true),
+                    todos: vec![],
+                    probe_sha256: None,
+                },
+                cx,
+            );
+            v.handle_daemon_server_event(
+                ServerEvent::HistoryAppend {
+                    session_id: session.id.clone(),
+                    messages: vec![],
+                    latest_offset: None,
+                    working: Some(false),
+                    todos: vec![],
+                    probe_sha256: None,
+                },
+                cx,
+            );
+            assert!(!v.is_active_chat_working());
+            assert_eq!(
+                v.chat_state.turn_notices.get(&key).map(String::as_str),
+                Some("No reply received")
+            );
+            v.record_pending_sent_message(&host, &session, "send3".into(), "again".into());
+            v.record_send_failure("send3".into(), "again".into(), "Agent exited".into(), cx);
+            assert!(!v.is_active_chat_working());
+            v.record_pending_sent_message(&host, &session, "send4".into(), "again".into());
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            v.connection.daemon_tx = Some(tx);
+            assert!(v.interrupt_active_session(cx));
+            assert!(!v.is_active_chat_working());
+            assert_eq!(
+                v.chat_state.turn_notices.get(&key).map(String::as_str),
+                Some("Stopped")
+            );
+            v.record_pending_sent_message(&host, &session, "send5".into(), "try again".into());
+            v.handle_daemon_server_event(
+                ServerEvent::HistoryAppend {
+                    session_id: session.id.clone(),
+                    messages: vec![],
+                    latest_offset: None,
+                    working: Some(false),
+                    todos: vec![],
+                    probe_sha256: None,
+                },
+                cx,
+            );
+            assert!(
+                !v.is_active_chat_working(),
+                "an explicit process exit is terminal even without a start event"
+            );
+            assert_eq!(
+                v.chat_state.turn_notices.get(&key).map(String::as_str),
+                Some("No reply received")
+            );
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.find("chat-turn-notice").visible());
+        assert!(window.try_find("chat-busy-dots").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn hidden_native_activity_including_thinking_expands_with_detail_and_output(
+    cx: &mut TestAppContext,
+) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.selection.selected_session = Some(SessionSummary {
+                id: "hidden-activity".into(),
+                ..Default::default()
+            });
+            v.history.messages = vec![ChatMessage {
+                id: "tools".into(),
+                role: MessageRole::Assistant,
+                blocks: ["Thinking", "System", "Checkpoint", "read_file"]
+                    .into_iter()
+                    .map(|name| activity_tool(name, "", "Full tool detail", ToolStatus::Completed))
+                    .collect(),
+                ..Default::default()
+            }];
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("msg-bubble-0").is_none());
+        view.update(cx, |v, cx| {
+            v.toggle_all_tool_steps(cx);
+        });
+        window.render_frame(cx);
+        window.click("tool-cluster-0", cx);
+        window.render_frame(cx);
+        for block in 0..4 {
+            let id = format!("tool-row-0-{block}");
+            assert_eq!(window.find(id.clone()).expanded(), Some(false));
+            window.click(id.clone(), cx);
+            window.render_frame(cx);
+            assert_eq!(window.find(id).expanded(), Some(true));
+            let texts = gpui_kit::base::test_support::texts(window);
+            assert!(
+                texts.iter().any(|t| t.text() == "Full tool detail"),
+                "texts: {:?}",
+                texts.iter().map(|t| t.text()).collect::<Vec<_>>()
+            );
+            assert!(texts.iter().any(|t| t.text() == "Full tool output"));
+        }
+        view.update(cx, |v, cx| {
+            v.toggle_all_tool_steps(cx);
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("msg-bubble-0").is_none());
+    })
+    .unwrap();
+}
+
+#[test]
+fn image_urls_unfurl_from_optimistic_and_text_blocks_without_duplicates() {
+    let url = "https://screencast2.com/LhjAn.png?key=1#preview";
+    let mut message = ChatMessage {
+        text: format!("See ({url}), {url}. https://host/file.txt http://host/a.png"),
+        ..Default::default()
+    };
+    assert_eq!(message_image_urls(&message), vec![url]);
+    message.blocks = vec![MessageBlock::Text {
+        text: message.text.clone(),
+    }];
+    assert_eq!(message_image_urls(&message), vec![url]);
+    message.blocks.push(MessageBlock::Image {
+        url: Some(url.into()),
+        local_path: None,
+        alt: String::new(),
+    });
+    assert!(message_image_urls(&message).is_empty());
+}
+
+#[test]
+fn tool_only_messages_of_every_activity_role_follow_show_tools() {
+    let messages: Vec<_> = [
+        MessageRole::Assistant,
+        MessageRole::System,
+        MessageRole::Tool,
+    ]
+    .into_iter()
+    .map(|role| ChatMessage {
+        role,
+        blocks: vec![activity_tool("Thinking", "", "", ToolStatus::Running)],
+        ..Default::default()
+    })
+    .collect();
+    let empty = HashMap::new();
+    assert!(project_visible_messages_with_overrides(&messages, &empty, &empty, false).is_empty());
+    assert_eq!(
+        project_visible_messages_with_overrides(&messages, &empty, &empty, true).len(),
+        3
+    );
 }

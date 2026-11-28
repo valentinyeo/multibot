@@ -1,3 +1,6 @@
+#[path = "chat_activity.rs"]
+mod activity;
+pub(crate) use activity::*;
 #[path = "chat_actions.rs"]
 mod actions;
 #[path = "chat_attachments.rs"]
@@ -67,7 +70,6 @@ use std::time::Instant;
 
 pub(crate) const DIFF_FOLDED_ROWS: usize = 6;
 pub(crate) const DIFF_EXPANDED_ROWS: usize = 40;
-pub(crate) const MAX_TOOL_TEXT_CHARS: usize = 4000;
 pub(crate) const MAX_PROMPT_QUESTIONS: usize = 4;
 pub(crate) const MAX_PROMPT_OPTIONS: usize = 4;
 pub(crate) const MAX_QUOTE_LINES: usize = 10;
@@ -235,11 +237,8 @@ impl MultibotView {
             Some(s) => format!("{}  {}", s.agent.glyph(), s.title),
             None => "Multibot · Ready".to_string(),
         };
-        let is_working = self
-            .selection
-            .selected_session
-            .as_ref()
-            .is_some_and(|s| s.working);
+        let is_working = self.is_active_chat_working();
+        self.sync_remote_image_fetches(cx);
         let busy_phase = self.chat_state.busy_tick_phase % 3;
         let visible_messages = project_visible_messages_with_overrides(
             &self.history.messages,
@@ -488,6 +487,7 @@ impl MultibotView {
                                     url.as_deref(),
                                     local_path.as_deref(),
                                     alt,
+                                    &format!("{orig_idx}-block-{block_idx}"),
                                 ));
                             }
                             MessageBlock::QuestionPrompt {
@@ -561,6 +561,15 @@ impl MultibotView {
                             cx,
                         ));
                     }
+                }
+
+                for (image_idx, url) in message_image_urls(msg).iter().enumerate() {
+                    body_col = body_col.child(self.render_image_block(
+                        Some(url),
+                        None,
+                        "",
+                        &format!("{orig_idx}-url-{image_idx}"),
+                    ));
                 }
 
                 // Strictly gated trailing prose option fallback on latest assistant message ONLY.
@@ -816,19 +825,20 @@ impl MultibotView {
             }
         }
 
-        // Hard Parity Invariant: busy state = ONLY 3 ticking dots.
         if is_working {
             let dot = |idx: u8| {
                 div()
                     .id(format!("chat-busy-dot-{idx}"))
                     .test_support()
-                    .size(px(16.0))
+                    .size(px(10.0))
+                    .when(busy_phase == idx, |el| el.mb(px(3.0)))
+                    .when(busy_phase != idx, |el| el.mt(px(3.0)))
                     .text_color(if busy_phase == idx {
                         theme::text_primary()
                     } else {
                         theme::text_secondary()
                     })
-                    .child(lucide_icon(icons::DOT, 16.0))
+                    .child(lucide_icon(icons::DOT, 10.0))
             };
             msg_col = msg_col.child(
                 h_flex()
@@ -839,12 +849,36 @@ impl MultibotView {
                     .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
                     .mx_auto()
                     .px_2()
-                    .py_2()
-                    .gap_2()
+                    .py_1p5()
+                    .gap_1p5()
                     .items_center()
-                    .child(dot(0))
-                    .child(dot(1))
-                    .child(dot(2)),
+                    .child(
+                        h_flex()
+                            .h(px(14.0))
+                            .items_center()
+                            .gap_1p5()
+                            .child(dot(0))
+                            .child(dot(1))
+                            .child(dot(2)),
+                    ),
+            );
+        }
+
+        if let Some(session) = &self.selection.selected_session
+            && let Some(notice) = self
+                .chat_state
+                .turn_notices
+                .get(&self.session_key_for(session))
+        {
+            msg_col = msg_col.child(
+                div()
+                    .id("chat-turn-notice")
+                    .test_support()
+                    .px_2()
+                    .py_1p5()
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .child(notice.clone()),
             );
         }
 

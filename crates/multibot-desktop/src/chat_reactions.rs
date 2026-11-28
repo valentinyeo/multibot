@@ -256,7 +256,6 @@ pub(crate) fn project_visible_messages_with_overrides<'a>(
     for (idx, msg) in messages.iter().enumerate() {
         if hidden[idx]
             || (!show_tools
-                && msg.role == MessageRole::Assistant
                 && msg.text.trim().is_empty()
                 && !msg.blocks.is_empty()
                 && msg.blocks.iter().all(|block| match block {

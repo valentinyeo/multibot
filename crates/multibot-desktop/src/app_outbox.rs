@@ -249,7 +249,7 @@ impl MultibotView {
         flushed
     }
 
-    pub(super) fn handle_outbox_event(&mut self, host: &str, event: &ServerEvent) {
+    pub(super) fn handle_outbox_event(&mut self, host: &str, event: &ServerEvent) -> bool {
         let updates: Vec<_> = match event {
             ServerEvent::SessionUpdated { session } => {
                 vec![(session.id.clone(), Some(session.agent), session.working)]
@@ -263,7 +263,7 @@ impl MultibotView {
                 .iter()
                 .map(|s| (s.id.clone(), Some(s.agent), s.working))
                 .collect(),
-            _ => return,
+            _ => return false,
         };
         for (id, agent, working) in updates {
             let agent = agent
@@ -304,7 +304,7 @@ impl MultibotView {
                 session.working = working;
             }
         }
-        self.flush_outbox_for_host(host);
+        true
     }
 
     pub(crate) fn remove_queued_entry(

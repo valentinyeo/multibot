@@ -261,11 +261,7 @@ impl MultibotView {
         .flatten()
         .collect::<Vec<_>>()
         .join(" · ");
-        let is_working = self
-            .selection
-            .selected_session
-            .as_ref()
-            .is_some_and(|s| s.working);
+        let is_working = self.is_active_chat_working();
         let mut queued_entries = Vec::new();
         let mut queued_previews = Vec::new();
         if let Some(session) = &self.selection.selected_session {
@@ -627,12 +623,12 @@ impl MultibotView {
                         .when(is_working, |el| el.child(
                             Button::new("stop-agent")
                                 .small()
-                                .custom(ButtonCustomVariant::new(cx).foreground(rgb(0xFFFFFF).into())
-                                    .hover(rgb(0xDC4C48).into()).active(rgb(0xDC4C48).into()))
+                                .custom(ButtonCustomVariant::new(cx).foreground(rgb(0xD4D4D4).into())
+                                    .hover(rgb(0x333333).into()).active(rgb(0x333333).into()))
                                 .size(px(32.0))
                                 .rounded(RADIUS_CHIP)
-                                .bg(rgb(0xC83E3B))
-                                .text_color(rgb(0xFFFFFF))
+                                .bg(rgb(0x262626))
+                                .text_color(rgb(0xD4D4D4))
                                 .icon(lucide_icon(icons::SQUARE_FILLED, 16.0))
                                 .accessibility_label("Stop response")
                                 .tooltip("Stop response")
@@ -641,12 +637,12 @@ impl MultibotView {
                         .child(
                             Button::new("send-prompt")
                                 .small()
-                                .custom(ButtonCustomVariant::new(cx).foreground(rgb(0xFFFFFF).into())
-                                    .hover(rgb(0xB56E3B).into()).active(rgb(0xB56E3B).into()))
+                                .custom(ButtonCustomVariant::new(cx).foreground(rgb(0xD4D4D4).into())
+                                    .hover(rgb(0x333333).into()).active(rgb(0x333333).into()))
                                 .size(px(32.0))
                                 .rounded(RADIUS_CHIP)
-                                .bg(rgb(0xA66335))
-                                .text_color(rgb(0xFFFFFF))
+                                .bg(rgb(0x262626))
+                                .text_color(rgb(0xD4D4D4))
                                 .icon(lucide_icon(icons::ARROW_UP, 16.0))
                                 .accessibility_label(if is_working { "Queue" } else { "Send" })
                                 .tooltip(if is_working { "Queue message · Ctrl+Enter" } else { "Send message · Ctrl+Enter" })

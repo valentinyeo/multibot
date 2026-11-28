@@ -30,6 +30,7 @@ pub(crate) struct SessionSelectionState {
 
 pub(crate) struct PendingSentMessage {
     pub(crate) message: ChatMessage,
+    pub(crate) awaiting_reply: bool,
     pub(crate) baseline_server_user_count: usize,
 }
 

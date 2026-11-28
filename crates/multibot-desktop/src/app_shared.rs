@@ -359,6 +359,7 @@ impl MultibotView {
         {
             self.chat_state.pending_harness_switch = None;
         }
+        self.sync_busy_dots_timer(cx);
         if changed {
             self.cleanup_unmounted_surface_state();
             cx.notify();

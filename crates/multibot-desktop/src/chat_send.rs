@@ -9,6 +9,16 @@ impl MultibotView {
         reason: String,
         cx: &mut Context<Self>,
     ) {
+        let keys: Vec<_> = self
+            .chat_state
+            .awaiting_reply_sessions
+            .iter()
+            .filter(|(_, turn)| turn.message_id == msg_id)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in keys {
+            self.finish_turn_without_reply(&key, "Message delivery failed");
+        }
         self.history.pending_sent_messages.retain(|_, pending| {
             pending.retain(|sent| sent.message.id != msg_id);
             !pending.is_empty()
@@ -21,6 +31,7 @@ impl MultibotView {
                 reason,
             },
         );
+        self.sync_busy_dots_timer(cx);
         cx.notify();
     }
 
@@ -148,6 +159,7 @@ impl MultibotView {
         if let Some(message) = self.history.messages.iter_mut().find(|m| m.id == msg_id) {
             message.quoted_message_id = quoted_message_id;
         }
+        self.sync_busy_dots_timer(cx);
         cx.notify();
     }
 
