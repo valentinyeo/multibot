@@ -482,6 +482,7 @@ impl MultibotView {
                 active_switch_token: None,
                 pending_switch_tokens: HashMap::new(),
                 pending_older_page_before: HashMap::new(),
+                auto_backfill_pages: 0,
                 next_search_request_seq: 0,
                 remote_search_request_id: None,
                 remote_search_hits: Vec::new(),

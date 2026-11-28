@@ -232,6 +232,19 @@ impl MultibotView {
         }
     }
 
+    fn load_history_near_top(&mut self, cx: &mut Context<Self>) {
+        let handle = &self.chat_state.scroll_handle;
+        let top_distance = f32::from(-handle.offset().y).max(0.0);
+        if self.has_unloaded_older_history()
+            && !self.chat_state.scroll.follow_bottom
+            && !self.is_loading_older_history()
+            && f32::from(handle.max_offset().y) > 0.0
+            && top_distance <= 200.0
+        {
+            self.load_older_history(cx);
+        }
+    }
+
     pub(crate) fn render_chat_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_chat_interaction_session(cx);
         let header_title = match &self.selection.selected_session {
@@ -307,9 +320,11 @@ impl MultibotView {
                             cx.notify();
                         }
                     }
+                    this.load_history_near_top(cx);
                 });
             })
             .id("chat-scroll")
+            .test_support()
             .flex_1()
             .min_h_0()
             .w_full()
@@ -323,6 +338,13 @@ impl MultibotView {
             .px_4()
             .overflow_y_scroll()
             .track_scroll(&self.chat_state.scroll_handle)
+            .on_scroll(cx.listener(|this, _, _, cx| {
+                let handle = &this.chat_state.scroll_handle;
+                let distance = f32::from(handle.max_offset().y + handle.offset().y);
+                this.chat_state.scroll.sync_position(distance);
+                this.load_history_near_top(cx);
+                cx.notify();
+            }))
             .capture_any_mouse_down(cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                 if ev.button == MouseButton::Left {
                     this.chat_state.drag_selecting =
@@ -1208,6 +1230,45 @@ impl MultibotView {
                 .overflow_hidden()
                 .child(geometry)
                 .child(msg_col)
+                .when(
+                    self.has_unloaded_older_history()
+                        && (self.is_loading_older_history()
+                            || f32::from(-self.chat_state.scroll_handle.offset().y).max(0.0)
+                                <= 200.0
+                            || f32::from(self.chat_state.scroll_handle.max_offset().y) <= 0.0),
+                    |el| {
+                        let loading = self.is_loading_older_history();
+                        el.child(
+                            h_flex()
+                                .absolute()
+                                .top(px(self.chat_state.header_height + 8.0))
+                                .left_0()
+                                .right_0()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .id("chat-load-older-history")
+                                        .role(Role::Button)
+                                        .test_support()
+                                        .rounded(px(9999.0))
+                                        .px_3()
+                                        .py_1()
+                                        .bg(theme::bg_surface())
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.load_older_history(cx);
+                                        }))
+                                        .child(if loading {
+                                            "Loading older messages…"
+                                        } else {
+                                            "Load older messages"
+                                        }),
+                                ),
+                        )
+                    },
+                )
                 .child(
                     v_flex()
                         .id("chat-top-overlay")

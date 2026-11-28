@@ -366,7 +366,9 @@ impl MultibotView {
                     }
                 }
                 ev @ ServerEvent::History { .. } => {
-                    self.apply_history_event(ev, is_older_page_hint);
+                    if self.apply_history_event(ev, is_older_page_hint) {
+                        self.auto_backfill_history(cx);
+                    }
                 }
                 ev @ ServerEvent::HistoryAppend { .. } => {
                     let (_, sessions_changed) = self.apply_history_append_event(ev);
@@ -488,6 +490,9 @@ impl MultibotView {
                     else {
                         unreachable!();
                     };
+                    if code == "read_history_failed" {
+                        self.history.pending_older_page_before.clear();
+                    }
                     if (code == "read_history_failed" || code == "watch_failed")
                         && let Some(token) = self.history.active_switch_token.clone()
                     {

@@ -4503,6 +4503,24 @@ fn load_older_history_sends_none_probe_and_clears_pending_on_select_or_tail(
                 other => panic!("unexpected request: {other:?}"),
             }
 
+            assert!(v.is_loading_older_history());
+            assert!(!v.load_older_history(cx));
+            assert!(
+                req_rx.try_recv().is_err(),
+                "in-flight requests are deduplicated"
+            );
+
+            v.handle_bridge_event(
+                UiBridgeEvent::Server(ServerEvent::Error {
+                    code: "read_history_failed".into(),
+                    message: "temporary read failure".into(),
+                }),
+                cx,
+            );
+            assert!(!v.is_loading_older_history());
+            assert!(v.load_older_history(cx), "failed pages can be retried");
+            assert!(req_rx.try_recv().is_ok());
+
             // Older page response prepends cleanly and clears pending_older_page_before
             v.handle_bridge_event(
                 UiBridgeEvent::Server(ServerEvent::History {
@@ -9992,4 +10010,90 @@ fn force_send_accepts_attachment_or_reply_without_typed_text(cx: &mut TestAppCon
         assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text.contains("Quoted reply")));
         assert!(rx.try_recv().is_err());
     }).unwrap();
+}
+
+#[gpui_kit::test]
+fn sparse_history_backfill_stops_at_visible_count_eof_or_page_cap(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_view_with_entity(cx);
+    cx.update_window(handle, |_, _, cx| {
+        for (agent, file_size, page_messages, eof_page, expected_pages) in [
+            (AgentKind::Antigravity, 512 * 1024, 1, None, 6),
+            (AgentKind::Antigravity, 512 * 1024, 12, None, 2),
+            (AgentKind::Antigravity, 512 * 1024, 1, Some(2), 2),
+            (AgentKind::Antigravity, 1000, 1, None, 0),
+            (AgentKind::Claude, 1000, 1, None, 0),
+            (AgentKind::Claude, 512 * 1024, 1, Some(1), 1),
+        ] {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            view.update(cx, |v, cx| {
+                let session = make_session("sparse", agent, "Sparse", false);
+                v.connection.daemon_tx = Some(tx);
+                v.connection.sessions = vec![session.clone()];
+                v.history
+                    .chat_cache
+                    .remove_memory(&CacheKey::new("local", agent, "sparse"));
+                v.select_session(session, cx);
+                while rx.try_recv().is_ok() {}
+                let message = |id: String| ChatMessage {
+                    id,
+                    role: MessageRole::User,
+                    text: "Visible message".into(),
+                    ..Default::default()
+                };
+                let history = |messages, oldest, latest, has_more| ServerEvent::History {
+                    session_id: "sparse".into(),
+                    messages,
+                    oldest_offset: Some(oldest),
+                    latest_offset: Some(latest),
+                    has_more,
+                    file_size: Some(file_size),
+                    file_mtime_ms: None,
+                    probe_sha256: None,
+                    todos: vec![],
+                };
+                v.handle_bridge_event(
+                    UiBridgeEvent::Server(history(
+                        vec![message("tail".into())],
+                        10000,
+                        file_size,
+                        true,
+                    )),
+                    cx,
+                );
+                for page in 0..expected_pages {
+                    let before = 10000 - page as u64 * 100;
+                    assert!(matches!(rx.try_recv(), Ok(ClientRequest::ReadHistory {
+                        before_offset: Some(offset), ..
+                    }) if offset == before));
+                    assert!(rx.try_recv().is_err());
+                    assert!(v.chat_state.scroll.follow_bottom);
+                    assert!(v.chat_state.prepend_scroll_anchor.is_none());
+                    let messages = (0..page_messages)
+                        .map(|i| message(format!("page-{page}-{i}")))
+                        .collect();
+                    v.handle_bridge_event(
+                        UiBridgeEvent::Server(history(
+                            messages,
+                            before - 100,
+                            before,
+                            eof_page != Some(page + 1),
+                        )),
+                        cx,
+                    );
+                }
+                assert!(rx.try_recv().is_err(), "backfill must stop");
+                assert_eq!(v.history.auto_backfill_pages, expected_pages);
+                assert!(!v.is_loading_older_history());
+                assert!(v.chat_state.scroll.follow_bottom);
+                assert_eq!(
+                    v.chat_state.scroll.pending_scroll,
+                    PendingScrollTarget::Bottom
+                );
+                assert!(v.chat_state.prepend_scroll_anchor.is_none());
+                v.clear_active_session_view(cx);
+                assert_eq!(v.history.auto_backfill_pages, 0);
+            });
+        }
+    })
+    .unwrap();
 }

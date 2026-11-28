@@ -6698,3 +6698,177 @@ fn image_viewer_fits_inline_images_and_closes_on_backdrop_or_session_switch(
     .unwrap();
     std::fs::remove_file(path).unwrap();
 }
+
+#[gpui_kit::test]
+fn scrolling_near_top_loads_once_and_preserves_reading_anchor(cx: &mut TestAppContext) {
+    use multibot_core::cache::{CacheKey, CachedSession};
+    use multibot_proto::{ClientRequest, ServerEvent};
+    let (handle, view) = open_test_chat_window(cx);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let session = SessionSummary {
+                id: "scroll-pages".into(),
+                agent: AgentKind::Claude,
+                ..Default::default()
+            };
+            v.connection.daemon_tx = Some(tx);
+            v.history.chat_cache.put(
+                CacheKey::new("local", session.agent, &session.id),
+                CachedSession {
+                    messages: chat_scroll_messages(),
+                    oldest_offset: 1000,
+                    consumed_offset: 2000,
+                    has_more: true,
+                    ..Default::default()
+                },
+            );
+            v.select_session(session, cx);
+        });
+        while rx.try_recv().is_ok() {}
+        window.render_frame(cx);
+        let scroll = view.read(cx).chat_state.scroll_handle.clone();
+        assert!(scroll.max_offset().y > px(500.0));
+        assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+        assert!(
+            rx.try_recv().is_err(),
+            "opening at bottom must not paginate"
+        );
+        window.scroll(
+            "chat-scroll",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.0), scroll.max_offset().y - px(150.0))),
+            cx,
+        );
+        window.render_frame(cx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientRequest::ReadHistory {
+                before_offset: Some(1000),
+                ..
+            })
+        ));
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert!(
+            rx.try_recv().is_err(),
+            "prepaint must not duplicate an in-flight page"
+        );
+        let old_max = scroll.max_offset().y;
+        let old_offset = scroll.offset().y;
+        view.update(cx, |v, cx| {
+            v.handle_daemon_server_event(
+                ServerEvent::History {
+                    session_id: "scroll-pages".into(),
+                    messages: chat_scroll_messages()
+                        .into_iter()
+                        .map(|mut message| {
+                            message.id = format!("older-{}", message.id);
+                            message
+                        })
+                        .collect(),
+                    oldest_offset: Some(0),
+                    latest_offset: Some(1000),
+                    has_more: false,
+                    file_size: Some(2000),
+                    file_mtime_ms: None,
+                    probe_sha256: None,
+                    todos: vec![],
+                },
+                cx,
+            );
+        });
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert_eq!(
+            scroll.children_count(),
+            80,
+            "overlays must not alter message indices"
+        );
+        assert!(scroll.max_offset().y > old_max);
+        assert_eq!(
+            scroll.offset().y,
+            old_offset - (scroll.max_offset().y - old_max)
+        );
+        assert!(!view.read(cx).chat_state.scroll.follow_bottom);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn older_history_pill_loads_non_overflowing_chat_and_backfill_stays_at_bottom(
+    cx: &mut TestAppContext,
+) {
+    use multibot_core::cache::{CacheKey, CachedSession};
+    use multibot_proto::{ClientRequest, ServerEvent};
+    let (handle, view) = open_test_chat_window(cx);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let session = SessionSummary {
+                id: "pill-pages".into(),
+                agent: AgentKind::Antigravity,
+                ..Default::default()
+            };
+            v.connection.daemon_tx = Some(tx);
+            v.history.chat_cache.put(
+                CacheKey::new("local", session.agent, &session.id),
+                CachedSession {
+                    messages: vec![ChatMessage {
+                        id: "tail".into(),
+                        role: MessageRole::User,
+                        text: "Newest message".into(),
+                        ..Default::default()
+                    }],
+                    oldest_offset: 1000,
+                    consumed_offset: 512 * 1024,
+                    file_size: 512 * 1024,
+                    has_more: true,
+                    ..Default::default()
+                },
+            );
+            v.select_session(session, cx);
+        });
+        while rx.try_recv().is_ok() {}
+        window.render_frame(cx);
+        let scroll = view.read(cx).chat_state.scroll_handle.clone();
+        assert_eq!(scroll.max_offset().y, px(0.0));
+        assert_eq!(scroll.children_count(), 1);
+        window.click("chat-load-older-history", cx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientRequest::ReadHistory {
+                before_offset: Some(1000),
+                ..
+            })
+        ));
+        window.click("chat-load-older-history", cx);
+        assert!(rx.try_recv().is_err());
+        view.update(cx, |v, cx| {
+            v.handle_daemon_server_event(
+                ServerEvent::History {
+                    session_id: "pill-pages".into(),
+                    messages: chat_scroll_messages(),
+                    oldest_offset: Some(500),
+                    latest_offset: Some(1000),
+                    has_more: true,
+                    file_size: Some(512 * 1024),
+                    file_mtime_ms: None,
+                    probe_sha256: None,
+                    todos: vec![],
+                },
+                cx,
+            );
+        });
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert!(scroll.max_offset().y > px(0.0));
+        assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+        assert!(view.read(cx).chat_state.scroll.follow_bottom);
+        assert_eq!(scroll.children_count(), 41);
+        assert!(
+            rx.try_recv().is_err(),
+            "enough visible messages stops backfill"
+        );
+    })
+    .unwrap();
+}

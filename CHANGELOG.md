@@ -6,6 +6,7 @@ ships, move those bullets under its published version; keep older entries here.
 This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
+- Automatically load older chat history when scrolling near the top and backfill sparse Antigravity chats on open (MBRU-138).
 - Send chat messages with Enter, add line breaks with Shift+Enter, and force send queued messages with Ctrl+Enter (MBRU-137).
 - Add Ctrl+Shift+Enter to force send queued messages and show keyboard shortcuts in mouse-over tooltips on icon buttons (MBRU-136).
 - Detect live subworkers in Antigravity sessions using the conversation flag and sibling processes (MBRU-135).
