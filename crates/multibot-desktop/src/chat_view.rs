@@ -38,7 +38,7 @@ use gpui_kit::{
     Hsla, InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, MouseButton,
     MouseDownEvent, MouseUpEvent, ParentElement, Pixels, Point, Role, ScrollHandle, SharedString,
     StatefulInteractiveElement, Styled, TestSupportExt, Window,
-    base::text::CodeBlock,
+    base::{ElementExt, TextSelection, text::CodeBlock},
     component::{
         Disableable, Selectable, Sizable,
         button::{Button, ButtonCustomVariant, ButtonVariants},
@@ -155,7 +155,7 @@ impl MultibotView {
     pub(crate) fn jump_to_newest(&mut self, cx: &mut Context<Self>) {
         self.chat_state.scroll.jump_to_bottom();
         self.chat_state.focused_message_idx = None;
-        self.chat_state.message_action_menu_open = false;
+        self.chat_state.close_message_menu();
         cx.notify();
     }
 
@@ -211,7 +211,7 @@ impl MultibotView {
             self.chat_state.show_all_tools.remove(&chat);
         }
         self.chat_state.focused_message_idx = None;
-        self.chat_state.message_action_menu_open = false;
+        self.chat_state.close_message_menu();
         let query = self.chat_state.find_query.clone();
         self.chat_state
             .update_find_query(query, &self.history.messages, show);
@@ -233,6 +233,7 @@ impl MultibotView {
     }
 
     pub(crate) fn render_chat_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_chat_interaction_session(cx);
         let header_title = match &self.selection.selected_session {
             Some(s) => format!("{}  {}", s.agent.glyph(), s.title),
             None => "Multibot · Ready".to_string(),
@@ -277,6 +278,20 @@ impl MultibotView {
         let mut msg_col = v_flex()
             .on_children_prepainted(move |_, _, cx| {
                 let _ = view.update(cx, |this, cx| {
+                    let handle = &this.chat_state.scroll_handle;
+                    let size = handle.bounds().size;
+                    if size != this.chat_state.viewport_size && this.chat_state.scroll.follow_bottom
+                    {
+                        let offset = Point {
+                            x: handle.offset().x,
+                            y: -handle.max_offset().y,
+                        };
+                        if handle.offset() != offset {
+                            handle.set_offset(offset);
+                            cx.notify();
+                        }
+                    }
+                    this.chat_state.viewport_size = size;
                     if let Some((old_max, old_offset)) =
                         this.chat_state.prepend_scroll_anchor.take()
                     {
@@ -299,11 +314,22 @@ impl MultibotView {
             .min_h_0()
             .w_full()
             .gap_3()
-            .pt(px(72.0))
-            .pb(px(120.0))
+            // Clip selectable text at the overlays so GPUI's single native drag-scroll
+            // owner sees the same viewport edges the user sees.
+            .mt(px(self.chat_state.header_height))
+            .mb(px(self.chat_state.composer_height))
+            .pt_3()
+            .pb_3()
             .px_4()
             .overflow_y_scroll()
-            .track_scroll(&self.chat_state.scroll_handle);
+            .track_scroll(&self.chat_state.scroll_handle)
+            .capture_any_mouse_down(cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                if ev.button == MouseButton::Left {
+                    this.chat_state.drag_selecting =
+                        TextSelection::is_selectable_at(ev.position, window, cx);
+                    this.chat_state.selection_quote_popover = None;
+                }
+            }));
 
         if !visible_messages.is_empty() {
             let last_visible_orig_idx = visible_messages.last().map(|v| v.original_index);
@@ -708,6 +734,28 @@ impl MultibotView {
                         .child(body_col)
                 };
 
+                let bubble = bubble.capture_any_mouse_down(cx.listener(
+                    move |this, ev: &MouseDownEvent, window, cx| {
+                        if ev.button != MouseButton::Right {
+                            return;
+                        }
+                        cx.stop_propagation();
+                        this.chat_state.selection_quote_popover = None;
+                        this.chat_state.focused_message_idx = Some(vis_idx);
+                        this.chat_state.message_action_menu_open = true;
+                        this.chat_state.reaction_picker_open = false;
+                        this.chat_state.message_action_index = 1;
+                        this.chat_state.message_context_position =
+                            Some(interaction::clamp_chat_popover(
+                                ev.position,
+                                this.chat_state.panel_bounds,
+                                224.0,
+                                232.0,
+                            ));
+                        this.focus_chat_panel(window, cx);
+                        cx.notify();
+                    },
+                ));
                 let mut msg_wrapper = v_flex()
                     .w_full()
                     .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
@@ -966,6 +1014,61 @@ impl MultibotView {
             );
         }
 
+        let geometry_view = cx.entity().downgrade();
+        let pointer_view = geometry_view.clone();
+        let geometry = gpui_kit::canvas(
+            move |bounds, window, cx| {
+                let _ = geometry_view.update(cx, |this, _| {
+                    this.chat_state.panel_bounds = bounds;
+                    this.chat_state.interaction_window = Some(window.window_handle());
+                });
+            },
+            move |_, _, window, _cx| {
+                let view = pointer_view.clone();
+                window.on_mouse_event(
+                    move |event: &gpui_kit::MouseMoveEvent, phase, window, cx| {
+                        if !phase.capture() {
+                            return;
+                        }
+                        let _ = view.update(cx, |this, cx| {
+                            if this.chat_state.drag_selecting
+                                && (event.pressed_button != Some(MouseButton::Left)
+                                    || !this.chat_state.panel_bounds.contains(&event.position))
+                            {
+                                this.chat_state.drag_selecting = false;
+                                TextSelection::end(window, cx);
+                            }
+                        });
+                    },
+                );
+                let view = pointer_view.clone();
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+                    if !phase.capture() || event.button != MouseButton::Left {
+                        return;
+                    }
+                    let _ = view.update(cx, |this, cx| {
+                        if !this.chat_state.drag_selecting {
+                            return;
+                        }
+                        this.chat_state.drag_selecting = false;
+                        TextSelection::end(window, cx);
+                        this.show_selection_quote(event.position, window, cx);
+                    });
+                });
+                let view = pointer_view.clone();
+                window.on_mouse_event(move |_: &gpui_kit::MouseExitEvent, phase, window, cx| {
+                    if !phase.capture() {
+                        return;
+                    }
+                    let _ = view.update(cx, |this, _| this.chat_state.drag_selecting = false);
+                    TextSelection::end(window, cx);
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
+        .size_full();
+        let header_view = cx.entity().downgrade();
         let panel = v_flex()
             .id("chat-panel-root")
             .when_some(self.chat_state.focus_handle.as_ref(), |el, fh| {
@@ -981,6 +1084,7 @@ impl MultibotView {
                 .flex_1()
                 .min_h_0()
                 .overflow_hidden()
+                .child(geometry)
                 .child(msg_col)
                 .child(
                     v_flex()
@@ -990,6 +1094,23 @@ impl MultibotView {
                         .top_0()
                         .left_0()
                         .right_0()
+                        .child(
+                            gpui_kit::canvas(
+                                move |bounds, _, cx| {
+                                    let _ = header_view.update(cx, |this, cx| {
+                                        let height = f32::from(bounds.size.height);
+                                        if this.chat_state.header_height != height {
+                                            this.chat_state.header_height = height;
+                                            cx.notify();
+                                        }
+                                    });
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .inset_0()
+                            .size_full(),
+                        )
                         .when(self.top_floating_bar_rendered(), |el| {
                             el.child(self.render_top_floating_bar(header_title, cx))
                         })
@@ -1010,6 +1131,7 @@ impl MultibotView {
                     )
                     .test_support(),
                 )
+                .when_some(self.render_selection_quote(cx), |el, pill| el.child(pill))
                 .when_some(self.render_message_action_menu(cx), |el, menu| {
                     el.child(menu)
                 })

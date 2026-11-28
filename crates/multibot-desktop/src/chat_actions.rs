@@ -238,9 +238,15 @@ impl MultibotView {
         .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
             this.handle_chat_key_down(ev, window, cx);
         }))
-        .on_key_up(cx.listener(|this, _ev: &KeyUpEvent, _window, cx| {
+        .on_key_up(cx.listener(|this, _ev: &KeyUpEvent, window, cx| {
             if this.has_higher_priority_modal() {
                 return;
+            }
+            if this.chat_state.selection_quote_popover.is_some()
+                && TextSelection::selected_text(window, cx).trim().is_empty()
+            {
+                this.chat_state.selection_quote_popover = None;
+                cx.notify();
             }
             if this.chat_state.slash_sync_pending {
                 this.chat_state.slash_sync_pending = false;

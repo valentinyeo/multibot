@@ -394,7 +394,17 @@ impl MultibotView {
             );
         }
 
+        let geometry_view = cx.entity().downgrade();
         root
+            .child(gpui_kit::canvas(move |bounds, _, cx| {
+                let _ = geometry_view.update(cx, |this, cx| {
+                    let height = f32::from(bounds.size.height);
+                    if this.chat_state.composer_height != height {
+                        this.chat_state.composer_height = height;
+                        cx.notify();
+                    }
+                });
+            }, |_, _, _, _| {}).absolute().inset_0().size_full())
             .when_some(self.notice.clone(), |el, note| {
                 el.child(
                     div()
@@ -459,6 +469,34 @@ impl MultibotView {
                                 ),
                         ),
                 )
+            })
+            .when(!self.chat_state.quoted_snippets.is_empty(), |el| {
+                let mut chips = h_flex().id("quoted-snippets").test_support()
+                    .w_full().when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+                    .mx_auto().px_5().pb_1().gap_1p5().flex_wrap();
+                for snippet in &self.chat_state.quoted_snippets {
+                    let id = snippet.id;
+                    chips = chips.child(h_flex()
+                        .id(format!("quote-chip-{id}")).test_support()
+                        .gap_2().items_center().px_2p5().py_1().rounded(RADIUS_CHIP)
+                        .bg(rgb(0x1E293B)).text_xs().text_color(theme::text_secondary())
+                        .child(format!("« {} »", snippet.preview))
+                        .child(div().id(format!("remove-quote-{id}")).role(Role::Button).test_support()
+                            .cursor_pointer().child(lucide_icon(icons::X, 12.0))
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                if let Some(index) = this.chat_state.quoted_snippets.iter().position(|snippet| snippet.id == id) {
+                                    let snippet = this.chat_state.quoted_snippets.remove(index);
+                                    this.inputs.prompt_input.update(cx, |input, cx| {
+                                        let draft = input.value().replace(&snippet.token(), "");
+                                        input.set_value(draft, window, cx);
+                                        input.focus(window, cx);
+                                    });
+                                    cx.notify();
+                                }
+                            }))));
+                }
+                el.child(chips)
             })
             .when(!self.chat_state.pending_attachments.is_empty(), |el| {
                 let mut chips = h_flex()

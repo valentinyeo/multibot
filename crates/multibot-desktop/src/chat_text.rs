@@ -378,6 +378,54 @@ pub(crate) fn quote_source_matches(candidate: &str, quoted_source: &str) -> bool
     c.starts_with(&q) || c.contains(&q)
 }
 
+pub(crate) fn compose_snippet_quotes(draft: &str, snippets: &[QuotedSnippet]) -> String {
+    let mut expanded = String::new();
+    let mut rest = draft;
+    let mut used = HashSet::new();
+    while let Some(start) = rest.find("[Quote #") {
+        expanded.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let matched = snippets
+            .iter()
+            .find(|snippet| rest.starts_with(&snippet.token()));
+        if let Some(snippet) = matched {
+            used.insert(snippet.id);
+            expanded.push_str("\n\n");
+            expanded.push_str(
+                &snippet
+                    .full_text
+                    .split('\n')
+                    .map(|line| format!("> {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            expanded.push_str("\n\n");
+            rest = &rest[snippet.token().len()..];
+        } else {
+            expanded.push('[');
+            rest = &rest[1..];
+        }
+    }
+    expanded.push_str(rest);
+    let mut unreferenced = String::new();
+    for snippet in snippets
+        .iter()
+        .filter(|snippet| !used.contains(&snippet.id))
+    {
+        unreferenced.push_str(
+            &snippet
+                .full_text
+                .split('\n')
+                .map(|line| format!("> {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        unreferenced.push_str("\n\n");
+    }
+    unreferenced.push_str(expanded.trim());
+    unreferenced.trim().to_string()
+}
+
 impl MultibotView {
     pub(crate) fn set_reply_quote(
         &mut self,

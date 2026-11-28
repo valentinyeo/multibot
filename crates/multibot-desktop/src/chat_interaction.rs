@@ -1,6 +1,134 @@
 use super::*;
 
+pub(crate) fn clamp_chat_popover(
+    position: Point<Pixels>,
+    bounds: gpui_kit::Bounds<Pixels>,
+    width: f32,
+    height: f32,
+) -> Point<Pixels> {
+    Point {
+        x: (position.x - bounds.origin.x)
+            .clamp(px(0.0), (bounds.size.width - px(width)).max(px(0.0))),
+        y: (position.y - bounds.origin.y)
+            .clamp(px(0.0), (bounds.size.height - px(height)).max(px(0.0))),
+    }
+}
+
 impl MultibotView {
+    pub(super) fn sync_chat_interaction_session(&mut self, cx: &mut Context<Self>) {
+        let key = self.tool_chat_key();
+        if self.chat_state.interaction_session_key.as_ref() != Some(&key) {
+            if let Some(handle) = self.chat_state.interaction_window {
+                TextSelection::clear_for_window(handle.window_id(), cx);
+                let tokens: Vec<_> = self
+                    .chat_state
+                    .quoted_snippets
+                    .iter()
+                    .map(QuotedSnippet::token)
+                    .collect();
+                if !tokens.is_empty() {
+                    let input = self.inputs.prompt_input.clone();
+                    cx.defer(move |cx| {
+                        let _ = handle.update(cx, |_, window, cx| {
+                            input.update(cx, |input, cx| {
+                                let mut draft = input.value().to_string();
+                                for token in tokens {
+                                    draft = draft.replace(&token, "");
+                                }
+                                let end = draft.len();
+                                input.set_value(draft, window, cx);
+                                input.set_selected_range(end..end, cx);
+                            })
+                        });
+                    });
+                }
+            }
+            self.chat_state.reset_chat_interactions(key);
+        }
+    }
+
+    pub(super) fn quote_snippet(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let snippet = QuotedSnippet {
+            id: self.chat_state.next_quote_id,
+            preview: normalize_ws_collapse(&text).chars().take(32).collect(),
+            full_text: text,
+        };
+        self.chat_state.next_quote_id += 1;
+        let token = format!("{} ", snippet.token());
+        self.chat_state.quoted_snippets.push(snippet);
+        self.chat_state.selection_quote_popover = None;
+        self.chat_state.focused_message_idx = None;
+        self.chat_state.close_message_menu();
+        TextSelection::clear(window, cx);
+        self.inputs.prompt_input.update(cx, |input, cx| {
+            input.replace(token, window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    pub(super) fn show_selection_quote(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = TextSelection::selected_text(window, cx);
+        self.chat_state.selection_quote_popover =
+            (!text.trim().is_empty()).then(|| SelectionQuotePopover {
+                text,
+                position: clamp_chat_popover(position, self.chat_state.panel_bounds, 156.0, 36.0),
+            });
+        cx.notify();
+    }
+
+    pub(super) fn render_selection_quote(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let popover = self.chat_state.selection_quote_popover.as_ref()?;
+        let text = popover.text.clone();
+        Some(
+            h_flex()
+                .id("selection-quote-pill")
+                .role(Role::Button)
+                .test_support()
+                .keep_text_selection("selection-quote-keep")
+                .absolute()
+                .left(popover.position.x)
+                .top(popover.position.y)
+                .px_3()
+                .py_2()
+                .gap_3()
+                .items_center()
+                .rounded(RADIUS_CHIP)
+                .bg(theme::bg_surface())
+                .border_1()
+                .border_color(theme::border_subtle())
+                .text_xs()
+                .cursor_pointer()
+                .child("Quote")
+                .child(div().text_color(theme::text_muted()).child("Ctrl+L"))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.chat_state.selection_quote_popover = None;
+                    cx.notify();
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.quote_snippet(text.clone(), window, cx);
+                    }),
+                )
+                .into_any_element(),
+        )
+    }
+
     pub(super) fn is_composer_text_edit_key(ks: &Keystroke) -> bool {
         let key_l = ks.key.to_ascii_lowercase();
         if matches!(key_l.as_str(), "backspace" | "delete")
@@ -115,6 +243,17 @@ impl MultibotView {
         if self.slash_picker_state.is_open() {
             return self.handle_slash_picker_control_key("escape", window, cx);
         }
+        if self.chat_state.drag_selecting {
+            self.chat_state.drag_selecting = false;
+            TextSelection::end(window, cx);
+            cx.notify();
+            return true;
+        }
+        if self.chat_state.selection_quote_popover.take().is_some() {
+            TextSelection::clear(window, cx);
+            cx.notify();
+            return true;
+        }
         if self.chat_state.find_open {
             self.chat_state.newest_chord.reset();
             self.chat_state.slash_sync_pending = false;
@@ -125,8 +264,7 @@ impl MultibotView {
         if self.chat_state.message_action_menu_open {
             self.chat_state.newest_chord.reset();
             self.chat_state.slash_sync_pending = false;
-            self.chat_state.message_action_menu_open = false;
-            self.chat_state.message_action_index = 0;
+            self.chat_state.close_message_menu();
             cx.notify();
             return true;
         }
@@ -174,7 +312,32 @@ impl MultibotView {
             }
             return;
         }
+        self.sync_chat_interaction_session(cx);
         let ks = &ev.keystroke;
+        let control_only = ks.modifiers.control
+            && !ks.modifiers.alt
+            && !ks.modifiers.platform
+            && !ks.modifiers.shift;
+        if control_only && ks.key.eq_ignore_ascii_case("l") {
+            let text = TextSelection::selected_text(window, cx);
+            if !text.trim().is_empty() {
+                self.quote_snippet(text, window, cx);
+                cx.stop_propagation();
+                window.prevent_default();
+                return;
+            }
+        }
+        if control_only
+            && ks.key.eq_ignore_ascii_case("c")
+            && self.chat_state.focused_message_idx.is_some()
+            && !self.chat_state.message_action_menu_open
+            && TextSelection::selected_text(window, cx).is_empty()
+        {
+            self.execute_focused_message_action(MessageMenuAction::Copy, window, cx);
+            cx.stop_propagation();
+            window.prevent_default();
+            return;
+        }
         if multibot_keys::is_inline_dictation_chord(
             ks.modifiers.control,
             ks.modifiers.shift,
@@ -264,6 +427,23 @@ impl MultibotView {
             return;
         }
 
+        if ks.modifiers.shift
+            && !ks.modifiers.control
+            && !ks.modifiers.alt
+            && !ks.modifiers.platform
+            && self.chat_state.focused_message_idx.is_some()
+            && !self.chat_state.find_open
+        {
+            let text = ks.key_char.clone().unwrap_or_else(|| ks.key.to_uppercase());
+            if text.chars().count() == 1
+                && !text.chars().any(char::is_control)
+                && self.handle_empty_composer_nav_key_action(&text, window, cx)
+            {
+                cx.stop_propagation();
+                window.prevent_default();
+                return;
+            }
+        }
         if plain_key
             && !self.chat_state.find_open
             && !self.slash_picker_state.is_open()
@@ -579,7 +759,8 @@ impl MultibotView {
                         .blocks
                         .iter()
                         .all(|b| matches!(b, MessageBlock::ToolUse { .. }));
-                let waiting = self.chat_state.failed_sends.contains_key(&v.message.id);
+                let waiting = self.chat_state.failed_sends.contains_key(&v.message.id)
+                    || self.outbox.outbox_msg_map.contains_key(&v.message.id);
                 (
                     v.original_index,
                     v.message.id.clone(),
@@ -638,72 +819,85 @@ impl MultibotView {
             }
             MessageNavOutcome::ExecuteAction { action, .. } => {
                 if let Some((orig_idx, msg_id, msg_text, _, _)) = focused_meta {
-                    match action {
-                        MessageMenuAction::Reply => {
-                            self.set_reply_quote(msg_id, msg_text, cx);
-                            self.chat_state.focused_message_idx = None;
-                            self.inputs
-                                .prompt_input
-                                .update(cx, |input, cx| input.focus(window, cx));
-                        }
-                        MessageMenuAction::Copy => {
-                            cx.write_to_clipboard(ClipboardItem::new_string(msg_text));
-                            self.notice = Some("Copied message.".into());
-                            cx.notify();
-                        }
-                        MessageMenuAction::Quote => {
-                            let quote = msg_text
-                                .lines()
-                                .map(|line| format!("> {line}"))
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            self.inputs.prompt_input.update(cx, |input, cx| {
-                                let draft = input.value().to_string();
-                                let next = if draft.is_empty() {
-                                    format!("{quote}\n\n")
-                                } else {
-                                    format!("{draft}\n\n{quote}\n\n")
-                                };
-                                let end = next.len();
-                                input.set_value(next, window, cx);
-                                input.set_selected_range(end..end, cx);
-                                input.focus(window, cx);
-                            });
-                            self.chat_state.focused_message_idx = None;
-                            cx.notify();
-                        }
-                        MessageMenuAction::React(emoji) => {
-                            self.toggle_local_reaction(&msg_id, &msg_text, emoji, cx);
-                        }
-                        MessageMenuAction::CancelWaiting => {
-                            self.chat_state.failed_sends.remove(&msg_id);
-                            self.cancel_outbox_message(&msg_id);
-                            if orig_idx < self.history.messages.len() {
-                                self.history.messages.remove(orig_idx);
-                            }
-                            cx.notify();
-                        }
-                    }
+                    self.execute_message_action(orig_idx, msg_id, msg_text, action, window, cx);
                 }
                 true
             }
         }
     }
 
+    fn execute_message_action(
+        &mut self,
+        orig_idx: usize,
+        msg_id: String,
+        msg_text: String,
+        action: MessageMenuAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_state.close_message_menu();
+        match action {
+            MessageMenuAction::Reply => {
+                self.set_reply_quote(msg_id, msg_text, cx);
+                self.chat_state.focused_message_idx = None;
+                self.inputs
+                    .prompt_input
+                    .update(cx, |input, cx| input.focus(window, cx));
+            }
+            MessageMenuAction::Copy => {
+                cx.write_to_clipboard(ClipboardItem::new_string(msg_text));
+                self.notice = Some("Copied message.".into());
+                cx.notify();
+            }
+            MessageMenuAction::Quote => {
+                self.quote_snippet(msg_text, window, cx);
+            }
+            MessageMenuAction::React(emoji) => {
+                self.toggle_local_reaction(&msg_id, &msg_text, emoji, cx);
+            }
+            MessageMenuAction::CancelWaiting => {
+                self.chat_state.failed_sends.remove(&msg_id);
+                self.cancel_outbox_message(&msg_id);
+                if orig_idx < self.history.messages.len() {
+                    self.history.messages.remove(orig_idx);
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn execute_focused_message_action(
+        &mut self,
+        action: MessageMenuAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let visible = project_visible_messages_with_overrides(
+            &self.history.messages,
+            &self.chat_state.local_reactions,
+            &self.chat_state.local_reaction_removals,
+            self.show_tool_calls(),
+        );
+        let Some(message) = self
+            .chat_state
+            .focused_message_idx
+            .or_else(|| visible.len().checked_sub(1))
+            .and_then(|index| visible.get(index))
+        else {
+            return;
+        };
+        let (index, id, text) = (
+            message.original_index,
+            message.message.id.clone(),
+            message_visible_text(message.message),
+        );
+        self.execute_message_action(index, id, text, action, window, cx);
+    }
+
     pub(super) fn render_message_action_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.chat_state.message_action_menu_open {
             return None;
         }
-        let mut menu = v_flex()
-            .id("message-action-menu")
-            .test_support()
-            .w(px(320.0))
-            .p_2()
-            .gap_1()
-            .rounded(theme::RADIUS_MODAL)
-            .bg(theme::bg_surface())
-            .border_1()
-            .border_color(theme::border_subtle());
         let visible = project_visible_messages_with_overrides(
             &self.history.messages,
             &self.chat_state.local_reactions,
@@ -713,64 +907,118 @@ impl MultibotView {
         let message = self
             .chat_state
             .focused_message_idx
-            .and_then(|i| visible.get(i))?;
-        let tool_only = message.message.text.trim().is_empty()
-            && !message.message.blocks.is_empty()
-            && message
-                .message
-                .blocks
-                .iter()
-                .all(|b| matches!(b, MessageBlock::ToolUse { .. }));
+            .and_then(|index| visible.get(index))?;
         let waiting = self
             .chat_state
             .failed_sends
-            .contains_key(&message.message.id);
-        for (index, action) in ChatViewState::menu_actions_for(tool_only, waiting)
-            .into_iter()
-            .enumerate()
-        {
-            let label = match action {
-                MessageMenuAction::Copy => "Copy",
-                MessageMenuAction::Reply => "Reply",
-                MessageMenuAction::Quote => "Quote",
-                MessageMenuAction::React(ReactionEmoji::Like) => "Like",
-                MessageMenuAction::React(ReactionEmoji::Dislike) => "Dislike",
-                MessageMenuAction::React(ReactionEmoji::Heart) => "Heart",
-                MessageMenuAction::CancelWaiting => "Cancel waiting message",
-            };
-            menu = menu.child(
+            .contains_key(&message.message.id)
+            || self.outbox.outbox_msg_map.contains_key(&message.message.id);
+        let mut reactions = h_flex().gap_2().p_1();
+        for (index, emoji) in ReactionEmoji::all().into_iter().enumerate() {
+            reactions = reactions.child(
                 div()
-                    .id(SharedString::from(format!("message-action-{index}")))
+                    .id(format!("message-react-{index}"))
+                    .role(Role::Button)
                     .test_support()
                     .px_3()
                     .py_2()
-                    .rounded(RADIUS_ROW)
+                    .rounded(RADIUS_CHIP)
                     .cursor_pointer()
-                    .bg(if self.chat_state.message_action_index == index {
-                        theme::bg_active_row()
-                    } else {
-                        theme::bg_surface()
-                    })
-                    .hover(|s| s.bg(theme::bg_hover()))
-                    .child(label)
+                    .bg(
+                        if self.chat_state.reaction_picker_open
+                            && self.chat_state.message_action_index == index
+                        {
+                            theme::bg_active_row()
+                        } else {
+                            theme::bg_surface()
+                        },
+                    )
+                    .hover(|style| style.bg(theme::bg_hover()))
+                    .child(emoji.glyph())
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
-                            this.chat_state.message_action_index = index;
-                            this.handle_empty_composer_nav_key_action("enter", window, cx);
+                            this.execute_focused_message_action(
+                                MessageMenuAction::React(emoji),
+                                window,
+                                cx,
+                            );
                         }),
                     ),
             );
         }
+        let mut menu = v_flex()
+            .id("message-context-menu")
+            .test_support()
+            .w(px(224.0).min(self.chat_state.panel_bounds.size.width))
+            .max_h(self.chat_state.panel_bounds.size.height)
+            .overflow_y_scroll()
+            .p_2()
+            .gap_1()
+            .rounded(theme::RADIUS_MODAL)
+            .bg(theme::bg_surface())
+            .border_1()
+            .border_color(theme::border_subtle())
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.chat_state.close_message_menu();
+                cx.notify();
+            }))
+            .child(reactions);
+        if !self.chat_state.reaction_picker_open {
+            for (action, label, icon) in [
+                (MessageMenuAction::Reply, "Reply", icons::CORNER_DOWN_LEFT),
+                (MessageMenuAction::Copy, "Copy", icons::COPY),
+                (MessageMenuAction::Quote, "Quote", icons::CORNER_DOWN_LEFT),
+                (MessageMenuAction::CancelWaiting, "Cancel waiting", icons::X),
+            ] {
+                if action == MessageMenuAction::CancelWaiting && !waiting {
+                    continue;
+                }
+                let index = ChatViewState::menu_actions_for(false, waiting)
+                    .iter()
+                    .position(|candidate| *candidate == action)
+                    .unwrap();
+                menu = menu.child(
+                    h_flex()
+                        .id(format!("message-action-{index}"))
+                        .role(Role::Button)
+                        .test_support()
+                        .px_3()
+                        .py_2()
+                        .gap_2()
+                        .items_center()
+                        .rounded(RADIUS_ROW)
+                        .cursor_pointer()
+                        .bg(if self.chat_state.message_action_index == index {
+                            theme::bg_active_row()
+                        } else {
+                            theme::bg_surface()
+                        })
+                        .hover(|style| style.bg(theme::bg_hover()))
+                        .child(lucide_icon(icon, 14.0))
+                        .child(label)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.execute_focused_message_action(action, window, cx);
+                            }),
+                        ),
+                );
+            }
+        }
+        let position = self.chat_state.message_context_position.unwrap_or_else(|| {
+            let bounds = self.chat_state.panel_bounds;
+            clamp_chat_popover(bounds.center(), bounds, 224.0, 72.0)
+        });
         Some(
             div()
+                .id("message-action-menu")
+                .test_support()
                 .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .left(position.x)
+                .top(position.y)
                 .child(menu)
                 .into_any_element(),
         )

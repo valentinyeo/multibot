@@ -198,6 +198,7 @@ impl MultibotView {
     }
 
     pub(crate) fn send_current_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_chat_interaction_session(cx);
         if self
             .chat_state
             .pending_harness_switch
@@ -274,7 +275,10 @@ impl MultibotView {
         }
 
         let quote = self.chat_state.reply_quote.take();
-        let payload = compose_quoted_reply(quote.as_ref().map(|q| q.full_text.as_str()), &trimmed);
+        let snippets = std::mem::take(&mut self.chat_state.quoted_snippets);
+        self.chat_state.selection_quote_popover = None;
+        let expanded = compose_snippet_quotes(&trimmed, &snippets);
+        let payload = compose_quoted_reply(quote.as_ref().map(|q| q.full_text.as_str()), &expanded);
         let quoted_id = quote.as_ref().map(|q| q.message_id.clone());
 
         self.inputs.prompt_input.update(cx, |state, cx| {
@@ -345,9 +349,10 @@ impl MultibotView {
                     }
                     Ok(Err(err)) => {
                         this.restore_failed_upload_draft(
-                            &session,
+                            &key,
                             raw,
                             quote,
+                            snippets,
                             staged,
                             format!("Attachment upload failed: {err}"),
                             window,
@@ -356,9 +361,10 @@ impl MultibotView {
                     }
                     Err(join_err) => {
                         this.restore_failed_upload_draft(
-                            &session,
+                            &key,
                             raw,
                             quote,
+                            snippets,
                             staged,
                             format!("Attachment upload task failed: {join_err}"),
                             window,
@@ -377,9 +383,10 @@ impl MultibotView {
 
     pub(crate) fn restore_failed_upload_draft(
         &mut self,
-        target_session: &SessionSummary,
+        target_session_key: &str,
         raw_prompt: String,
         quote: Option<ReplyQuote>,
+        snippets: Vec<QuotedSnippet>,
         staged: Vec<StagedAttachment>,
         err_msg: String,
         window: &mut Window,
@@ -390,10 +397,15 @@ impl MultibotView {
             .selection
             .selected_session
             .as_ref()
-            .is_some_and(|s| s.id == target_session.id && s.agent == target_session.agent);
+            .is_some_and(|s| self.session_key_for(s) == target_session_key);
         let prompt_empty = self.inputs.prompt_input.read(cx).value().trim().is_empty();
-        if same_session && prompt_empty && self.chat_state.pending_attachments.is_empty() {
+        if same_session
+            && prompt_empty
+            && self.chat_state.pending_attachments.is_empty()
+            && self.chat_state.quoted_snippets.is_empty()
+        {
             self.chat_state.pending_attachments = staged;
+            self.chat_state.quoted_snippets = snippets;
             if self.chat_state.reply_quote.is_none() {
                 self.chat_state.reply_quote = quote;
             }

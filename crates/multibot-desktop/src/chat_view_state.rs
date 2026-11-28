@@ -14,6 +14,25 @@ pub(crate) struct ReplyQuote {
     pub full_text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QuotedSnippet {
+    pub id: u64,
+    pub preview: String,
+    pub full_text: String,
+}
+
+impl QuotedSnippet {
+    pub(crate) fn token(&self) -> String {
+        format!("[Quote #{}]", self.id)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SelectionQuotePopover {
+    pub text: String,
+    pub position: Point<Pixels>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ReactionEmoji {
     Like,
@@ -125,6 +144,7 @@ pub(crate) enum MessageNavOutcome {
 #[derive(Debug)]
 pub(crate) struct ChatViewState {
     pub scroll_handle: ScrollHandle,
+    pub viewport_size: gpui_kit::Size<Pixels>,
     pub scroll: ChatScrollTracker,
     pub prepend_scroll_anchor: Option<(Pixels, Point<Pixels>)>,
     pub busy_tick_phase: u8,
@@ -145,6 +165,17 @@ pub(crate) struct ChatViewState {
     pub answered_questions: HashMap<String, HashSet<usize>>,
     pub answered_prompts: HashSet<String>,
     pub reply_quote: Option<ReplyQuote>,
+    pub quoted_snippets: Vec<QuotedSnippet>,
+    pub next_quote_id: u64,
+    pub selection_quote_popover: Option<SelectionQuotePopover>,
+    pub interaction_session_key: Option<String>,
+    pub interaction_window: Option<gpui_kit::AnyWindowHandle>,
+    pub drag_selecting: bool,
+    pub composer_height: f32,
+    pub header_height: f32,
+    pub panel_bounds: gpui_kit::Bounds<Pixels>,
+    pub message_context_position: Option<Point<Pixels>>,
+    pub reaction_picker_open: bool,
     pub focused_message_idx: Option<usize>,
     pub message_action_menu_open: bool,
     pub message_action_index: usize,
@@ -175,6 +206,7 @@ impl Default for ChatViewState {
     fn default() -> Self {
         Self {
             scroll_handle: ScrollHandle::default(),
+            viewport_size: gpui_kit::Size::default(),
             scroll: ChatScrollTracker::default(),
             prepend_scroll_anchor: None,
             busy_tick_phase: 0,
@@ -195,6 +227,17 @@ impl Default for ChatViewState {
             answered_questions: HashMap::new(),
             answered_prompts: HashSet::new(),
             reply_quote: None,
+            quoted_snippets: Vec::new(),
+            next_quote_id: 1,
+            selection_quote_popover: None,
+            interaction_session_key: None,
+            interaction_window: None,
+            drag_selecting: false,
+            composer_height: 120.0,
+            header_height: 72.0,
+            panel_bounds: gpui_kit::Bounds::default(),
+            message_context_position: None,
+            reaction_picker_open: false,
             focused_message_idx: None,
             message_action_menu_open: false,
             message_action_index: 0,
@@ -245,6 +288,39 @@ impl ChatViewState {
     pub(crate) fn open_find(&mut self, messages: &[ChatMessage], show_tools: bool) {
         self.find_open = true;
         self.recompute_find_matches(messages, show_tools);
+    }
+
+    pub(crate) fn reset_chat_interactions(&mut self, session_key: String) {
+        if self.interaction_session_key.as_ref() == Some(&session_key) {
+            return;
+        }
+        self.interaction_session_key = Some(session_key);
+        self.quoted_snippets.clear();
+        self.selection_quote_popover = None;
+        self.drag_selecting = false;
+        self.close_message_menu();
+    }
+
+    pub(crate) fn close_message_menu(&mut self) {
+        self.message_action_menu_open = false;
+        self.message_action_index = 0;
+        self.message_context_position = None;
+        self.reaction_picker_open = false;
+    }
+
+    pub(crate) fn active_menu_actions(
+        &self,
+        is_tool_only: bool,
+        is_waiting: bool,
+    ) -> Vec<MessageMenuAction> {
+        if self.reaction_picker_open {
+            ReactionEmoji::all()
+                .into_iter()
+                .map(MessageMenuAction::React)
+                .collect()
+        } else {
+            Self::menu_actions_for(is_tool_only, is_waiting)
+        }
     }
 
     pub(crate) fn close_find(&mut self) {
@@ -353,8 +429,7 @@ impl ChatViewState {
         match key_l.as_str() {
             "escape" => {
                 if self.message_action_menu_open {
-                    self.message_action_menu_open = false;
-                    self.message_action_index = 0;
+                    self.close_message_menu();
                     return MessageNavOutcome::FocusMoved(self.focused_message_idx);
                 }
                 if self.focused_message_idx.is_some() {
@@ -369,7 +444,7 @@ impl ChatViewState {
             }
             "up" => {
                 if self.message_action_menu_open {
-                    let actions = Self::menu_actions_for(is_tool_only, is_waiting);
+                    let actions = self.active_menu_actions(is_tool_only, is_waiting);
                     if actions.is_empty() {
                         return MessageNavOutcome::Ignored;
                     }
@@ -397,7 +472,7 @@ impl ChatViewState {
             }
             "down" => {
                 if self.message_action_menu_open {
-                    let actions = Self::menu_actions_for(is_tool_only, is_waiting);
+                    let actions = self.active_menu_actions(is_tool_only, is_waiting);
                     if actions.is_empty() {
                         return MessageNavOutcome::Ignored;
                     }
@@ -420,19 +495,45 @@ impl ChatViewState {
                     return MessageNavOutcome::Ignored;
                 };
                 if !self.message_action_menu_open {
-                    self.message_action_menu_open = true;
-                    self.message_action_index = 0;
-                    return MessageNavOutcome::MenuOpened(idx);
+                    return MessageNavOutcome::ExecuteAction {
+                        message_idx: idx,
+                        action: MessageMenuAction::Reply,
+                    };
                 }
-                let actions = Self::menu_actions_for(is_tool_only, is_waiting);
+                let actions = self.active_menu_actions(is_tool_only, is_waiting);
                 let action = actions
                     .get(self.message_action_index)
                     .copied()
                     .unwrap_or(MessageMenuAction::Copy);
-                self.message_action_menu_open = false;
-                self.message_action_index = 0;
+                self.close_message_menu();
                 MessageNavOutcome::ExecuteAction {
                     message_idx: idx,
+                    action,
+                }
+            }
+            "r" if key == "r"
+                && self.focused_message_idx.is_some()
+                && !self.message_action_menu_open =>
+            {
+                self.message_action_menu_open = true;
+                self.reaction_picker_open = true;
+                self.message_action_index = 0;
+                self.message_context_position = None;
+                MessageNavOutcome::MenuOpened(self.focused_message_idx.unwrap())
+            }
+            "left" | "right" if self.message_action_menu_open && self.reaction_picker_open => {
+                let len = ReactionEmoji::all().len();
+                let delta = if key_l == "left" { len - 1 } else { 1 };
+                self.message_action_index = (self.message_action_index + delta) % len;
+                MessageNavOutcome::MenuSelectionMoved(self.message_action_index)
+            }
+            "1" | "2" | "3" if self.message_action_menu_open && self.reaction_picker_open => {
+                let index = key_l.as_bytes()[0] as usize - b'1' as usize;
+                let message_idx = self.focused_message_idx.unwrap();
+                let action = MessageMenuAction::React(ReactionEmoji::all()[index]);
+                self.close_message_menu();
+                MessageNavOutcome::ExecuteAction {
+                    message_idx,
                     action,
                 }
             }
@@ -441,7 +542,7 @@ impl ChatViewState {
                     return MessageNavOutcome::Ignored;
                 };
                 if is_waiting {
-                    self.message_action_menu_open = false;
+                    self.close_message_menu();
                     MessageNavOutcome::CancelWaiting(idx)
                 } else {
                     MessageNavOutcome::Ignored
@@ -452,8 +553,7 @@ impl ChatViewState {
                     && (key.chars().count() == 1 || key == "space")
                 {
                     self.focused_message_idx = None;
-                    self.message_action_menu_open = false;
-                    self.message_action_index = 0;
+                    self.close_message_menu();
                     return MessageNavOutcome::ReturnedToComposer;
                 }
                 MessageNavOutcome::Ignored

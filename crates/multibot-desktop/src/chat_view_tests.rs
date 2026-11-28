@@ -270,17 +270,23 @@ fn empty_composer_nav_state_machine_up_down_enter_delete_esc() {
         st.handle_empty_composer_nav_key("up", true, 3, false, false),
         MessageNavOutcome::FocusMoved(Some(2))
     );
-    // Enter opens menu
+    // Enter replies directly; r opens the reaction picker.
     assert_eq!(
         st.handle_empty_composer_nav_key("enter", true, 3, false, false),
+        MessageNavOutcome::ExecuteAction {
+            message_idx: 2,
+            action: MessageMenuAction::Reply
+        }
+    );
+    assert_eq!(
+        st.handle_empty_composer_nav_key("r", true, 3, false, false),
         MessageNavOutcome::MenuOpened(2)
     );
-    // Copy is the first action for every element, including tools.
     assert_eq!(
         st.handle_empty_composer_nav_key("enter", true, 3, true, false),
         MessageNavOutcome::ExecuteAction {
             message_idx: 2,
-            action: MessageMenuAction::Copy
+            action: MessageMenuAction::React(ReactionEmoji::Like)
         }
     );
     // Delete on non-waiting ignored; on waiting cancels
@@ -1684,6 +1690,7 @@ fn chat_urls_open_on_regular_click_and_reject_unsafe_schemes(cx: &mut TestAppCon
                             cx,
                         );
                         assert!(crate::external_url::take_opened_urls().is_empty());
+                        window.press("escape", cx);
                         let bounds = window.find("msg-bubble-0").bounds();
                         let from = bounds.origin + gpui_kit::point(px(24.0), px(20.0));
                         window.drag(from, from + gpui_kit::point(px(30.0), px(0.0)), cx);
@@ -1691,6 +1698,7 @@ fn chat_urls_open_on_regular_click_and_reject_unsafe_schemes(cx: &mut TestAppCon
                             crate::external_url::take_opened_urls().is_empty(),
                             "dragging selects without opening"
                         );
+                        window.press("escape", cx);
                     }
                     window.click_at("msg-bubble-0", gpui_kit::point(px(24.0), px(20.0)), cx);
                     assert_eq!(
@@ -2999,12 +3007,12 @@ fn live_escape_closes_find_action_menu_focused_nav_and_reply_quote_with_composer
             "Escape must close Chat Find even while composer is focused"
         );
 
-        // 2. Empty composer Up -> Enter opens message action menu; Escape closes menu,
+        // 2. Empty composer Up -> r opens reactions; Escape closes menu,
         //    second Escape clears focused message nav.
         window.press("up", cx);
         window.render_frame(cx);
         assert_eq!(view.read(cx).chat_state.focused_message_idx, Some(1));
-        window.press("enter", cx);
+        window.press("r", cx);
         window.render_frame(cx);
         assert!(view.read(cx).chat_state.message_action_menu_open);
 
@@ -3483,7 +3491,7 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
             window.render_frame(cx);
             assert!(!view.read(cx).chat_state.find_open);
 
-            // 4. Empty-composer nav Enter opens action menu with 0 PressEnter
+            // 4. Empty-composer nav Enter replies directly with 0 PressEnter
             view.update(cx, |v, cx| {
                 v.inputs.prompt_input.update(cx, |input, cx| {
                     input.set_value("", window, cx);
@@ -3496,7 +3504,8 @@ fn live_capture_action_propagation_enter_routing_and_modal_precedence(cx: &mut T
             assert_eq!(view.read(cx).chat_state.focused_message_idx, Some(1));
             window.press("enter", cx);
             window.render_frame(cx);
-            assert!(view.read(cx).chat_state.message_action_menu_open);
+            assert!(!view.read(cx).chat_state.message_action_menu_open);
+            assert!(view.read(cx).chat_state.reply_quote.is_some());
             assert_eq!(
                 press_enter_count.load(Ordering::SeqCst),
                 0,
@@ -4255,10 +4264,7 @@ fn message_navigation_scroll_menu_copy_reply_quote_and_focus(cx: &mut TestAppCon
         );
         assert_eq!(view.read(cx).chat_state.focused_message_idx, None);
         window.press("up", cx);
-        window.press("enter", cx);
-        window.render_frame(cx);
-        assert!(window.find("message-action-menu").visible());
-        window.press("enter", cx);
+        window.press("ctrl-c", cx);
         window.render_frame(cx);
         assert_eq!(
             cx.read_from_clipboard().unwrap().text().unwrap(),
@@ -4266,8 +4272,6 @@ fn message_navigation_scroll_menu_copy_reply_quote_and_focus(cx: &mut TestAppCon
         );
         assert!(!view.read(cx).chat_state.message_action_menu_open);
         assert_eq!(view.read(cx).chat_state.focused_message_idx, Some(29));
-        window.press("enter", cx);
-        window.press("down", cx);
         window.press("enter", cx);
         window.render_frame(cx);
         assert_eq!(
@@ -4287,15 +4291,21 @@ fn message_navigation_scroll_menu_copy_reply_quote_and_focus(cx: &mut TestAppCon
                 .focus_handle(cx)
                 .is_focused(window)
         );
-        view.update(cx, |v, _| v.chat_state.reply_quote = None);
-        window.press("up", cx);
-        window.press("enter", cx);
-        window.press("down", cx);
-        window.press("down", cx);
-        window.press("enter", cx);
+        view.update(cx, |v, cx| {
+            v.chat_state.reply_quote = None;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.render_frame(cx);
+        window.right_click("msg-bubble-29", cx);
+        window.click("message-action-2", cx);
         window.render_frame(cx);
         let input = view.read(cx).inputs.prompt_input.read(cx);
-        assert_eq!(input.value().as_ref(), "> Element 29\n> Second line\n\n");
+        assert_eq!(input.value().as_ref(), "[Quote #1] ");
+        assert_eq!(
+            view.read(cx).chat_state.quoted_snippets[0].full_text,
+            "Element 29\nSecond line"
+        );
         assert_eq!(input.cursor(), input.value().len());
         assert!(input.focus_handle(cx).is_focused(window));
         view.update(cx, |v, cx| {
@@ -4305,7 +4315,7 @@ fn message_navigation_scroll_menu_copy_reply_quote_and_focus(cx: &mut TestAppCon
             });
         });
         window.press("up", cx);
-        window.press("enter", cx);
+        window.press("r", cx);
         window.press("escape", cx);
         window.render_frame(cx);
         assert!(!view.read(cx).chat_state.message_action_menu_open);
@@ -4757,9 +4767,14 @@ fn failed_upload_restores_prompt_quote_and_attachments_safely(cx: &mut TestAppCo
 
             // 1. Same session, empty draft -> restores prompt, quote, and attachments.
             v.restore_failed_upload_draft(
-                &sess_a,
+                &v.session_key_for(&sess_a),
                 "please check shot.png".into(),
                 Some(quote.clone()),
+                vec![QuotedSnippet {
+                    id: 1,
+                    preview: "part".into(),
+                    full_text: "full highlighted part".into(),
+                }],
                 staged.clone(),
                 "Attachment upload failed: connection reset".into(),
                 window,
@@ -4777,6 +4792,10 @@ fn failed_upload_restores_prompt_quote_and_attachments_safely(cx: &mut TestAppCo
                 Some("m1")
             );
             assert_eq!(v.chat_state.pending_attachments.len(), 1);
+            assert_eq!(
+                v.chat_state.quoted_snippets[0].full_text,
+                "full highlighted part"
+            );
             assert!(
                 v.notice
                     .as_deref()
@@ -4785,14 +4804,20 @@ fn failed_upload_restores_prompt_quote_and_attachments_safely(cx: &mut TestAppCo
 
             // 2. Same session, user already typed a new draft -> must NOT clobber new draft.
             v.chat_state.pending_attachments.clear();
+            v.chat_state.quoted_snippets.clear();
             v.chat_state.reply_quote = None;
             v.inputs
                 .prompt_input
                 .update(cx, |inp, cx| inp.set_value("new draft", window, cx));
             v.restore_failed_upload_draft(
-                &sess_a,
+                &v.session_key_for(&sess_a),
                 "old failed prompt".into(),
                 Some(quote.clone()),
+                vec![QuotedSnippet {
+                    id: 1,
+                    preview: "part".into(),
+                    full_text: "full highlighted part".into(),
+                }],
                 staged.clone(),
                 "Attachment upload failed: timeout".into(),
                 window,
@@ -4800,6 +4825,7 @@ fn failed_upload_restores_prompt_quote_and_attachments_safely(cx: &mut TestAppCo
             );
             assert_eq!(v.inputs.prompt_input.read(cx).value().as_ref(), "new draft");
             assert!(v.chat_state.pending_attachments.is_empty());
+            assert!(v.chat_state.quoted_snippets.is_empty());
             assert!(v.chat_state.reply_quote.is_none());
             assert!(v.notice.as_deref().is_some_and(|n| n.contains("timeout")));
 
@@ -4809,9 +4835,14 @@ fn failed_upload_restores_prompt_quote_and_attachments_safely(cx: &mut TestAppCo
                 .prompt_input
                 .update(cx, |inp, cx| inp.set_value("", window, cx));
             v.restore_failed_upload_draft(
-                &sess_a,
+                &v.session_key_for(&sess_a),
                 "session a prompt".into(),
                 Some(quote.clone()),
+                vec![QuotedSnippet {
+                    id: 1,
+                    preview: "part".into(),
+                    full_text: "full highlighted part".into(),
+                }],
                 staged.clone(),
                 "Attachment upload failed: broken pipe".into(),
                 window,
@@ -4819,6 +4850,7 @@ fn failed_upload_restores_prompt_quote_and_attachments_safely(cx: &mut TestAppCo
             );
             assert!(v.inputs.prompt_input.read(cx).value().is_empty());
             assert!(v.chat_state.pending_attachments.is_empty());
+            assert!(v.chat_state.quoted_snippets.is_empty());
             assert!(v.chat_state.reply_quote.is_none());
             assert!(
                 v.notice
@@ -4880,8 +4912,14 @@ fn empty_chat_has_uniform_floating_chrome_without_welcome_or_inbox_dot(cx: &mut 
         }));
         let panel = window.find("chat-panel-root").bounds();
         let scroll = view.read(cx).chat_state.scroll_handle.bounds();
-        assert_eq!(scroll.top(), panel.top());
-        assert_eq!(scroll.bottom(), panel.bottom());
+        assert_eq!(
+            scroll.top(),
+            window.find("chat-top-overlay").bounds().bottom()
+        );
+        assert_eq!(
+            scroll.bottom(),
+            window.find("chat-composer-overlay").bounds().top()
+        );
         let title = window.find("header-title-pill").bounds();
         assert!((f32::from(title.center().x - panel.center().x)).abs() <= 1.0);
         for id in ["chat-top-overlay", "chat-composer-overlay"] {
@@ -5534,4 +5572,683 @@ fn tool_only_messages_of_every_activity_role_follow_show_tools() {
         project_visible_messages_with_overrides(&messages, &empty, &empty, true).len(),
         3
     );
+}
+
+#[test]
+fn snippet_expansion_preserves_positions_full_text_and_does_not_reexpand_source_tokens() {
+    let snippets = vec![
+        QuotedSnippet {
+            id: 1,
+            preview: "first".into(),
+            full_text: "first\nsecond [Quote #2]".into(),
+        },
+        QuotedSnippet {
+            id: 2,
+            preview: "next".into(),
+            full_text: "次の引用".into(),
+        },
+    ];
+    assert_eq!(
+        compose_snippet_quotes("before [Quote #2] between [Quote #1] after", &snippets),
+        "before \n\n> 次の引用\n\n between \n\n> first\n> second [Quote #2]\n\n after"
+    );
+    assert_eq!(
+        compose_snippet_quotes("comment", &snippets),
+        "> first\n> second [Quote #2]\n\n> 次の引用\n\ncomment"
+    );
+    assert_eq!(
+        compose_snippet_quotes("[Quote #99] plain", &[]),
+        "[Quote #99] plain"
+    );
+    let full_text = (0..20)
+        .map(|n| format!("line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let long = QuotedSnippet {
+        id: 3,
+        preview: "line".into(),
+        full_text,
+    };
+    let expanded = compose_snippet_quotes("[Quote #3]", &[long]);
+    assert_eq!(expanded.lines().count(), 20);
+    assert!(expanded.ends_with("> line 19"));
+}
+
+#[test]
+fn reaction_picker_arrows_numbers_and_escape_preserve_message_focus() {
+    let mut state = ChatViewState::default();
+    state.handle_empty_composer_nav_key("up", true, 2, false, false);
+    assert_eq!(
+        state.handle_empty_composer_nav_key("r", true, 2, false, false),
+        MessageNavOutcome::MenuOpened(1)
+    );
+    state.handle_empty_composer_nav_key("left", true, 2, false, false);
+    assert_eq!(
+        state.handle_empty_composer_nav_key("enter", true, 2, false, false),
+        MessageNavOutcome::ExecuteAction {
+            message_idx: 1,
+            action: MessageMenuAction::React(ReactionEmoji::Heart)
+        }
+    );
+    for (key, emoji) in [
+        ("1", ReactionEmoji::Like),
+        ("2", ReactionEmoji::Dislike),
+        ("3", ReactionEmoji::Heart),
+    ] {
+        state.handle_empty_composer_nav_key("r", true, 2, false, false);
+        assert_eq!(
+            state.handle_empty_composer_nav_key(key, true, 2, false, false),
+            MessageNavOutcome::ExecuteAction {
+                message_idx: 1,
+                action: MessageMenuAction::React(emoji)
+            }
+        );
+    }
+    state.handle_empty_composer_nav_key("r", true, 2, false, false);
+    assert_eq!(
+        state.handle_empty_composer_nav_key("escape", true, 2, false, false),
+        MessageNavOutcome::FocusMoved(Some(1))
+    );
+    assert!(!state.message_action_menu_open);
+}
+
+#[test]
+fn popover_clamps_to_panel_and_native_drag_scroll_has_a_dead_zone() {
+    use gpui_kit::{Bounds, point, size};
+    let bounds = Bounds::new(point(px(100.0), px(80.0)), size(px(400.0), px(300.0)));
+    assert_eq!(
+        interaction::clamp_chat_popover(point(px(490.0), px(370.0)), bounds, 224.0, 232.0),
+        point(px(176.0), px(68.0))
+    );
+    assert_eq!(
+        interaction::clamp_chat_popover(point(px(0.0), px(0.0)), bounds, 224.0, 232.0),
+        point(px(0.0), px(0.0))
+    );
+    let compute = gpui_kit::base::AutoScroll::compute_delta;
+    assert_eq!(compute(px(230.0), bounds), None);
+    assert!(compute(px(82.0), bounds).unwrap() < px(0.0));
+    assert!(compute(px(378.0), bounds).unwrap() > px(0.0));
+    assert!(compute(px(420.0), bounds).unwrap() > compute(px(378.0), bounds).unwrap());
+}
+
+fn select_chat_line(window: &mut Window, cx: &mut gpui_kit::App, text: &str) -> String {
+    let bounds = gpui_kit::base::test_support::texts(window)
+        .iter()
+        .find(|snapshot| snapshot.text() == text)
+        .unwrap_or_else(|| panic!("missing selectable text {text:?}"))
+        .bounds();
+    window.drag(
+        gpui_kit::point(bounds.left() + px(1.0), bounds.center().y),
+        gpui_kit::point(bounds.right() - px(1.0), bounds.center().y),
+        cx,
+    );
+    window.render_frame(cx);
+    let selected = TextSelection::selected_text(window, cx);
+    assert!(!selected.trim().is_empty());
+    selected
+}
+
+#[gpui_kit::test]
+fn highlighted_quotes_use_shortcut_and_pill_and_send_in_commentary_order(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.connection.daemon_tx = Some(tx);
+            v.selection.selected_session = Some(SessionSummary {
+                id: "snippet-chat".into(),
+                ..Default::default()
+            });
+            v.history.messages = vec![ChatMessage {
+                id: "source".into(),
+                role: MessageRole::Assistant,
+                text: "First highlighted passage.\n\nSecond highlighted passage.".into(),
+                ..Default::default()
+            }];
+            v.inputs.prompt_input.update(cx, |input, cx| {
+                input.set_value("Before ", window, cx);
+                input.set_selected_range(7..7, cx);
+                input.focus(window, cx);
+            });
+            cx.notify();
+        });
+        window.render_frame(cx);
+        let first = select_chat_line(window, cx, "First highlighted passage.");
+        assert!(window.find("selection-quote-pill").visible());
+        view.update(cx, |v, _| v.chat_state.focused_message_idx = Some(0));
+        window.press("ctrl-c", cx);
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            first.trim_end()
+        );
+        window.press("ctrl-alt-l", cx);
+        assert!(
+            view.read(cx).chat_state.quoted_snippets.is_empty(),
+            "AltGr must not quote"
+        );
+        window.press("ctrl-l", cx);
+        window.render_frame(cx);
+        assert!(window.find("quote-chip-1").visible());
+        assert!(view.read(cx).chat_state.selection_quote_popover.is_none());
+        window.input("Between ", cx);
+        let second = select_chat_line(window, cx, "Second highlighted passage.");
+        window.click("selection-quote-pill", cx);
+        window.input("After", cx);
+        assert_eq!(view.read(cx).chat_state.quoted_snippets.len(), 2);
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            "Before [Quote #1] Between [Quote #2] After"
+        );
+        window.press("ctrl-enter", cx);
+        let prompt = std::iter::from_fn(|| rx.try_recv().ok())
+            .find_map(|request| match request {
+                ClientRequest::SendPrompt { text, .. } => Some(text),
+                _ => None,
+            })
+            .expect("sent prompt");
+        assert_eq!(
+            prompt,
+            format!(
+                "Before \n\n> {}\n\n Between \n\n> {}\n\n After",
+                first.replace('\n', "\n> "),
+                second.replace('\n', "\n> ")
+            )
+        );
+        assert!(view.read(cx).chat_state.quoted_snippets.is_empty());
+        assert!(
+            view.read(cx)
+                .inputs
+                .prompt_input
+                .read(cx)
+                .value()
+                .is_empty()
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn message_context_menu_reactions_copy_reply_quote_and_outside_dismiss(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.history.messages = vec![ChatMessage {
+                id: "context-source".into(),
+                role: MessageRole::Assistant,
+                text: "Full context message".into(),
+                ..Default::default()
+            }];
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.right_click("msg-bubble-0", cx);
+        assert!(window.find("message-context-menu").visible());
+        let menu = window.find("message-context-menu").bounds();
+        let panel = view.read(cx).chat_state.panel_bounds;
+        assert!(panel.contains(&menu.origin));
+        assert!(menu.right() <= panel.right());
+        assert!(menu.bottom() <= panel.bottom());
+        window.click("message-react-2", cx);
+        assert_eq!(
+            view.read(cx).chat_state.local_reactions["context-source"],
+            vec![ReactionEmoji::Heart]
+        );
+        assert!(!view.read(cx).chat_state.message_action_menu_open);
+        window.right_click("msg-bubble-0", cx);
+        window.click("message-action-0", cx);
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "Full context message"
+        );
+        assert_eq!(view.read(cx).notice.as_deref(), Some("Copied message."));
+        window.right_click("msg-bubble-0", cx);
+        window.click("message-action-1", cx);
+        assert_eq!(
+            view.read(cx)
+                .chat_state
+                .reply_quote
+                .as_ref()
+                .unwrap()
+                .message_id,
+            "context-source"
+        );
+        assert!(
+            view.read(cx)
+                .inputs
+                .prompt_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        );
+        window.right_click("msg-bubble-0", cx);
+        window.click("message-action-2", cx);
+        assert_eq!(
+            view.read(cx).chat_state.quoted_snippets[0].full_text,
+            "Full context message"
+        );
+        window.right_click("msg-bubble-0", cx);
+        window.click("chat-top-overlay", cx);
+        assert!(!view.read(cx).chat_state.message_action_menu_open);
+        view.update(cx, |v, cx| {
+            v.history.messages.push(ChatMessage {
+                id: "waiting-message".into(),
+                role: MessageRole::User,
+                text: "Waiting prompt".into(),
+                ..Default::default()
+            });
+            v.chat_state.failed_sends.insert(
+                "waiting-message".into(),
+                FailedSend {
+                    message_id: "waiting-message".into(),
+                    text: "Waiting prompt".into(),
+                    reason: "Offline".into(),
+                },
+            );
+            cx.notify();
+        });
+        window.right_click("msg-bubble-1", cx);
+        window.click("message-action-6", cx);
+        assert!(
+            !view
+                .read(cx)
+                .chat_state
+                .failed_sends
+                .contains_key("waiting-message")
+        );
+        assert!(
+            view.read(cx)
+                .history
+                .messages
+                .iter()
+                .all(|message| message.id != "waiting-message")
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn keyboard_message_reply_reaction_copy_and_printable_return(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.history.messages = vec![ChatMessage {
+                id: "keyboard-source".into(),
+                role: MessageRole::Assistant,
+                text: "Keyboard message".into(),
+                ..Default::default()
+            }];
+            v.inputs
+                .prompt_input
+                .update(cx, |input, cx| input.focus(window, cx));
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.press("up", cx);
+        assert_eq!(view.read(cx).chat_state.focused_message_idx, Some(0));
+        window.press("ctrl-c", cx);
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "Keyboard message"
+        );
+        window.press("r", cx);
+        assert!(view.read(cx).chat_state.reaction_picker_open);
+        window.press("right", cx);
+        window.press("enter", cx);
+        assert_eq!(
+            view.read(cx).chat_state.local_reactions["keyboard-source"],
+            vec![ReactionEmoji::Dislike]
+        );
+        window.press("r", cx);
+        window.press("1", cx);
+        assert!(
+            view.read(cx).chat_state.local_reactions["keyboard-source"]
+                .contains(&ReactionEmoji::Like)
+        );
+        window.press("enter", cx);
+        assert_eq!(
+            view.read(cx)
+                .chat_state
+                .reply_quote
+                .as_ref()
+                .unwrap()
+                .message_id,
+            "keyboard-source"
+        );
+        assert!(view.read(cx).chat_state.focused_message_idx.is_none());
+        assert!(
+            view.read(cx)
+                .inputs
+                .prompt_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        );
+        window.press("up", cx);
+        window.press("x", cx);
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            "x"
+        );
+        view.update(cx, |v, cx| {
+            v.inputs
+                .prompt_input
+                .update(cx, |input, cx| input.set_value("", window, cx))
+        });
+        window.press("up", cx);
+        window.press("shift-r", cx);
+        assert_eq!(
+            view.read(cx).inputs.prompt_input.read(cx).value().as_ref(),
+            "R"
+        );
+        assert!(!view.read(cx).chat_state.reaction_picker_open);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn remove_quote_removes_its_token_and_session_switch_clears_snippets(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        view.update(cx, |v, cx| {
+            v.quote_snippet("one".into(), window, cx);
+            v.quote_snippet("two".into(), window, cx);
+        });
+        window.render_frame(cx);
+        window.click("remove-quote-1", cx);
+        assert_eq!(view.read(cx).chat_state.quoted_snippets.len(), 1);
+        assert!(
+            !view
+                .read(cx)
+                .inputs
+                .prompt_input
+                .read(cx)
+                .value()
+                .contains("[Quote #1]")
+        );
+        view.update(cx, |v, cx| {
+            v.select_session(
+                SessionSummary {
+                    id: "another-chat".into(),
+                    ..Default::default()
+                },
+                cx,
+            );
+        });
+        window.render_frame(cx);
+        assert!(view.read(cx).chat_state.quoted_snippets.is_empty());
+        assert!(view.read(cx).chat_state.selection_quote_popover.is_none());
+        assert!(!view.read(cx).chat_state.drag_selecting);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    view.read_with(cx, |v, cx| {
+        assert!(!v.inputs.prompt_input.read(cx).value().contains("[Quote #"));
+    });
+}
+
+fn exercise_drag_scroll_cancel(cx: &mut TestAppContext, cancel: &str) {
+    use gpui_kit::{MouseMoveEvent, PlatformInput, point};
+    use std::time::Duration;
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.history.messages = vec![ChatMessage {
+                id: "long-selection".into(),
+                role: MessageRole::Assistant,
+                text: (0..100)
+                    .map(|index| {
+                        format!("Selection paragraph {index} with enough text to highlight.")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+                ..Default::default()
+            }];
+            cx.notify();
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let edge = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            view.update(cx, |v, cx| {
+                v.chat_state
+                    .scroll_handle
+                    .set_offset(point(px(0.0), px(0.0)));
+                let distance = f32::from(v.chat_state.scroll_handle.max_offset().y);
+                v.chat_state.scroll.sync_position(distance);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.render_frame(cx);
+            let bubble = window.find("msg-bubble-0").bounds();
+            let viewport = view.read(cx).chat_state.scroll_handle.bounds();
+            let start = bubble.origin + point(px(20.0), px(20.0));
+            assert!(
+                viewport.contains(&start),
+                "bubble {bubble:?}, viewport {viewport:?}, start {start:?}"
+            );
+            window.dispatch_event(
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position: start,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            window.render_frame(cx);
+            assert!(
+                TextSelection::is_selectable_at(start, window, cx),
+                "start must hit text: {start:?}, bubble {bubble:?}"
+            );
+            let edge = point(bubble.left() + px(80.0), viewport.bottom() - px(2.0));
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: start,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position: edge,
+                    pressed_button: Some(MouseButton::Left),
+                    ..Default::default()
+                }),
+                cx,
+            );
+            window.render_frame(cx);
+            assert!(view.read(cx).chat_state.drag_selecting);
+            assert!(!TextSelection::selected_text(window, cx).is_empty());
+            edge
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let (before_offset, before_text) = cx
+        .update_window(handle, |_, window, cx| {
+            (
+                view.read(cx).chat_state.scroll_handle.offset(),
+                TextSelection::selected_text(window, cx),
+            )
+        })
+        .unwrap();
+    for _ in 0..8 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .unwrap();
+    }
+    let (scroll, stopped_offset) = cx
+        .update_window(handle, |_, window, cx| {
+            let offset = view.read(cx).chat_state.scroll_handle.offset();
+            assert!(
+                offset.y < before_offset.y,
+                "held edge drag must scroll downward"
+            );
+            let after_text = TextSelection::selected_text(window, cx);
+            assert!(
+                after_text.len() > before_text.len(),
+                "scrolling must extend the selected text"
+            );
+            let scroll = view.read(cx).chat_state.scroll_handle.clone();
+            match cancel {
+                "release" => {
+                    window.dispatch_event(
+                        PlatformInput::MouseUp(MouseUpEvent {
+                            button: MouseButton::Left,
+                            position: edge,
+                            click_count: 1,
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                }
+                "center" => {
+                    window.dispatch_event(
+                        PlatformInput::MouseMove(MouseMoveEvent {
+                            position: scroll.bounds().center(),
+                            pressed_button: Some(MouseButton::Left),
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                }
+                "leave" => {
+                    window.dispatch_event(
+                        PlatformInput::MouseMove(MouseMoveEvent {
+                            position: point(px(-1.0), edge.y),
+                            pressed_button: Some(MouseButton::Left),
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                }
+                "button-lost" => {
+                    window.dispatch_event(
+                        PlatformInput::MouseMove(MouseMoveEvent {
+                            position: edge,
+                            pressed_button: None,
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                }
+                "escape" => window.press("escape", cx),
+                "switch" => view.update(cx, |v, cx| {
+                    v.select_session(
+                        SessionSummary {
+                            id: "different-drag-chat".into(),
+                            ..Default::default()
+                        },
+                        cx,
+                    )
+                }),
+                "exit" => {
+                    window.dispatch_event(
+                        PlatformInput::MouseExited(gpui_kit::MouseExitEvent {
+                            position: edge,
+                            pressed_button: Some(MouseButton::Left),
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                }
+                _ => panic!("unknown cancellation {cancel}"),
+            }
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).chat_state.drag_selecting,
+                cancel == "center",
+                "{cancel}"
+            );
+            if cancel == "release" {
+                assert!(window.find("selection-quote-pill").visible());
+            }
+            let offset = scroll.offset();
+            (scroll, offset)
+        })
+        .unwrap();
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            scroll.offset(),
+            stopped_offset,
+            "no idle drag scrolling after {cancel}"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn held_drag_scrolls_and_extends_selection_then_release_stops_all_scrolling(
+    cx: &mut TestAppContext,
+) {
+    exercise_drag_scroll_cancel(cx, "release");
+}
+
+#[gpui_kit::test]
+fn drag_scroll_stops_on_center_leave_lost_button_escape_switch_and_window_exit(
+    cx: &mut TestAppContext,
+) {
+    for cancel in ["center", "leave", "button-lost", "escape", "switch", "exit"] {
+        exercise_drag_scroll_cancel(cx, cancel);
+    }
+}
+
+#[gpui_kit::test]
+fn shared_message_actions_fall_back_to_latest_visible_message(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.history.messages = vec![
+                ChatMessage {
+                    id: "older".into(),
+                    role: MessageRole::User,
+                    text: "Earlier message".into(),
+                    ..Default::default()
+                },
+                ChatMessage {
+                    id: "latest".into(),
+                    role: MessageRole::Assistant,
+                    text: "Latest message".into(),
+                    ..Default::default()
+                },
+            ];
+            cx.notify();
+        });
+        window.render_frame(cx);
+        view.update(cx, |v, cx| {
+            v.execute_focused_message_action(MessageMenuAction::Copy, window, cx)
+        });
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "Latest message"
+        );
+        view.update(cx, |v, cx| {
+            v.execute_focused_message_action(MessageMenuAction::Reply, window, cx)
+        });
+        assert_eq!(
+            view.read(cx)
+                .chat_state
+                .reply_quote
+                .as_ref()
+                .unwrap()
+                .message_id,
+            "latest"
+        );
+        assert!(
+            view.read(cx)
+                .inputs
+                .prompt_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        );
+    })
+    .unwrap();
 }
