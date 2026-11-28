@@ -66,9 +66,6 @@ pub fn start(
         let mut previous = Vec::new();
         let mut attach_retries = 0;
         loop {
-            if !watched_dir && dir.is_dir() {
-                watched_dir = watcher.watch(&dir, RecursiveMode::NonRecursive).is_ok();
-            }
             // No output subscription, terminal size influence, or mutations to legacy hooks.
             let mut command = tokio::process::Command::new("tmux");
             if let Ok(tmux) = std::env::var("TMUX")
@@ -94,6 +91,9 @@ pub fn start(
                 .map(|out| BufReader::new(out).lines());
             let mut refresh = true;
             loop {
+                if !watched_dir && dir.is_dir() {
+                    watched_dir = watcher.watch(&dir, RecursiveMode::NonRecursive).is_ok();
+                }
                 if refresh {
                     let home = home.clone();
                     let out = out.clone();
@@ -136,15 +136,14 @@ pub fn start(
                     }
                     let Ok(shells) = rx.await else { return };
                     previous = shells;
-                    // Directory/socket creation can precede a usable server. Retry EOFs
-                    // too, but return to event-only waiting after a bounded startup grace.
+                    // Live shells need a control client even after the startup grace.
+                    // Empty servers return to event-only waiting after bounded retries.
                     if lines.is_none()
-                        && (dir.is_dir() || !previous.is_empty())
-                        && attach_retries < 5
+                        && (!previous.is_empty() || (dir.is_dir() && attach_retries < 5))
                     {
                         tokio::time::sleep(std::time::Duration::from_millis(25 << attach_retries))
                             .await;
-                        attach_retries += 1;
+                        attach_retries = (attach_retries + 1).min(5);
                         break;
                     }
                 }

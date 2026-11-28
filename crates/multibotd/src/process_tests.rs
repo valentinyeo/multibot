@@ -1048,23 +1048,39 @@ async fn interrupt_unowned_returns_false_and_real_child_receives_sigint() {
     }
 
     // Interrupt real child with SIGINT
-    mgr.interrupt_session("live-sleep".into(), AgentKind::Claude)
-        .await;
-    match rx.recv().await.unwrap() {
-        ServerEvent::SessionInterrupted {
-            session_id,
-            ok,
-            detail,
-        } => {
-            assert_eq!(session_id, "live-sleep");
-            assert!(ok);
-            assert!(detail.contains("SIGINT"));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        mgr.interrupt_session("live-sleep".into(), AgentKind::Claude)
+            .await;
+        loop {
+            match rx.recv().await.unwrap() {
+                ServerEvent::SessionInterrupted {
+                    session_id,
+                    ok,
+                    detail,
+                } => {
+                    assert_eq!(session_id, "live-sleep");
+                    assert!(ok);
+                    assert!(detail.contains("SIGINT"));
+                    break;
+                }
+                // The child reaper may publish completion before the interrupt reply.
+                ServerEvent::SessionUpdated { .. }
+                | ServerEvent::HistoryAppend { .. }
+                | ServerEvent::PromptStatus { .. } => {}
+                other => panic!("expected SessionInterrupted(ok), got {other:?}"),
+            }
         }
-        other => panic!("expected SessionInterrupted(ok), got {other:?}"),
-    }
+    })
+    .await
+    .expect("SessionInterrupted(ok) did not arrive within 2s");
 
-    // Wait briefly for reaper to clear active map
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while mgr.is_session_busy("live-sleep") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("interrupted child was not reaped within 2s");
     assert!(!mgr.is_session_busy("live-sleep"));
 
     let _ = fs::remove_dir_all(&home);

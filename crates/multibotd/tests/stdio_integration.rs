@@ -747,7 +747,39 @@ async fn shell_sessions_spawn_open_refresh_and_disappear_without_transcripts() {
     }
     let home = temp_home("shell");
     let _server = IsolatedTmux(home.clone());
+    let path = std::env::var_os("PATH").unwrap();
+    let tmux = std::env::split_paths(&path)
+        .map(|dir| dir.join("tmux"))
+        .find(|path| path.is_file())
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let bin = home.join("bin");
+    fs::create_dir(&bin).unwrap();
+    // Force early control-client EOFs beyond the startup retry budget with a live server.
+    fs::write(
+        bin.join("tmux"),
+        r#"#!/bin/sh
+if [ "$1" = "-C" ]; then
+    "$MULTIBOT_TEST_TMUX" list-sessions >/dev/null 2>&1 || exit 1
+    attempts=0
+    read -r attempts < "$HOME/attach-attempts" 2>/dev/null || :
+    attempts=$((attempts + 1))
+    echo "$attempts" > "$HOME/attach-attempts"
+    if [ "$attempts" -le 6 ]; then exit 1; fi
+    touch "$HOME/attach-ready"
+fi
+exec "$MULTIBOT_TEST_TMUX" "$@"
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(bin.join("tmux"), fs::Permissions::from_mode(0o755)).unwrap();
+    let path =
+        std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path))).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_multibotd"))
+        .env("PATH", path)
+        .env("MULTIBOT_TEST_TMUX", tmux)
         .env("HOME", &home)
         .env("TMUX_TMPDIR", &home)
         .env_remove("TMUX")
@@ -851,6 +883,18 @@ async fn shell_sessions_spawn_open_refresh_and_disappear_without_transcripts() {
     })
     .await
     .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !home.join("attach-ready").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "shell watcher did not recover from early control-client EOFs; attempts: {:?}",
+            fs::read_to_string(home.join("attach-attempts"))
+        )
+    });
     // Create a second shell without asking Multibot to refresh.
     assert!(
         Command::new("tmux")
