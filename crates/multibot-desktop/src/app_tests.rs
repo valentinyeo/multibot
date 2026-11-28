@@ -408,6 +408,9 @@ fn queued_message_edit_remove_and_force_send_are_clickable(cx: &mut TestAppConte
             ("queue-remove-0", "Remove queued message"),
         ] {
             assert_eq!(window.find(id).label(), Some(label));
+            let bounds = window.find(id).bounds();
+            assert_eq!(bounds.size.width, px(24.0));
+            assert_eq!(bounds.size.height, px(24.0));
             let id = gpui_kit::ElementId::from(id);
             assert!(!gpui_kit::base::test_support::texts(window)
                 .iter().any(|text| text.path().contains(&id)));
