@@ -270,8 +270,19 @@ impl MultibotView {
         match row {
             PaletteRow::Header(_) => {}
             PaletteRow::Session { session_key, .. } => {
-                if let Some((host, sess)) = self.host_for_session_key(&session_key) {
-                    self.open_session_on_host(host, sess, false, cx);
+                let reactivate = self
+                    .find_session_by_key(&session_key)
+                    .is_some_and(|session| {
+                        session.agent == AgentKind::Shell
+                            || session.archived
+                            || self.sidebar_state.workspace_store.session_lifecycle(
+                                &session_key,
+                                &session,
+                                now_ms,
+                            ) != multibot_core::workspaces::SessionLifecycle::Active
+                    });
+                if !reactivate || self.reactivate_session_key(&session_key, cx) {
+                    self.open_session_key_with_tracking(&session_key, false, cx);
                 }
             }
             PaletteRow::Workspace {

@@ -373,7 +373,7 @@ impl MultibotView {
                     .child(div().text_xs().child("API key override (optional, stored only in Multibot)"))
                     .child(Input::new(&self.inputs.deepgram_key_input).mask_toggle().id("deepgram-api-key"))
                     .child(div().id("deepgram-key-source").text_xs().text_color(theme::text_secondary()).child(source_hint))
-                    .child(div().text_xs().child("Language code"))
+                    .child(div().text_xs().child("Language code: multi (English + German), en, de"))
                     .child(Input::new(&self.inputs.deepgram_language_input).id("deepgram-language"))
                     .child(div().text_xs().text_color(theme::text_secondary())
                         .child("Sign in under Account to sync your Deepgram key. Saving a new override also updates your account."))

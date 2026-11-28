@@ -3123,3 +3123,99 @@ fn undo_last_waiting_skips_stale_already_auto_unarchived_entries() {
     assert!(!store.waiting_sessions.contains_key(&k1));
     assert_eq!(store.undo_last_waiting(), None);
 }
+
+#[test]
+fn all_keeps_open_non_dissolved_shell_visible_during_stale_snapshots() {
+    let now = 10_000;
+    for state in [
+        "done",
+        "hibernated",
+        "archived",
+        "snoozed",
+        "dissolved",
+        "killed",
+    ] {
+        let mut store = WorkspaceStore::new();
+        let mut shell = make_session(
+            "live-shell",
+            AgentKind::Shell,
+            "Live shell",
+            100,
+            false,
+            false,
+        );
+        shell.shell_attached = Some(false);
+        let key = canonical_session_key("h", shell.agent, &shell.id);
+        match state {
+            "done" => store.archive_to_waiting_session(&key, 100, &shell),
+            "hibernated" => store.hibernate_session(&key, &shell, Some(now + 1_000), None, false),
+            "archived" => shell.archived = true,
+            "snoozed" => {
+                store
+                    .snooze_workspace(DEFAULT_WORKSPACE_ID, now + 1_000, now)
+                    .unwrap();
+            }
+            "dissolved" => store.dissolve_session(&key, 100),
+            "killed" => {
+                shell.archived = true;
+                shell.archive_kill_process = true;
+            }
+            _ => unreachable!(),
+        }
+        let inputs = [make_input("h", &shell)];
+        assert!(
+            store
+                .compute_sidebar_layout(ALL_WORKSPACES_ID, &inputs, false, now)
+                .flat_display_order
+                .is_empty(),
+            "{state}"
+        );
+        let layout = store.compute_sidebar_layout_with_options(
+            ALL_WORKSPACES_ID,
+            WorkspaceView::All,
+            &inputs,
+            true,
+            Some(&key),
+            now,
+        );
+        if matches!(state, "dissolved" | "killed") {
+            assert!(layout.flat_display_order.is_empty(), "{state}");
+        } else {
+            assert_eq!(layout.flat_display_order, vec![key.clone()], "{state}");
+            let scoped = store.compute_sidebar_layout_with_options(
+                DEFAULT_WORKSPACE_ID,
+                WorkspaceView::All,
+                &inputs,
+                false,
+                Some(&key),
+                now,
+            );
+            assert!(scoped.flat_display_order.is_empty(), "{state}");
+        }
+    }
+}
+
+#[test]
+fn reactivated_shell_input_promotes_it_to_top_of_all_even_with_stale_archive_flag() {
+    let now = 10_000;
+    let mut store = WorkspaceStore::new();
+    let recent = make_session("recent", AgentKind::Claude, "Recent", 9_000, false, false);
+    let mut shell = make_session("quiet", AgentKind::Shell, "Quiet shell", 100, false, false);
+    shell.archived = true;
+    shell.shell_attached = Some(false);
+    let inputs = [make_input("h", &recent), make_input("h", &shell)];
+    let key = inputs[1].key.clone();
+    store.hibernate_session(&key, &shell, Some(now + 1_000), None, false);
+    store.move_to_inbox(&key);
+    store.record_session_input(&key, now);
+    let layout = store.compute_sidebar_layout_with_options(
+        ALL_WORKSPACES_ID,
+        WorkspaceView::All,
+        &inputs,
+        false,
+        Some(&key),
+        now,
+    );
+    assert_eq!(layout.flat_display_order, vec![key, inputs[0].key.clone()]);
+    assert_eq!(layout.recents[0].used_ms, now);
+}

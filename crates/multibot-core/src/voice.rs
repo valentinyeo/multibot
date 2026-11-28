@@ -23,7 +23,7 @@ impl Default for VoiceSettings {
     fn default() -> Self {
         Self {
             api_key: String::new(),
-            language: "en".into(),
+            language: "multi".into(),
         }
     }
 }
@@ -55,7 +55,7 @@ impl VoiceSettings {
     pub fn listen_url(&self) -> Result<String> {
         self.validate()?;
         Ok(format!(
-            "https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&punctuate=true&encoding=linear16&sample_rate=16000&channels=1&mip_opt_out=true&language={}",
+            "https://api.eu.deepgram.com/v1/listen?model=nova-3&smart_format=true&punctuate=true&paragraphs=true&filler_words=false&encoding=linear16&sample_rate=16000&channels=1&mip_opt_out=true&language={}",
             self.language
         ))
     }
@@ -228,9 +228,17 @@ pub fn parse_transcript(status: u16, body: &str) -> Result<String> {
     }
     let value: serde_json::Value = serde_json::from_str(body)
         .map_err(|_| anyhow::anyhow!("Deepgram returned an invalid response."))?;
-    value
-        .pointer("/results/channels/0/alternatives/0/transcript")
+    let alternative = value.pointer("/results/channels/0/alternatives/0");
+    alternative
+        .and_then(|v| v.pointer("/paragraphs/transcript"))
         .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            alternative
+                .and_then(|v| v.get("transcript"))
+                .and_then(|v| v.as_str())
+        })
         .map(|s| s.trim().to_owned())
         .ok_or_else(|| anyhow::anyhow!("Deepgram response contained no transcript."))
 }
@@ -261,7 +269,7 @@ fn transcribe_at(config: &VoiceSettings, pcm: &[u8], url: &str) -> Result<String
         ureq::Agent::config_builder()
             .max_redirects(0)
             .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(10)))
+            .timeout_global(Some(Duration::from_secs(30)))
             .build(),
     );
     let mut response = agent
@@ -279,16 +287,205 @@ fn transcribe_at(config: &VoiceSettings, pcm: &[u8], url: &str) -> Result<String
     let body = response
         .body_mut()
         .with_config()
-        .limit(64 * 1024)
+        .limit(512 * 1024)
         .read_to_string()
         .map_err(|_| anyhow::anyhow!("Could not read the Deepgram response."))?;
     parse_transcript(status, &body)
+}
+
+// 16 kHz mono PCM16, inspected in 20 ms frames.
+const FRAME_BYTES: usize = 640;
+const MIN_SEGMENT_BYTES: usize = 3 * 32_000;
+const MAX_SEGMENT_BYTES: usize = 14 * 32_000;
+const QUIET_FRAMES: usize = 30;
+const SPEECH_RMS: f64 = 400.0;
+
+fn frame_rms(frame: &[u8]) -> f64 {
+    let (sum, count) = frame
+        .chunks_exact(2)
+        .fold((0.0, 0), |(sum, count), sample| {
+            let sample = f64::from(i16::from_le_bytes([sample[0], sample[1]]));
+            (sum + sample * sample, count + 1)
+        });
+    if count == 0 {
+        0.0
+    } else {
+        (sum / f64::from(count)).sqrt()
+    }
+}
+
+pub fn has_speech(pcm: &[u8]) -> bool {
+    pcm.chunks(FRAME_BYTES)
+        .any(|frame| frame_rms(frame) >= SPEECH_RMS)
+}
+
+/// Returns a sample-aligned utterance boundary, leaving the rest for the next request.
+pub fn utterance_boundary(pcm: &[u8]) -> Option<usize> {
+    let mut quiet = 0;
+    for (index, frame) in pcm[..pcm.len().min(MAX_SEGMENT_BYTES)]
+        .chunks_exact(FRAME_BYTES)
+        .enumerate()
+    {
+        if frame_rms(frame) < SPEECH_RMS {
+            quiet += 1;
+        } else {
+            quiet = 0;
+        }
+        let midpoint = (index + 1) * FRAME_BYTES - quiet * FRAME_BYTES / 2;
+        if quiet >= QUIET_FRAMES && midpoint >= MIN_SEGMENT_BYTES {
+            return Some(midpoint);
+        }
+    }
+    if pcm.len() < MAX_SEGMENT_BYTES {
+        return None;
+    }
+    let start = MAX_SEGMENT_BYTES - MIN_SEGMENT_BYTES;
+    let mut quietest = (f64::INFINITY, MAX_SEGMENT_BYTES);
+    for (index, frame) in pcm[start..MAX_SEGMENT_BYTES]
+        .chunks_exact(FRAME_BYTES)
+        .enumerate()
+    {
+        let rms = frame_rms(frame);
+        if rms <= quietest.0 {
+            quietest = (rms, start + index * FRAME_BYTES + FRAME_BYTES / 2);
+        }
+    }
+    Some(quietest.1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    fn pcm_frames(amplitude: i16, frames: usize) -> Vec<u8> {
+        amplitude.to_le_bytes().repeat(frames * FRAME_BYTES / 2)
+    }
+
+    #[test]
+    fn nova3_eu_multilingual_defaults_and_language_overrides() {
+        let mut config = VoiceSettings {
+            api_key: "test-key".into(),
+            ..Default::default()
+        };
+        for language in ["multi", "en", "de", "en-US"] {
+            assert_eq!(config.language, "multi");
+            let override_config = VoiceSettings {
+                language: language.into(),
+                ..config.clone()
+            };
+            let url = override_config.listen_url().unwrap();
+            let (base, query) = url.split_once('?').unwrap();
+            assert_eq!(base, "https://api.eu.deepgram.com/v1/listen");
+            let params: std::collections::HashMap<_, _> = query
+                .split('&')
+                .map(|p| p.split_once('=').unwrap())
+                .collect();
+            for (key, value) in [
+                ("model", "nova-3"),
+                ("smart_format", "true"),
+                ("punctuate", "true"),
+                ("paragraphs", "true"),
+                ("filler_words", "false"),
+                ("encoding", "linear16"),
+                ("sample_rate", "16000"),
+                ("channels", "1"),
+                ("mip_opt_out", "true"),
+                ("language", language),
+            ] {
+                assert_eq!(params.get(key), Some(&value));
+            }
+        }
+        for invalid in ["", "de&model=other", "en US", "de\n"] {
+            config.language = invalid.into();
+            assert!(config.listen_url().is_err());
+        }
+        let older: VoiceSettings =
+            serde_json::from_str(r#"{"api_key":"test-key","language":"de"}"#).unwrap();
+        assert!(older.listen_url().unwrap().ends_with("language=de"));
+    }
+
+    #[test]
+    fn paragraph_transcripts_are_preferred_trimmed_and_fall_back() {
+        for (paragraphs, expected) in [
+            (
+                serde_json::json!({"transcript": "  Hello.\n\nGrüße!  "}),
+                "Hello.\n\nGrüße!",
+            ),
+            (serde_json::json!({"transcript": " \n "}), "raw text"),
+            (serde_json::json!({}), "raw text"),
+            (serde_json::Value::Null, "raw text"),
+        ] {
+            let body = serde_json::json!({"results":{"channels":[{"alternatives":[{
+                "transcript":" raw text ", "paragraphs":paragraphs
+            }]}]}});
+            assert_eq!(parse_transcript(200, &body.to_string()).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn segmenter_keeps_continuous_speech_until_fourteen_seconds() {
+        for frames in [1, 100, 150, 300, 699] {
+            let pcm = pcm_frames(1000, frames);
+            assert!(has_speech(&pcm));
+            assert_eq!(utterance_boundary(&pcm), None);
+        }
+        let pcm = pcm_frames(1000, 700);
+        assert_eq!(
+            utterance_boundary(&pcm),
+            Some(14 * 32_000 - FRAME_BYTES / 2)
+        );
+    }
+
+    #[test]
+    fn segmenter_waits_for_minimum_and_six_hundred_ms_then_cuts_mid_pause() {
+        let mut pcm = pcm_frames(1000, 150);
+        pcm.extend(pcm_frames(399, 29));
+        assert_eq!(utterance_boundary(&pcm), None);
+        pcm.extend(pcm_frames(399, 1));
+        assert_eq!(utterance_boundary(&pcm), Some(165 * FRAME_BYTES));
+        // A loud frame breaks the consecutive silence run.
+        pcm[170 * FRAME_BYTES..171 * FRAME_BYTES].copy_from_slice(&pcm_frames(400, 1));
+        assert_eq!(utterance_boundary(&pcm), None);
+        let mut early_pause = pcm_frames(1000, 50);
+        early_pause.extend(pcm_frames(0, 30));
+        assert_eq!(utterance_boundary(&early_pause), None);
+        early_pause.extend(pcm_frames(1000, 70));
+        assert_eq!(utterance_boundary(&early_pause), None);
+    }
+
+    #[test]
+    fn segmenter_force_cut_uses_quietest_frame_in_final_three_seconds() {
+        let mut pcm = pcm_frames(2000, 710);
+        pcm[400 * FRAME_BYTES..401 * FRAME_BYTES].fill(0); // Outside the search window.
+        pcm[610 * FRAME_BYTES..611 * FRAME_BYTES].copy_from_slice(&pcm_frames(-100, 1));
+        pcm[650 * FRAME_BYTES..651 * FRAME_BYTES].copy_from_slice(&pcm_frames(200, 1));
+        assert_eq!(utterance_boundary(&pcm[..699 * FRAME_BYTES]), None);
+        let boundary = utterance_boundary(&pcm).unwrap();
+        assert_eq!(boundary, 610 * FRAME_BYTES + FRAME_BYTES / 2);
+        assert_eq!(boundary % 2, 0);
+        let remainder = pcm.split_off(boundary);
+        assert!(has_speech(&pcm));
+        assert!(has_speech(&remainder));
+        assert_eq!(pcm.len() + remainder.len(), 710 * FRAME_BYTES);
+    }
+
+    #[test]
+    fn silence_is_skipped_and_short_final_speech_can_be_flushed() {
+        for amplitude in [0, 399, -399] {
+            let silence = pcm_frames(amplitude, 700);
+            let cut = utterance_boundary(&silence).unwrap();
+            assert!(cut >= MIN_SEGMENT_BYTES);
+            assert!(!has_speech(&silence[..cut]));
+            assert!(!has_speech(&silence[cut..]));
+        }
+        assert!(!has_speech(&[]));
+        assert!(!has_speech(&[1]));
+        let final_speech = pcm_frames(-400, 20);
+        assert_eq!(utterance_boundary(&final_speech), None);
+        assert!(has_speech(&final_speech));
+        assert!(has_speech(&1000i16.to_le_bytes()));
+    }
 
     #[test]
     fn account_key_enables_dictation_without_legacy_and_clears_on_signout() {
@@ -435,8 +632,14 @@ mod tests {
             let mut audio = [0; 4];
             stream.read_exact(&mut audio).unwrap();
             assert_eq!(audio, [1, 0, 2, 0]);
-            let body =
-                r#"{"results":{"channels":[{"alternatives":[{"transcript":"Hello world."}]}]}}"#;
+            let body = serde_json::json!({
+                "metadata": {"padding": "x".repeat(100 * 1024)},
+                "results": {"channels": [{"alternatives": [{
+                    "transcript": "hello world",
+                    "paragraphs": {"transcript": "Hello world."}
+                }]}]}
+            })
+            .to_string();
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

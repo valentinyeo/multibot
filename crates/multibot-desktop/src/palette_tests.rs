@@ -1127,3 +1127,164 @@ fn permission_picker_changes_only_active_session_and_defaults_to_full_access(
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+fn palette_attach_reactivates_shells_and_promotes_them_in_all(cx: &mut TestAppContext) {
+    use multibot_core::workspaces::{ALL_WORKSPACES_ID, SessionLifecycle, WorkspaceView};
+    let (handle, view) = open_view(cx);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, _| v.connection.daemon_tx = Some(tx));
+        for server_shells in [false, true] {
+            for lifecycle in ["quiet", "done", "hibernated", "archived", "dissolved"] {
+                let before = now_unix_ms();
+                let key = view.update(cx, |v, _| {
+                    let shell = SessionSummary {
+                        id: "recover-shell".into(), title: "Recover shell".into(),
+                        agent: AgentKind::Shell, shell_attached: Some(false),
+                        archived: lifecycle == "archived", updated_at_ms: 100,
+                        ..Default::default()
+                    };
+                    let key = v.session_key_for(&shell);
+                    v.connection.sessions = vec![shell.clone(), SessionSummary {
+                        id: "recent-chat".into(), title: "Recent chat".into(),
+                        updated_at_ms: 1_000, ..Default::default()
+                    }];
+                    let store = &mut v.sidebar_state.workspace_store;
+                    store.move_to_inbox(&key);
+                    match lifecycle {
+                        "done" => store.archive_to_waiting_session(&key, 100, &shell),
+                        "hibernated" => store.hibernate_session(&key, &shell, Some(before + 60_000), None, false),
+                        "dissolved" => store.dissolve_session(&key, 100),
+                        _ => {},
+                    }
+                    let workspace = store.effective_workspace_id(&key);
+                    store.snooze_workspace(&workspace, before + 60_000, before).unwrap();
+                    v.palette_state.server_shells = server_shells;
+                    v.active_modal = ActiveModal::Palette;
+                    key
+                });
+                view.update(cx, |v, cx| {
+                    v.execute_palette_row(PaletteRow::Session {
+                        session_key: key.clone(), title: "Recover shell".into(), agent: AgentKind::Shell,
+                        cwd: None, workspace_name: "Server".into(), match_rank: 0, frecency: 0,
+                    }, before, Some(window), cx);
+                    let selected = v.selection.selected_session.as_ref().unwrap();
+                    assert_eq!(selected.id, "recover-shell");
+                    assert!(!selected.archived);
+                    let store = &v.sidebar_state.workspace_store;
+                    assert_eq!(store.session_lifecycle(&key, selected, before), SessionLifecycle::Active);
+                    assert!(store.session_meta[&key].last_input_ms.unwrap() >= before);
+                    assert!(!store.waiting_sessions.contains_key(&key));
+                    let workspace = store.effective_workspace_id(&key);
+                    assert!(!store.workspace_by_id(&workspace).unwrap().is_snoozed_at(before));
+                    let layout = store.compute_sidebar_layout_with_options(
+                        ALL_WORKSPACES_ID, WorkspaceView::All, &v.session_inputs(), false, Some(&key), before,
+                    );
+                    assert_eq!(layout.flat_display_order[0], key);
+                    assert_eq!(layout.flat_display_order.len(), 2);
+                });
+                let requests: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+                if matches!(lifecycle, "archived" | "dissolved") {
+                    assert!(requests.iter().any(|r| matches!(r, ClientRequest::UnarchiveSession { session_id } if session_id == "recover-shell")));
+                }
+            }
+        }
+    }).unwrap();
+}
+
+#[gpui_kit::test]
+fn server_shell_labels_distinguish_active_background_and_live(cx: &mut TestAppContext) {
+    let (handle, view) = open_view(cx);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    cx.update_window(handle, |_, _, cx| {
+        view.update(cx, |v, _| {
+            v.connection.daemon_tx = Some(tx);
+            v.connection.sessions = [Some(true), Some(false), None]
+                .into_iter()
+                .enumerate()
+                .map(|(i, attached)| SessionSummary {
+                    id: format!("shell-{i}"),
+                    title: format!("Shell {i}"),
+                    agent: AgentKind::Shell,
+                    shell_attached: attached,
+                    ..Default::default()
+                })
+                .collect();
+            v.palette_state.server_shells = true;
+            let rows = v.build_palette_rows("", now_unix_ms());
+            assert_eq!(rows.len(), 3);
+            for (i, label) in ["Active", "Background", "Live"].into_iter().enumerate() {
+                assert!(rows.iter().any(
+                    |row| matches!(row, PaletteRow::Session { title, workspace_name, .. }
+                    if title.contains(&format!("shell-{i}")) && workspace_name.ends_with(label))
+                ));
+            }
+        });
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn global_palette_restores_inactive_chats_without_reordering_passive_active_visits(
+    cx: &mut TestAppContext,
+) {
+    use multibot_core::workspaces::SessionLifecycle;
+    let (handle, view) = open_view(cx);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, _| v.connection.daemon_tx = Some(tx));
+        for state in ["active", "done", "hibernated", "archived"] {
+            view.update(cx, |v, cx| {
+                let session = SessionSummary {
+                    id: state.into(),
+                    agent: AgentKind::Claude,
+                    archived: state == "archived",
+                    ..Default::default()
+                };
+                let key = v.session_key_for(&session);
+                v.connection.sessions = vec![session.clone()];
+                let now = now_unix_ms();
+                match state {
+                    "done" => v
+                        .sidebar_state
+                        .workspace_store
+                        .archive_to_waiting_session(&key, now, &session),
+                    "hibernated" => v.sidebar_state.workspace_store.hibernate_session(
+                        &key,
+                        &session,
+                        Some(now + 60_000),
+                        None,
+                        false,
+                    ),
+                    _ => {}
+                }
+                v.execute_palette_row(
+                    PaletteRow::Session {
+                        session_key: key.clone(),
+                        title: state.into(),
+                        agent: session.agent,
+                        cwd: None,
+                        workspace_name: "General".into(),
+                        match_rank: 0,
+                        frecency: 0,
+                    },
+                    now,
+                    Some(window),
+                    cx,
+                );
+                let selected = v.selection.selected_session.as_ref().unwrap();
+                let store = &v.sidebar_state.workspace_store;
+                assert_eq!(
+                    store.session_lifecycle(&key, selected, now),
+                    SessionLifecycle::Active
+                );
+                assert_eq!(
+                    store.session_meta[&key].last_input_ms.is_some(),
+                    state != "active"
+                );
+            });
+        }
+    })
+    .unwrap();
+}

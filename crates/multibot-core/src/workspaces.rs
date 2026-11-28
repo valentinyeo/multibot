@@ -1959,15 +1959,20 @@ impl WorkspaceStore {
         let mut ungrouped_recents: Vec<Candidate> = Vec::new();
 
         for (orig_pos, input) in sessions.iter().enumerate() {
-            if self.session_lifecycle(&input.key, input.summary, now_ms) != SessionLifecycle::Active
-            {
+            let lifecycle = self.session_lifecycle(&input.key, input.summary, now_ms);
+            // Keep the open session visible while an unarchive request or workspace wake settles.
+            let keep_active = in_all
+                && active_session_key == Some(input.key.as_str())
+                && lifecycle != SessionLifecycle::Dissolved;
+            if lifecycle != SessionLifecycle::Active && !keep_active {
                 continue;
             }
             let meta = self.session_meta.get(&input.key);
             let eff_ws = self.effective_workspace_id(&input.key);
-            if self
-                .workspace_by_id(&eff_ws)
-                .is_some_and(|ws| ws.is_snoozed_at(now_ms))
+            if !keep_active
+                && self
+                    .workspace_by_id(&eff_ws)
+                    .is_some_and(|ws| ws.is_snoozed_at(now_ms))
             {
                 continue;
             }
