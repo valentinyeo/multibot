@@ -37,6 +37,45 @@ fn console_url_at_cell(cells: &[u16], cols: usize, row: usize, col: usize) -> Op
     crate::external_url::url_at_byte(&text, byte).map(str::to_string)
 }
 
+#[cfg(any(windows, test))]
+fn console_paste_chunks(text: &[u16]) -> impl Iterator<Item = Vec<u16>> + '_ {
+    let multiline = text.iter().any(|&c| c == 13 || c == 10);
+    let mut input = text.iter().copied().peekable();
+    let normalized = std::iter::from_fn(move || {
+        let c = input.next()?;
+        if c == 13 && input.peek() == Some(&10) {
+            input.next();
+        }
+        Some(if c == 10 { 13 } else { c })
+    });
+    let prefix: &[u16] = if multiline {
+        &[27, 91, 50, 48, 48, 126]
+    } else {
+        &[]
+    };
+    let suffix: &[u16] = if multiline {
+        &[27, 91, 50, 48, 49, 126]
+    } else {
+        &[]
+    };
+    let mut encoded = prefix
+        .iter()
+        .copied()
+        .chain(normalized)
+        .chain(suffix.iter().copied());
+    std::iter::from_fn(move || {
+        let chunk: Vec<_> = encoded.by_ref().take(128).collect();
+        (!chunk.is_empty()).then_some(chunk)
+    })
+}
+
+#[cfg(any(windows, test))]
+fn console_wheel_params(delta: i16, ctrl: bool, shift: bool, x: i32, y: i32) -> (usize, isize) {
+    let modifiers = if ctrl { 0x0008 } else { 0 } | if shift { 0x0004 } else { 0 };
+    let wparam = ((delta as u16 as u32) << 16) | modifiers;
+    let lparam = (x as u16 as u32) | ((y as u16 as u32) << 16);
+    (wparam as usize, lparam as isize)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellLaunchSpec {
@@ -377,6 +416,14 @@ impl MultibotView {
                 .collect()
         };
         self.shell_host.retain_live(&keys);
+        #[cfg(windows)]
+        if let Some(host) = &self.shell_host.native {
+            let text_input_focused = window.focused(cx).is_some_and(|focus| {
+                focus != self.root_focus_handle
+                    && self.chat_state.focus_handle.as_ref() != Some(&focus)
+            });
+            host.set_text_input_focus(text_input_focused);
+        }
         let visible = self.embedded_shell_visible();
         let active = visible
             .then(|| {
@@ -708,6 +755,61 @@ mod native;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_paste_encodes_urls_multiline_empty_and_bounded_utf16_chunks() {
+        for (text, expected) in [
+            (
+                "https://screencast2.com/abc.png",
+                "https://screencast2.com/abc.png",
+            ),
+            (
+                "one\r\ntwo\nthree\rfour",
+                "\x1b[200~one\rtwo\rthree\rfour\x1b[201~",
+            ),
+            ("", ""),
+        ] {
+            let input: Vec<_> = text.encode_utf16().collect();
+            let chunks: Vec<_> = console_paste_chunks(&input).collect();
+            assert!(chunks.iter().all(|chunk| chunk.len() <= 128));
+            assert_eq!(chunks.concat(), expected.encode_utf16().collect::<Vec<_>>());
+            if text.is_empty() {
+                assert!(chunks.is_empty());
+            }
+        }
+        let input: Vec<_> = "😀x".repeat(200).encode_utf16().collect();
+        let chunks: Vec<_> = console_paste_chunks(&input).collect();
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= 128));
+        assert_eq!(chunks.concat(), input);
+    }
+
+    #[test]
+    fn console_wheel_packs_signed_delta_coordinates_and_modifiers() {
+        for delta in [-120i16, 120] {
+            for (ctrl, shift, modifiers) in [
+                (false, false, 0),
+                (true, false, 8),
+                (false, true, 4),
+                (true, true, 12),
+            ] {
+                let (w, l) = console_wheel_params(delta, ctrl, shift, -250, -40);
+                assert_eq!((w >> 16) as i16, delta);
+                assert_eq!(w & 0xffff, modifiers);
+                assert_eq!(l as i16, -250);
+                assert_eq!((l >> 16) as i16, -40);
+            }
+        }
+    }
+
+    #[test]
+    fn page_scrolling_stays_terminal_owned() {
+        for key in [0x21, 0x22] {
+            for shift in [false, true] {
+                assert_eq!(shell_shortcut(key, false, false, shift), None);
+            }
+        }
+    }
 
     #[test]
     fn console_url_hit_test_uses_utf16_cells_and_wrapped_rows() {

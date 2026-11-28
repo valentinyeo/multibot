@@ -3539,6 +3539,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dissolved_shell_survives_save_reload_and_fresh_discovery() {
+        let dir = unique_temp_dir("dissolved-shell-reload");
+        let path = dir.join("workspaces.json");
+        let dissolved = make_session(
+            "shell-dead",
+            AgentKind::Shell,
+            "Dissolved",
+            10,
+            false,
+            false,
+        );
+        let active = make_session("shell-live", AgentKind::Shell, "Active", 20, false, true);
+        let key = canonical_session_key("VPS", dissolved.agent, &dissolved.id);
+        let active_key = canonical_session_key("VPS", active.agent, &active.id);
+        let mut store = WorkspaceStore::new();
+        store.dissolve_session(&key, 30);
+        store.save_to(&path).unwrap();
+        let mut restored = WorkspaceStore::load_from(&path).unwrap();
+        restored.reconcile_live_sessions([("VPS", &dissolved), ("VPS", &active)]);
+        assert!(!restored.auto_unarchive_waiting_if_active(&key, &dissolved));
+        assert_eq!(
+            restored.session_lifecycle(&key, &dissolved, 40),
+            SessionLifecycle::Dissolved
+        );
+        assert_eq!(
+            restored.session_lifecycle(&active_key, &active, 40),
+            SessionLifecycle::Active
+        );
+        let inputs = [make_input("VPS", &dissolved), make_input("VPS", &active)];
+        let layout = restored.compute_sidebar_layout(ALL_WORKSPACES_ID, &inputs, false, 40);
+        assert!(!layout.flat_display_order.contains(&key));
+        assert!(layout.flat_display_order.contains(&active_key));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn pi_cursor_session_keys_remain_distinct() {
         assert_eq!(agent_slug(AgentKind::Pi), "pi");
         assert_eq!(agent_slug(AgentKind::Cursor), "cursor");

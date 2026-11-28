@@ -754,7 +754,12 @@ impl MultibotView {
             },
             PaletteCommandSpec {
                 id: "pal-cmd-toggle-tools".into(),
-                label: "Chat: Show / hide tool call details".into(),
+                label: if self.show_tool_calls() {
+                    "Chat: Hide tool calls"
+                } else {
+                    "Chat: Show tool calls"
+                }
+                .into(),
                 chord: String::new(),
                 category: PaletteCategory::ChatView,
                 destructive: false,

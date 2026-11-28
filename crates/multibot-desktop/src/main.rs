@@ -40,7 +40,8 @@ use app::{
     WorkspaceViewFavorites, WorkspaceViewFrequent,
 };
 use gpui_kit::{
-    App, AppContext, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px, size,
+    App, AppContext, Bounds, KeyBinding, Pixels, TitlebarOptions, WindowBounds, WindowOptions, px,
+    size,
 };
 use multibot_core::MultibotSettings;
 use multibot_gpu::{ENV_GPU_LUID, ENV_GPU_MODE, ENV_GPU_REPORT_PATH, GpuPreference};
@@ -209,6 +210,21 @@ fn app_icon_is_valid_ico_with_multiple_sizes() {
     assert!(sizes.contains(&(256, 256)));
 }
 
+fn startup_window_bounds(bounds: Bounds<Pixels>) -> WindowBounds {
+    WindowBounds::Maximized(bounds)
+}
+
+#[test]
+fn startup_is_always_maximized() {
+    let bounds = Bounds {
+        origin: gpui_kit::point(px(10.0), px(20.0)),
+        size: size(px(1260.0), px(800.0)),
+    };
+    assert!(
+        matches!(startup_window_bounds(bounds), WindowBounds::Maximized(actual) if actual == bounds)
+    );
+}
+
 fn main() {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     if raw_args.iter().any(|a| a == "--version" || a == "-V") {
@@ -251,7 +267,7 @@ fn main() {
 
         let bounds = Bounds::centered(None, size(px(1260.0), px(800.0)), cx);
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_bounds: Some(startup_window_bounds(bounds)),
             titlebar: Some(TitlebarOptions {
                 title: Some(window_title().into()),
                 ..Default::default()

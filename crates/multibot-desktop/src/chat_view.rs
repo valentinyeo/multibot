@@ -310,9 +310,9 @@ impl ChatViewState {
         self.font_size_pt
     }
 
-    pub(crate) fn open_find(&mut self, messages: &[ChatMessage]) {
+    pub(crate) fn open_find(&mut self, messages: &[ChatMessage], show_tools: bool) {
         self.find_open = true;
-        self.recompute_find_matches(messages);
+        self.recompute_find_matches(messages, show_tools);
     }
 
     pub(crate) fn close_find(&mut self) {
@@ -322,14 +322,19 @@ impl ChatViewState {
         self.find_current = 0;
     }
 
-    pub(crate) fn update_find_query(&mut self, query: impl Into<String>, messages: &[ChatMessage]) {
+    pub(crate) fn update_find_query(
+        &mut self,
+        query: impl Into<String>,
+        messages: &[ChatMessage],
+        show_tools: bool,
+    ) {
         self.find_query = query.into();
-        self.recompute_find_matches(messages);
+        self.recompute_find_matches(messages, show_tools);
     }
 
     /// Recomputes find matches over projected visible messages (excluding hidden
     /// reaction messages and hidden lone assistant acks) storing visible list indices.
-    fn recompute_find_matches(&mut self, messages: &[ChatMessage]) {
+    fn recompute_find_matches(&mut self, messages: &[ChatMessage], show_tools: bool) {
         self.find_matches.clear();
         self.find_current = 0;
         let q = self.find_query.trim().to_lowercase();
@@ -340,6 +345,7 @@ impl ChatViewState {
             messages,
             &self.local_reactions,
             &self.local_reaction_removals,
+            show_tools,
         );
         for (vis_idx, vis) in visible.iter().enumerate() {
             if message_matches_find(vis.message, &q) {
@@ -549,8 +555,14 @@ pub(crate) fn find_visible_quote_target(
     local_removals: &HashMap<String, Vec<ReactionEmoji>>,
     quoted_id: Option<&str>,
     quoted_source: &str,
+    show_tools: bool,
 ) -> Option<usize> {
-    let visible = project_visible_messages_with_overrides(messages, local_reactions, local_removals);
+    let visible = project_visible_messages_with_overrides(
+        messages,
+        local_reactions,
+        local_removals,
+        show_tools,
+    );
     quoted_id
         .and_then(|qid| visible.iter().position(|v| v.message.id == qid))
         .or_else(|| {
@@ -1532,19 +1544,30 @@ pub(crate) fn project_visible_messages<'a>(
     local_reactions: &HashMap<String, Vec<ReactionEmoji>>,
 ) -> Vec<VisibleMessage<'a>> {
     let empty_removals = HashMap::new();
-    project_visible_messages_with_overrides(messages, local_reactions, &empty_removals)
+    project_visible_messages_with_overrides(messages, local_reactions, &empty_removals, true)
 }
 
 pub(crate) fn project_visible_messages_with_overrides<'a>(
     messages: &'a [ChatMessage],
     local_reactions: &HashMap<String, Vec<ReactionEmoji>>,
     local_removals: &HashMap<String, Vec<ReactionEmoji>>,
+    show_tools: bool,
 ) -> Vec<VisibleMessage<'a>> {
     let (hidden, masks) = compute_hidden_and_reaction_masks(messages);
 
     let mut visible = Vec::with_capacity(messages.len());
     for (idx, msg) in messages.iter().enumerate() {
-        if hidden[idx] {
+        if hidden[idx]
+            || (!show_tools
+                && msg.role == MessageRole::Assistant
+                && msg.text.trim().is_empty()
+                && !msg.blocks.is_empty()
+                && msg.blocks.iter().all(|block| match block {
+                    MessageBlock::ToolUse { .. } => true,
+                    MessageBlock::Text { text } => text.trim().is_empty(),
+                    _ => false,
+                }))
+        {
             continue;
         }
         let mut counts: [usize; 3] = [0; 3];
@@ -2005,6 +2028,12 @@ impl MultibotView {
             .unwrap_or_else(|| "__default__".into())
     }
 
+    pub(crate) fn show_tool_calls(&self) -> bool {
+        self.chat_state
+            .show_all_tools
+            .contains(&self.tool_chat_key())
+    }
+
     fn tool_cluster_open(&self, msg: &ChatMessage, msg_idx: usize) -> bool {
         let chat = self.tool_chat_key();
         let message = tool_cluster_key(msg, msg_idx);
@@ -2012,34 +2041,32 @@ impl MultibotView {
             .tool_cluster_overrides
             .get(&(chat.clone(), message))
             .copied()
-            .unwrap_or_else(|| self.chat_state.show_all_tools.contains(&chat))
+            .unwrap_or(false)
     }
 
     pub(crate) fn toggle_all_tool_steps(&mut self, cx: &mut Context<Self>) -> bool {
         let chat = self.tool_chat_key();
-        let show = !self.chat_state.show_all_tools.contains(&chat)
-            && !self.messages.iter().enumerate().any(|(i, msg)| {
-                msg.blocks.iter().any(|b| matches!(b, MessageBlock::ToolUse { .. }))
-                    && self.tool_cluster_open(msg, i)
-            });
-        self.chat_state.tool_cluster_overrides.retain(|(key, _), _| key != &chat);
+        let show = !self.chat_state.show_all_tools.contains(&chat);
+        self.chat_state
+            .tool_cluster_overrides
+            .retain(|(key, _), _| key != &chat);
+        let prefix = format!("{chat}:");
+        self.chat_state
+            .expanded_tools
+            .retain(|key| !key.starts_with(&prefix));
+        self.chat_state
+            .expanded_diffs
+            .retain(|key| !key.starts_with(&prefix));
         if show {
             self.chat_state.show_all_tools.insert(chat);
         } else {
             self.chat_state.show_all_tools.remove(&chat);
         }
-        for (msg_idx, msg) in self.messages.iter().enumerate() {
-            for (block_idx, block) in msg.blocks.iter().enumerate() {
-                if let MessageBlock::ToolUse { call_id, .. } = block {
-                    let key = format!("{}:{}", self.tool_chat_key(), tool_step_key(msg, msg_idx, block_idx, call_id));
-                    if show {
-                        self.chat_state.expanded_tools.insert(key);
-                    } else {
-                        self.chat_state.expanded_tools.remove(&key);
-                    }
-                }
-            }
-        }
+        self.chat_state.focused_message_idx = None;
+        self.chat_state.message_action_menu_open = false;
+        let query = self.chat_state.find_query.clone();
+        self.chat_state
+            .update_find_query(query, &self.messages, show);
         cx.notify();
         show
     }
@@ -3166,7 +3193,11 @@ impl MultibotView {
                 self.chat_state.slash_sync_pending = false;
                 let mut next = self.chat_state.find_query.clone();
                 next.pop();
-                self.chat_state.update_find_query(next.clone(), &self.messages);
+                self.chat_state.update_find_query(
+                    next.clone(),
+                    &self.messages,
+                    self.show_tool_calls(),
+                );
                 self.scroll_to_active_find_match();
                 if !next.trim().is_empty() && self.has_unloaded_older_history() {
                     self.search_active_session_history(next, cx);
@@ -3194,8 +3225,11 @@ impl MultibotView {
                     self.chat_state.slash_sync_pending = false;
                     let mut next_q = self.chat_state.find_query.clone();
                     next_q.push_str(ch);
-                    self.chat_state
-                        .update_find_query(next_q.clone(), &self.messages);
+                    self.chat_state.update_find_query(
+                        next_q.clone(),
+                        &self.messages,
+                        self.show_tool_calls(),
+                    );
                     self.scroll_to_active_find_match();
                     if !next_q.trim().is_empty() && self.has_unloaded_older_history() {
                         self.search_active_session_history(next_q, cx);
@@ -3244,7 +3278,7 @@ impl MultibotView {
             self.chat_state.slash_sync_pending = false;
             self.slash_picker_state.close();
             let msgs = self.messages.clone();
-            self.chat_state.open_find(&msgs);
+            self.chat_state.open_find(&msgs, self.show_tool_calls());
             self.focus_chat_panel(window, cx);
             cx.stop_propagation();
             cx.notify();
@@ -3376,6 +3410,7 @@ impl MultibotView {
             &self.messages,
             &self.chat_state.local_reactions,
             &self.chat_state.local_reaction_removals,
+            self.show_tool_calls(),
         );
         let focused_meta = self
             .chat_state
@@ -3599,6 +3634,7 @@ impl MultibotView {
                 h_flex()
                     .id(SharedString::from(format!("tool-row-{msg_idx}-{block_idx}")))
                     .role(Role::Button)
+                    .aria_expanded(is_expanded)
                     .test_support()
                     .w_full()
                     .px_3()
@@ -4357,6 +4393,7 @@ impl MultibotView {
             &self.messages,
             &self.chat_state.local_reactions,
             &self.chat_state.local_reaction_removals,
+            self.show_tool_calls(),
         );
         let trailing_prose_options = detect_trailing_prose_options(&self.messages);
         let active_find_idx = self.chat_state.active_find_message_index();
@@ -4546,6 +4583,7 @@ impl MultibotView {
                                         &this.chat_state.local_reaction_removals,
                                         quoted_id_target.as_deref(),
                                         &quoted_source_target,
+                                        this.show_tool_calls(),
                                     ) {
                                         this.chat_state.scroll_handle.scroll_to_item(vis_target);
                                         cx.notify();
@@ -4619,6 +4657,9 @@ impl MultibotView {
                                 diff,
                                 output,
                             } => {
+                                if !self.show_tool_calls() {
+                                    continue;
+                                }
                                 if !tool_cluster_rendered {
                                     body_col = body_col.child(self.render_tool_cluster(msg, orig_idx, tool_count, cx));
                                     tool_cluster_rendered = true;
@@ -5134,7 +5175,7 @@ impl MultibotView {
                     let mut next = this.chat_state.find_query.clone();
                     next.pop();
                     let msgs = this.messages.clone();
-                    this.chat_state.update_find_query(next, &msgs);
+                    this.chat_state.update_find_query(next, &msgs, this.show_tool_calls());
                     cx.notify();
                     cx.stop_propagation();
                     return;
@@ -6027,6 +6068,49 @@ mod tests {
     }
 
     #[test]
+    fn hidden_tool_only_messages_do_not_offset_find_quotes_or_navigation() {
+        let tool = ChatMessage {
+            id: "tool-only".into(),
+            role: MessageRole::Assistant,
+            blocks: vec![MessageBlock::ToolUse {
+                call_id: "call".into(),
+                name: "exec".into(),
+                summary: "Run".into(),
+                detail: "details".into(),
+                status: ToolStatus::Completed,
+                diff: None,
+                output: None,
+            }],
+            ..Default::default()
+        };
+        let messages = vec![
+            tool,
+            ChatMessage {
+                id: "answer".into(),
+                role: MessageRole::Assistant,
+                text: "Visible answer".into(),
+                ..Default::default()
+            },
+        ];
+        let empty = HashMap::new();
+        for (show, expected) in [(false, 0), (true, 1)] {
+            let visible = project_visible_messages_with_overrides(&messages, &empty, &empty, show);
+            assert_eq!(visible.len(), expected + 1);
+            let mut state = ChatViewState::default();
+            state.update_find_query("Visible answer", &messages, show);
+            assert_eq!(state.find_matches, vec![expected]);
+            assert_eq!(
+                find_visible_quote_target(&messages, &empty, &empty, Some("answer"), "", show),
+                Some(expected)
+            );
+            assert_eq!(
+                state.handle_empty_composer_nav_key("up", true, visible.len(), false, false),
+                MessageNavOutcome::FocusMoved(Some(expected))
+            );
+        }
+    }
+
+    #[test]
     fn chat_find_computes_matches_and_wraps_next_prev() {
         let msgs = vec![
             ChatMessage {
@@ -6046,8 +6130,8 @@ mod tests {
             },
         ];
         let mut st = ChatViewState::default();
-        st.open_find(&msgs);
-        st.update_find_query("ALPHA", &msgs);
+        st.open_find(&msgs, true);
+        st.update_find_query("ALPHA", &msgs, true);
         assert_eq!(st.find_matches, vec![0, 2]);
         assert_eq!(st.active_find_message_index(), Some(0));
         assert_eq!(st.find_next(), Some(2));
@@ -6974,7 +7058,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn tool_clusters_default_closed_click_and_ctrl_k_toggle_current_chat(cx: &mut TestAppContext) {
+    fn tool_calls_are_absent_until_ctrl_k_reveals_expandable_clusters(cx: &mut TestAppContext) {
         let (handle, view) = open_test_chat_window(cx);
         cx.update_window(handle, |_, window, cx| {
             view.update(cx, |v, cx| {
@@ -6983,52 +7067,67 @@ mod tests {
                     call_id: id.into(), name: "exec".into(), summary: "Run command".into(),
                     detail: "secret tool details".into(), status: ToolStatus::Completed, diff: None, output: None,
                 };
-                v.messages = vec![ChatMessage {
-                    id: "cluster-message".into(), role: MessageRole::Assistant,
-                    blocks: vec![tool("c1"), tool("c2"), MessageBlock::Text { text: "Answer stays visible".into() }, tool("c3")],
-                    ..Default::default()
-                }];
+                v.messages = vec![
+                    ChatMessage {
+                        id: "mixed".into(),
+                        role: MessageRole::Assistant,
+                        blocks: vec![
+                            tool("c1"),
+                            MessageBlock::Text {
+                                text: "Answer stays visible".into(),
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                    ChatMessage {
+                        id: "tool-only".into(),
+                        role: MessageRole::Assistant,
+                        blocks: vec![tool("c2"), MessageBlock::Text { text: "".into() }],
+                        ..Default::default()
+                    },
+                ];
                 cx.notify();
             });
             window.render_frame(cx);
-            assert_eq!(window.find_all("tool-cluster-0").len(), 1);
-            assert_eq!(window.find("tool-cluster-0").label(), Some("3 tool calls"));
-            assert_eq!(window.find("tool-cluster-0").expanded(), Some(false));
-            assert!(window.try_find("tool-row-0-0").is_none());
-            window.click("tool-cluster-0", cx);
-            window.render_frame(cx);
-            for id in ["tool-row-0-0", "tool-row-0-1", "tool-row-0-3"] {
-                assert!(window.try_find(id).is_some());
+            assert!(window.try_find("msg-bubble-0").is_some());
+            assert!(window.try_find("msg-bubble-1").is_none());
+            for i in 0..2 {
+                assert!(window.try_find(format!("tool-cluster-{i}")).is_none());
+                assert!(window.try_find(format!("tool-row-{i}-0")).is_none());
             }
-            window.click("tool-cluster-0", cx);
-            window.render_frame(cx);
-            assert!(window.try_find("tool-row-0-0").is_none());
-
-            for show in [true, false] {
+            for show in [true, false, true] {
                 window.press("ctrl-k", cx);
                 window.render_frame(cx);
-                assert_eq!(view.read(cx).active_modal, ActiveModal::Palette);
                 view.update(cx, |v, cx| {
-                    v.palette_input.update(cx, |input, cx| input.set_value("tool call details", window, cx));
+                    v.palette_input
+                        .update(cx, |input, cx| input.set_value("tool calls", window, cx));
                 });
                 window.render_frame(cx);
                 window.press("enter", cx);
                 window.render_frame(cx);
                 assert_eq!(view.read(cx).active_modal, ActiveModal::None);
-                assert_eq!(window.try_find("tool-row-0-0").is_some(), show);
-                view.update(cx, |v, _| {
-                    assert_eq!(v.tool_cluster_open(&v.messages[0], 0), show);
-                    assert_eq!(v.chat_state.expanded_tools.len(), if show { 3 } else { 0 });
-                });
+                assert_eq!(window.try_find("tool-cluster-0").is_some(), show);
+                assert_eq!(window.try_find("msg-bubble-1").is_some(), show);
+                assert!(window.try_find("tool-row-0-0").is_none());
+                if show {
+                    assert_eq!(window.find("tool-cluster-0").expanded(), Some(false));
+                    window.click("tool-cluster-0", cx);
+                    window.render_frame(cx);
+                    assert_eq!(window.find("tool-row-0-0").expanded(), Some(false));
+                    window.click("tool-row-0-0", cx);
+                    window.render_frame(cx);
+                    assert_eq!(window.find("tool-row-0-0").expanded(), Some(true));
+                }
             }
-            view.update(cx, |v, cx| { assert!(v.toggle_all_tool_steps(cx)); });
             view.update(cx, |v, cx| {
                 v.selected_session.as_mut().unwrap().id = "other-chat".into();
                 cx.notify();
             });
             window.render_frame(cx);
-            assert!(window.try_find("tool-row-0-0").is_none(), "same message/call IDs in another chat stay hidden");
-        }).unwrap();
+            assert!(window.try_find("tool-cluster-0").is_none());
+            assert!(window.try_find("tool-row-0-0").is_none());
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
@@ -7162,6 +7261,9 @@ mod tests {
             window.render_frame(cx);
             assert!(window.try_find("chat-todo-drawer").is_some());
 
+            assert!(window.try_find("tool-cluster-0").is_none());
+            view.update(cx, |v, cx| { assert!(v.toggle_all_tool_steps(cx)); });
+            window.render_frame(cx);
             assert!(window.try_find("tool-cluster-0").is_some());
             assert!(window.try_find("tool-row-0-1").is_none());
             window.click("tool-cluster-0", cx);
@@ -7321,14 +7423,14 @@ mod tests {
         ];
 
         let mut st = ChatViewState::default();
-        st.open_find(&msgs);
+        st.open_find(&msgs, true);
         for (query, expected_vis_idx) in [
             ("CAFÉ", 0usize),
             ("über", 1usize),
             ("москва", 2usize),
             ("ελλάδα", 3usize),
         ] {
-            st.update_find_query(query, &msgs);
+            st.update_find_query(query, &msgs, true);
             assert_eq!(
                 st.find_matches,
                 vec![expected_vis_idx],
@@ -7343,6 +7445,7 @@ mod tests {
             &HashMap::new(),
             Some("m1"),
             "Über alles",
+            true,
         );
         assert_eq!(target, Some(1));
     }
@@ -7413,6 +7516,7 @@ mod tests {
             &HashMap::new(),
             None,
             "Answer inside block",
+            true,
         );
         assert_eq!(q_target, Some(0));
     }
@@ -8152,6 +8256,7 @@ mod tests {
                     &view.read(cx).messages,
                     &view.read(cx).chat_state.local_reactions,
                     &view.read(cx).chat_state.local_reaction_removals,
+                    true,
                 );
                 assert_eq!(vis_opt[0].reactions, vec![(emoji, 1)]);
 
@@ -8186,6 +8291,7 @@ mod tests {
                         &view.read(cx).messages,
                         &view.read(cx).chat_state.local_reactions,
                         &view.read(cx).chat_state.local_reaction_removals,
+                        true
                     )[0]
                     .reactions
                     .is_empty()

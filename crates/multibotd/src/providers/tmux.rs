@@ -1,4 +1,4 @@
-use super::{AgentProvider, HeaderMeta, LineSlice, MetadataStore, ParsedSlice};
+use super::{AgentProvider, ArchiveStore, HeaderMeta, LineSlice, MetadataStore, ParsedSlice};
 use crate::server_workspaces::ServerWorkspaceIndex;
 use multibot_proto::{AgentKind, ServerEvent, SessionSummary};
 use std::path::{Path, PathBuf};
@@ -73,6 +73,7 @@ pub fn apply_metadata(
     shell: &mut SessionSummary,
     metadata: &MetadataStore,
     index: &ServerWorkspaceIndex,
+    archive: &ArchiveStore,
 ) {
     shell.title = metadata
         .get(&shell.id)
@@ -80,6 +81,10 @@ pub fn apply_metadata(
         .or_else(|| index.name_for(&shell.id).map(str::to_string))
         .unwrap_or_else(|| shell.title.clone());
     shell.workspace = index.workspace_for(&shell.id).map(str::to_string);
+    if let Some(entry) = archive.archived.get(&shell.id) {
+        shell.archived = true;
+        shell.archive_kill_process = entry.kill_process;
+    }
 }
 
 pub fn empty_history(session_id: String) -> ServerEvent {
@@ -121,6 +126,39 @@ impl AgentProvider for TmuxProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rediscovered_shell_retains_saved_archive_after_daemon_restart() {
+        let home =
+            std::env::temp_dir().join(format!("multibot-shell-archive-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let mut archive = ArchiveStore::default();
+        archive.archived.insert(
+            "dissolved".into(),
+            super::super::ArchivedEntry {
+                kill_process: true,
+                archived_at_ms: 1,
+                agent: Some(AgentKind::Shell),
+                source_path: Some("tmux:dissolved".into()),
+            },
+        );
+        archive.save(&home).unwrap();
+        let archive = ArchiveStore::load(&home);
+        let mut shells = parse_tmux_sessions_output(
+            "dissolved\t2\tbash\t/\t0\tbash\nactive\t3\tbash\t/\t0\tbash",
+        );
+        for shell in &mut shells {
+            apply_metadata(
+                shell,
+                &MetadataStore::default(),
+                &ServerWorkspaceIndex::default(),
+                &archive,
+            );
+        }
+        assert!(shells[0].archived && shells[0].archive_kill_process);
+        assert!(!shells[1].archived);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn resolves_window_titles_without_changing_session_targets() {
         for (name, window, command, title) in [
@@ -168,7 +206,7 @@ mod tests {
             parse_tmux_sessions_output("term-abc\t1\tagy\t/\t0\tMulti Bot AGY Shell").remove(0);
         let mut metadata = MetadataStore::default();
         let index = ServerWorkspaceIndex::default();
-        apply_metadata(&mut shell, &metadata, &index);
+        apply_metadata(&mut shell, &metadata, &index, &ArchiveStore::default());
         assert_eq!(shell.title, "Multi Bot AGY Shell");
         metadata.sessions.insert(
             shell.id.clone(),
@@ -177,7 +215,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        apply_metadata(&mut shell, &metadata, &index);
+        apply_metadata(&mut shell, &metadata, &index, &ArchiveStore::default());
         assert_eq!(shell.title, "My Multibot name");
         assert_eq!(shell.id, "term-abc");
     }
@@ -199,7 +237,7 @@ mod tests {
             "term-56d16ef56ce668ab2d7235d20e7ecd75\t1\tbash\t/\t0\tTmux title\nterm-4d82a90403033d51dd366d2b1d7c89c6\t2\tagy\t/\t1\tAnother title\nterm-deadbeef\t3\tzsh\t/\t0\tzsh",
         );
         for shell in &mut shells {
-            apply_metadata(shell, &metadata, &index);
+            apply_metadata(shell, &metadata, &index, &ArchiveStore::default());
         }
         assert_eq!(shells[0].title, "Multi Bot AGY Shell");
         assert_eq!(shells[0].workspace.as_deref(), Some("Multi Bot"));
@@ -213,7 +251,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        apply_metadata(&mut shells[0], &metadata, &index);
+        apply_metadata(&mut shells[0], &metadata, &index, &ArchiveStore::default());
         assert_eq!(shells[0].title, "My Multibot name");
         assert_eq!(shells[0].source_path, format!("tmux:{}", shells[0].id));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);

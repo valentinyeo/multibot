@@ -3464,8 +3464,13 @@ impl MultibotView {
                         && let Some(first) = self
                             .sessions
                             .iter()
-                            .find(|s| !s.archived)
-                            .or_else(|| self.sessions.first())
+                            .find(|s| {
+                                self.sidebar_state.workspace_store.session_lifecycle(
+                                    &self.session_key_for(s),
+                                    s,
+                                    now_unix_ms(),
+                                ) == multibot_core::workspaces::SessionLifecycle::Active
+                            })
                             .cloned()
                     {
                         self.open_session_with_tracking(first, false, cx);
@@ -3819,7 +3824,8 @@ impl MultibotView {
                 self.chat_state.reconcile_local_reactions(&self.messages);
                 if self.chat_state.find_open {
                     let q = self.chat_state.find_query.clone();
-                    self.chat_state.update_find_query(q, &self.messages);
+                    self.chat_state
+                        .update_find_query(q, &self.messages, self.show_tool_calls());
                 }
                 return added_count > 0 || oldest_offset.is_some();
             }
@@ -3872,7 +3878,11 @@ impl MultibotView {
                     }
                     if self.chat_state.find_open {
                         let q = self.chat_state.find_query.clone();
-                        self.chat_state.update_find_query(q, &self.messages);
+                        self.chat_state.update_find_query(
+                            q,
+                            &self.messages,
+                            self.show_tool_calls(),
+                        );
                     }
                     return true;
                 }
@@ -3898,7 +3908,8 @@ impl MultibotView {
             }
             if self.chat_state.find_open {
                 let q = self.chat_state.find_query.clone();
-                self.chat_state.update_find_query(q, &self.messages);
+                self.chat_state
+                    .update_find_query(q, &self.messages, self.show_tool_calls());
             }
             return true;
         }
@@ -3979,7 +3990,8 @@ impl MultibotView {
                 }
                 if self.chat_state.find_open {
                     let q = self.chat_state.find_query.clone();
-                    self.chat_state.update_find_query(q, &self.messages);
+                    self.chat_state
+                        .update_find_query(q, &self.messages, self.show_tool_calls());
                 }
                 visible_changed = true;
             }
@@ -4124,8 +4136,13 @@ impl MultibotView {
                     && let Some(first) = self
                         .sessions
                         .iter()
-                        .find(|s| !s.archived)
-                        .or_else(|| self.sessions.first())
+                        .find(|s| {
+                            self.sidebar_state.workspace_store.session_lifecycle(
+                                &self.session_key_for(s),
+                                s,
+                                now_unix_ms(),
+                            ) == multibot_core::workspaces::SessionLifecycle::Active
+                        })
                         .cloned()
                 {
                     let host = self.host_for_summary(&first);
@@ -6247,7 +6264,7 @@ impl Render for MultibotView {
                     this.chat_state.slash_sync_pending = false;
                     this.slash_picker_state.close();
                     let msgs = this.messages.clone();
-                    this.chat_state.open_find(&msgs);
+                    this.chat_state.open_find(&msgs, this.show_tool_calls());
                     this.focus_chat_panel(window, cx);
                     cx.notify();
                 }
@@ -9355,6 +9372,87 @@ mod tests {
             source
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn dissolved_shell_stays_hidden_after_reload_and_fresh_session_lists(cx: &mut TestAppContext) {
+        use multibot_core::workspaces::SessionLifecycle;
+        let (handle, view) = open_test_view_with_entity(cx);
+        let dir = std::env::temp_dir().join(format!(
+            "multibot-shell-reload-{}-{}",
+            std::process::id(),
+            APP_TEST_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("workspaces.json");
+        cx.update_window(handle, |_, window, cx| {
+            let dead = make_session("dead-shell", AgentKind::Shell, "Dissolved shell", false);
+            let active = make_session("live-shell", AgentKind::Shell, "Active shell", false);
+            let key = canonical_session_key("VPS", AgentKind::Shell, &dead.id);
+            let active_key = canonical_session_key("VPS", AgentKind::Shell, &active.id);
+            let (tx, _rx) = mpsc::unbounded_channel();
+            view.update(cx, |v, cx| {
+                v.connected_host = Some("VPS".into());
+                v.daemon_tx = Some(tx);
+                v.sessions = vec![dead.clone(), active.clone()];
+                v.sync_sessions_to_shared(cx);
+                v.dissolve_session_key(&key, cx);
+                v.dissolve_session_key(&key, cx);
+                v.sidebar_state.workspace_store.save_to(&path).unwrap();
+            });
+            for app_scoped in [false, true] {
+                view.update(cx, |v, cx| {
+                    v.clear_active_session_view();
+                    v.sessions.clear();
+                    v.sidebar_state.workspace_store = WorkspaceStore::load_from(&path).unwrap();
+                    v.sync_workspace_to_shared(cx);
+                    v.sync_sessions_to_shared(cx);
+                    // A stale, unarchived discovery response must not undo a local dissolve.
+                    let event = UiBridgeEvent::Server(ServerEvent::Sessions {
+                        sessions: vec![dead.clone(), active.clone()],
+                    });
+                    if app_scoped {
+                        let generation = cx.global::<SharedAppStore>().connection_gen;
+                        assert!(MultibotView::apply_daemon_bridge_event_to_app(
+                            generation, event, &v.runtime, cx
+                        ));
+                        v.handle_daemon_server_event_with_hint(
+                            "VPS",
+                            ServerEvent::Sessions {
+                                sessions: vec![dead.clone(), active.clone()],
+                            },
+                            false,
+                            cx,
+                        );
+                    } else {
+                        v.handle_bridge_event(event, cx);
+                    }
+                    assert_eq!(v.selected_session.as_ref().unwrap().id, active.id);
+                    assert_eq!(
+                        v.sidebar_state.workspace_store.session_lifecycle(
+                            &key,
+                            &dead,
+                            now_unix_ms()
+                        ),
+                        SessionLifecycle::Dissolved
+                    );
+                    assert_eq!(
+                        v.sidebar_state.workspace_store.session_lifecycle(
+                            &active_key,
+                            &active,
+                            now_unix_ms()
+                        ),
+                        SessionLifecycle::Active
+                    );
+                    assert_eq!(v.active_ctrl_digit_order(), vec![active_key.clone()]);
+                });
+                window.render_frame(cx);
+                assert!(window.try_find("session-0").is_some());
+                assert!(window.try_find("session-1").is_none());
+            }
+        })
+        .unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[gpui_kit::test]

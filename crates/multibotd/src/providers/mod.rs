@@ -480,12 +480,25 @@ fn append_archived_sessions(ctx: &DiscoveryContext<'_>, all: &mut Vec<SessionSum
         if seen_ids.contains(&(agent, sid.clone())) {
             continue;
         }
-        let path = Path::new(source);
-        if !path.is_file() {
-            continue;
-        }
-        let provider = provider_for(agent);
-        let mut summary = summarize_session(provider.as_ref(), path, entry.archived_at_ms, ctx);
+        let mut summary = if agent == AgentKind::Shell {
+            let mut shell = SessionSummary {
+                id: sid.clone(),
+                agent,
+                title: sid.clone(),
+                source_path: source.into(),
+                updated_at_ms: entry.archived_at_ms,
+                ..Default::default()
+            };
+            tmux::apply_metadata(&mut shell, ctx.metadata, ctx.server_workspaces, ctx.archive);
+            shell
+        } else {
+            let path = Path::new(source);
+            if !path.is_file() {
+                continue;
+            }
+            let provider = provider_for(agent);
+            summarize_session(provider.as_ref(), path, entry.archived_at_ms, ctx)
+        };
         summary.id = sid.clone();
         summary.archived = true;
         summary.archive_kill_process = entry.kill_process;
@@ -517,8 +530,9 @@ pub fn discover_live_sessions_with_ctx(
     let mut sessions = discover_all_sessions_with_ctx(home, limit, ctx);
     let mut shells = tmux::discover_sessions();
     for shell in &mut shells {
-        tmux::apply_metadata(shell, ctx.metadata, ctx.server_workspaces);
+        tmux::apply_metadata(shell, ctx.metadata, ctx.server_workspaces, ctx.archive);
     }
+    shells.retain(|shell| !shell.archived);
     // The transcript limit must never hide a live terminal.
     sessions.extend(shells);
     sessions.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
@@ -3600,6 +3614,15 @@ mod tests {
                 );
             }
         }
+        archive.archived.insert(
+            "dissolved-shell".into(),
+            ArchivedEntry {
+                kill_process: true,
+                archived_at_ms: 1,
+                agent: Some(AgentKind::Shell),
+                source_path: Some("tmux:dissolved-shell".into()),
+            },
+        );
         archive.save(&home).unwrap();
         let archive = ArchiveStore::load(&home);
         let active = HashSet::new();
@@ -3614,6 +3637,16 @@ mod tests {
             include_archived: true,
             server_workspaces: &workspaces,
         };
+        let mut saved = Vec::new();
+        append_archived_sessions(&ctx, &mut saved);
+        let shell = saved.iter().find(|s| s.id == "dissolved-shell").unwrap();
+        assert!(shell.archived && shell.archive_kill_process);
+        assert_eq!(shell.source_path, "tmux:dissolved-shell");
+        append_archived_sessions(&ctx, &mut saved);
+        assert_eq!(
+            saved.iter().filter(|s| s.id == "dissolved-shell").count(),
+            1
+        );
         let sessions: Vec<_> = discover_lifecycle_sessions_with_ctx(&home, 1, &ctx)
             .into_iter()
             .filter(|session| session.agent != AgentKind::Shell)

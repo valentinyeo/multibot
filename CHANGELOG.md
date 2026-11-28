@@ -7,6 +7,12 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 
+- Paste clipboard text reliably into live server shells with Ctrl+V or Ctrl+Shift+V, including multiline text.
+- Scroll live server shells with the mouse wheel even when the app holds keyboard focus; preserve terminal PageUp and PageDown keys.
+- Start Multibot maximized on every launch, including update restarts.
+- Keep dissolved server shells dissolved after restarting the app or reconnecting.
+- Hide tool calls completely by default; use Ctrl+K → Chat: Show tool calls to reveal compact, expandable details.
+
 - Keep new chats error-free before their transcript folders exist, while still reporting real read failures.
 - Stop archive and restore confirmations from lingering above unrelated live chats.
 - Keep closed Codex chats and unused transcripts out of the live sidebar; handle /exit and /quit without sending prompts.
@@ -21,7 +27,6 @@ This file is embedded in Multibot so Changelog works offline.
 - Open Chat Info from the chat or shell title, or Ctrl+K, to see the directory, runtime, model, effort, and reported context use; copy the directory in one click.
 - Restore typing in Windows live shells after switching back to Multibot or clicking the shell, without taking focus from dialogs or other inputs.
 
-- Hide tool calls behind a compact expandable chip; show or hide all details through Ctrl+K → Chat: Show / hide tool call details.
 - Open chat links with a click and terminal or native shell URLs with Ctrl+click; only HTTP and HTTPS links can open.
 - Use the classic robot icon for the Windows app, title bar, taskbar, installer, and shortcuts.
 - Start a new server shell from Ctrl+K with Session: New Shell session, choosing a directory when the workspace has several.

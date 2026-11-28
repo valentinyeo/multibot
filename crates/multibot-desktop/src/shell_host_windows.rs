@@ -1,4 +1,7 @@
-use super::{ShellLaunchSpec, ShellShortcut, ShellViewportRect, shell_shortcut, windows_quote};
+use super::{
+    ShellLaunchSpec, ShellShortcut, ShellViewportRect, console_paste_chunks, console_wheel_params,
+    shell_shortcut, windows_quote,
+};
 use anyhow::{Result, bail};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -43,6 +46,14 @@ struct VisibleShell {
     pid: u32,
     shortcuts: tokio::sync::mpsc::UnboundedSender<gpui_kit::Keystroke>,
     urls: std::sync::mpsc::Sender<ConsoleClick>,
+    pastes: std::sync::mpsc::Sender<ConsolePaste>,
+    text_input_focused: bool,
+}
+
+struct ConsolePaste {
+    hwnd: usize,
+    pid: u32,
+    parent: usize,
 }
 
 struct ConsoleClick {
@@ -63,6 +74,7 @@ pub(super) struct NativeHost {
     pub(super) job: Arc<Job>,
     hook: usize,
     mouse_hook: usize,
+    pastes: std::sync::mpsc::Sender<ConsolePaste>,
 }
 impl NativeHost {
     pub(super) fn new(
@@ -118,6 +130,28 @@ impl NativeHost {
                 UnhookWindowsHookEx(mouse_hook);
                 return Err(error.into());
             }
+            let (pastes, requests) = std::sync::mpsc::channel::<ConsolePaste>();
+            if let Err(error) = std::thread::Builder::new()
+                .name("console-pastes".into())
+                .spawn(move || {
+                    for paste in requests {
+                        if let Err(error) = paste_clipboard_to_console(paste) {
+                            eprintln!("Could not paste into shell: {error}");
+                        }
+                    }
+                })
+            {
+                UnhookWindowsHookEx(hook);
+                UnhookWindowsHookEx(mouse_hook);
+                return Err(error.into());
+            }
+            let host = Self {
+                parent,
+                job,
+                hook: hook as usize,
+                mouse_hook: mouse_hook as usize,
+                pastes,
+            };
             VISIBLE.with(|v| {
                 v.borrow_mut().insert(
                     parent,
@@ -126,15 +160,12 @@ impl NativeHost {
                         pid: 0,
                         shortcuts,
                         urls,
+                        pastes: host.pastes.clone(),
+                        text_input_focused: false,
                     },
                 )
             });
-            Ok(Self {
-                parent,
-                job,
-                hook: hook as usize,
-                mouse_hook: mouse_hook as usize,
-            })
+            Ok(host)
         }
     }
     pub(super) fn focus_visible(&self) {
@@ -150,6 +181,13 @@ impl NativeHost {
         }
     }
 
+    pub(super) fn set_text_input_focus(&self, focused: bool) {
+        VISIBLE.with(|visible| {
+            if let Some(shell) = visible.borrow_mut().get_mut(&self.parent) {
+                shell.text_input_focused = focused;
+            }
+        });
+    }
     pub(super) fn focus_parent(&self) {
         unsafe {
             SetFocus(self.parent as HWND);
@@ -195,15 +233,25 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                     if let Some((parent, hwnd)) = parent {
                         let chord = match shortcut {
                             ShellShortcut::Paste => {
-                                let mut info = GUITHREADINFO::default();
-                                info.cbSize = size_of_val(&info) as u32;
-                                if GetGUIThreadInfo(0, &mut info) != 0
-                                    && info.hwndFocus == hwnd as HWND
-                                {
-                                    // conhost's ID_CONSOLE_PASTE reads CF_UNICODETEXT and handles
-                                    // newline conversion and bracketed paste. Post asynchronously
-                                    // so a busy console cannot stall the low-level keyboard hook.
-                                    PostMessageW(hwnd as HWND, WM_COMMAND, 0xFFF1, 0);
+                                let sent = VISIBLE.with(|visible| {
+                                    let visible = visible.borrow();
+                                    let Some(shell) = visible.get(&parent) else {
+                                        return false;
+                                    };
+                                    let focus = thread_focus(parent as HWND);
+                                    if shell.text_input_focused && focus != hwnd as HWND {
+                                        return false;
+                                    }
+                                    shell
+                                        .pastes
+                                        .send(ConsolePaste {
+                                            hwnd,
+                                            pid: shell.pid,
+                                            parent,
+                                        })
+                                        .is_ok()
+                                });
+                                if sent {
                                     FORWARDED.with(|v| v.borrow_mut().insert(key, parent));
                                     return 1;
                                 }
@@ -251,6 +299,36 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     SetFocus(hwnd as HWND);
                 }
             }
+            if wparam as u32 == WM_MOUSEWHEEL {
+                let event = &*(lparam as *const MSLLHOOKSTRUCT);
+                let target = WindowFromPoint(event.pt);
+                let root = GetAncestor(GetForegroundWindow(), GA_ROOT) as usize;
+                let forwarded = VISIBLE.with(|visible| {
+                    let visible = visible.borrow();
+                    let Some(shell) = visible.get(&root) else {
+                        return false;
+                    };
+                    let hwnd = shell.hwnd as HWND;
+                    if hwnd.is_null()
+                        || (target != hwnd && IsChild(hwnd, target) == 0)
+                        || crate::browser_pane::native::has_focus(root)
+                        || thread_focus(hwnd) == hwnd
+                    {
+                        return false;
+                    }
+                    let (w, l) = console_wheel_params(
+                        (event.mouseData >> 16) as i16,
+                        GetAsyncKeyState(0x11) < 0,
+                        GetAsyncKeyState(0x10) < 0,
+                        event.pt.x,
+                        event.pt.y,
+                    );
+                    PostMessageW(hwnd, WM_MOUSEWHEEL, w, l) != 0
+                });
+                if forwarded {
+                    return 1;
+                }
+            }
             if wparam as u32 == WM_LBUTTONDOWN && GetAsyncKeyState(0x11) < 0 {
                 let event = &*(lparam as *const MSLLHOOKSTRUCT);
                 let target = WindowFromPoint(event.pt);
@@ -282,6 +360,191 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
             }
         }
         CallNextHookEx(null_mut(), code, wparam, lparam)
+    }
+}
+
+unsafe fn thread_focus(hwnd: HWND) -> HWND {
+    unsafe {
+        let thread = GetWindowThreadProcessId(hwnd, null_mut());
+        let mut info = GUITHREADINFO::default();
+        info.cbSize = size_of_val(&info) as u32;
+        if thread != 0 && GetGUIThreadInfo(thread, &mut info) != 0 {
+            info.hwndFocus
+        } else {
+            null_mut()
+        }
+    }
+}
+
+fn clipboard_text() -> Result<Vec<u16>> {
+    use windows_sys::Win32::{
+        Globalization::{CP_ACP, MultiByteToWideChar},
+        System::{
+            DataExchange::*,
+            Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+        },
+    };
+    unsafe {
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(null_mut()) != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        if !opened {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let result = (|| {
+            let unicode = IsClipboardFormatAvailable(13) != 0; // CF_UNICODETEXT
+            let handle = GetClipboardData(if unicode { 13 } else { 1 }); // CF_TEXT
+            if handle.is_null() {
+                return Ok(Vec::new());
+            }
+            let size = GlobalSize(handle);
+            if size == 0 || size > 16 * 1024 * 1024 {
+                bail!("Invalid clipboard text size");
+            }
+            let data = GlobalLock(handle);
+            if data.is_null() {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let text = (|| {
+                if unicode {
+                    if size % 2 != 0 {
+                        bail!("Invalid UTF-16 clipboard buffer");
+                    }
+                    let units = std::slice::from_raw_parts(data as *const u16, size / 2);
+                    let end = units
+                        .iter()
+                        .position(|&c| c == 0)
+                        .ok_or_else(|| anyhow::anyhow!("Unterminated clipboard text"))?;
+                    Ok(units[..end].to_vec())
+                } else {
+                    let bytes = std::slice::from_raw_parts(data as *const u8, size);
+                    let end = bytes
+                        .iter()
+                        .position(|&c| c == 0)
+                        .ok_or_else(|| anyhow::anyhow!("Unterminated clipboard text"))?;
+                    if end == 0 {
+                        return Ok(Vec::new());
+                    }
+                    let count =
+                        MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), end as i32, null_mut(), 0);
+                    if count == 0 {
+                        return Err(std::io::Error::last_os_error().into());
+                    }
+                    let mut text = vec![0; count as usize];
+                    if MultiByteToWideChar(
+                        CP_ACP,
+                        0,
+                        bytes.as_ptr(),
+                        end as i32,
+                        text.as_mut_ptr(),
+                        count,
+                    ) == 0
+                    {
+                        return Err(std::io::Error::last_os_error().into());
+                    }
+                    Ok(text)
+                }
+            })();
+            GlobalUnlock(handle);
+            text
+        })();
+        CloseClipboard();
+        result
+    }
+}
+
+fn paste_clipboard_to_console(paste: ConsolePaste) -> Result<()> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::{
+        Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE},
+        Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING},
+    };
+    let text = clipboard_text()?;
+    if text.is_empty() {
+        return Ok(());
+    }
+    let _guard = CONSOLE_ATTACH.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        if IsWindow(paste.hwnd as HWND) == 0
+            || GetParent(paste.hwnd as HWND) != paste.parent as HWND
+        {
+            return Ok(());
+        }
+        FreeConsole();
+        if AttachConsole(paste.pid) == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let result = (|| {
+            let name: Vec<u16> = "CONIN$\0".encode_utf16().collect();
+            let input = CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null(),
+                OPEN_EXISTING,
+                0,
+                null_mut(),
+            );
+            if input == INVALID_HANDLE_VALUE {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let _input = OwnedHandle::from_raw_handle(input);
+            let mut selection = CONSOLE_SELECTION_INFO::default();
+            if GetConsoleSelectionInfo(&mut selection) != 0 && selection.dwFlags & 0x7 != 0 {
+                write_console_keys(input, &[27], 0x1B)?;
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+            for chunk in console_paste_chunks(&text) {
+                write_console_keys(input, &chunk, 0xE7)?; // VK_PACKET
+            }
+            Ok(())
+        })();
+        FreeConsole();
+        result
+    }
+}
+
+unsafe fn write_console_keys(input: HANDLE, text: &[u16], virtual_key: u16) -> Result<()> {
+    unsafe {
+        let mut records = Vec::with_capacity(text.len() * 2);
+        for &c in text {
+            for down in [1, 0] {
+                let mut record = INPUT_RECORD::default();
+                record.EventType = KEY_EVENT as u16;
+                record.Event.KeyEvent = KEY_EVENT_RECORD {
+                    bKeyDown: down,
+                    wRepeatCount: 1,
+                    wVirtualKeyCode: virtual_key,
+                    wVirtualScanCode: 0,
+                    uChar: KEY_EVENT_RECORD_0 { UnicodeChar: c },
+                    dwControlKeyState: 0,
+                };
+                records.push(record);
+            }
+        }
+        let mut offset = 0;
+        while offset < records.len() {
+            let mut written = 0;
+            if WriteConsoleInputW(
+                input,
+                records[offset..].as_ptr(),
+                (records.len() - offset) as u32,
+                &mut written,
+            ) == 0
+            {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            if written == 0 {
+                bail!("Console accepted no paste input");
+            }
+            offset += written as usize;
+        }
+        Ok(())
     }
 }
 
@@ -546,6 +809,8 @@ pub(super) fn spawn(
                     | WS_BORDER
                     | WS_MINIMIZEBOX
                     | WS_MAXIMIZEBOX
+                    | WS_VSCROLL
+                    | WS_HSCROLL
                     | WS_SYSMENU
                     | WS_POPUP))
                 | WS_CHILD) as isize,
