@@ -848,6 +848,25 @@ impl MultibotView {
                             .truncate()
                             .child(title)
                     })
+                    .when(!session.subworkers.is_empty(), |el| {
+                        let count = session.subworkers.len();
+                        el.child(
+                            div()
+                                .id("shell-subworkers")
+                                .test_support()
+                                .flex_shrink_0()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded(theme::RADIUS_CHIP)
+                                .bg(theme::bg_surface())
+                                .text_xs()
+                                .text_color(theme::text_muted())
+                                .child(format!(
+                                    "{count} {}",
+                                    if count == 1 { "worker" } else { "workers" }
+                                )),
+                        )
+                    })
                     .when(!confirming_kill, |el| {
                         el.child(
                             div()

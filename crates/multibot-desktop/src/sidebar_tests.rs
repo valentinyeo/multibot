@@ -69,6 +69,59 @@ fn open_view(cx: &mut TestAppContext) -> (gpui_kit::AnyWindowHandle, Entity<Mult
     })
 }
 
+#[gpui_kit::test]
+fn sidebar_subworker_badges_only_show_for_live_workers(cx: &mut TestAppContext) {
+    let (handle, view) = open_view(cx);
+    cx.update_window(handle, |_, window, cx| {
+        let keys = view.update(cx, |v, cx| {
+            v.sidebar_state.workspace_store = WorkspaceStore::new();
+            v.connection.sessions = sample_sessions();
+            v.connection.sessions[0].subworkers = vec![multibot_proto::SubworkerInfo {
+                pid: 101,
+                label: "MBRU-117".into(),
+                ..Default::default()
+            }];
+            let keys = v
+                .connection
+                .sessions
+                .iter()
+                .map(|s| v.session_key_for(s))
+                .collect::<Vec<_>>();
+            cx.notify();
+            keys
+        });
+        window.render_frame(cx);
+        for (index, key) in keys.iter().enumerate() {
+            let id =
+                gpui_kit::ElementId::from(SharedString::from(format!("sidebar-subworkers-{key}")));
+            if index == 0 {
+                assert!(window.find(id.clone()).visible());
+                assert!(
+                    gpui_kit::base::test_support::texts(window)
+                        .iter()
+                        .any(|text| text.text() == "1w" && text.path().contains(&id))
+                );
+            } else {
+                assert!(window.try_find(id).is_none());
+            }
+        }
+        view.update(cx, |v, cx| {
+            v.connection.sessions[0].subworkers.clear();
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(
+            window
+                .try_find(gpui_kit::ElementId::from(SharedString::from(format!(
+                    "sidebar-subworkers-{}",
+                    keys[0]
+                ))))
+                .is_none()
+        );
+    })
+    .unwrap();
+}
+
 #[test]
 fn shell_confirmation_is_single_use_session_scoped_and_expires() {
     let mut state = SidebarState::default();

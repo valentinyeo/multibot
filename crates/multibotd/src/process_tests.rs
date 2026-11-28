@@ -1906,6 +1906,7 @@ async fn resumed_brain_conversation_passes_conversation_flag_and_writes_watched_
     let server_workspaces = crate::server_workspaces::ServerWorkspaceIndex::default();
     let ctx = DiscoveryContext {
         active_session_ids: &connected,
+        active_session_pids: &std::collections::HashMap::new(),
         connected_session_ids: &connected,
         metadata: &recorded,
         archive: &archive,

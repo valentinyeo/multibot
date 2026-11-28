@@ -2284,6 +2284,7 @@ mod tests {
         let server_workspaces = crate::server_workspaces::ServerWorkspaceIndex::default();
         let ctx = crate::providers::DiscoveryContext {
             active_session_ids: &empty,
+            active_session_pids: &std::collections::HashMap::new(),
             connected_session_ids: &empty,
             metadata: &metadata,
             archive: &archive,
@@ -2361,6 +2362,7 @@ mod tests {
         let workspaces = crate::server_workspaces::ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &none,
+            active_session_pids: &std::collections::HashMap::new(),
             connected_session_ids: &none,
             metadata: &metadata,
             archive: &archive,

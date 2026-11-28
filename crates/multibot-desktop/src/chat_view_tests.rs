@@ -5255,6 +5255,115 @@ fn live_activity_expands_only_current_turn_steps_with_tools_hidden(cx: &mut Test
 }
 
 #[gpui_kit::test]
+fn live_subworkers_expand_without_tools_and_stop_idle_animation(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let now = now_unix_ms();
+            v.selection.selected_session = Some(SessionSummary {
+                id: "owner-workers".into(),
+                subworkers: vec![
+                    multibot_proto::SubworkerInfo {
+                        pid: 101,
+                        label: "MBRU-117".into(),
+                        ticket: Some("MBRU-117".into()),
+                        cwd: Some("/repo/multibot-wt-w5-subworkers".into()),
+                        runtime: Some("codex".into()),
+                        model: Some("gpt-6.1-sol".into()),
+                        started_at_ms: Some(now - 185_000),
+                    },
+                    multibot_proto::SubworkerInfo {
+                        pid: 102,
+                        label: "MBRU-116".into(),
+                        started_at_ms: Some(now - 45_000),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            });
+            assert!(v.is_active_chat_working());
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.find("chat-live-activity").visible());
+        assert!(window.find("chat-busy-dots").visible());
+        assert!(window.find("chat-live-activity-chevron").visible());
+        assert!(window.try_find("chat-live-subworkers").is_none());
+        assert!(
+            gpui_kit::base::test_support::texts(window)
+                .iter()
+                .any(|text| text.text() == "2 workers running")
+        );
+        let row = window.find("chat-live-activity").bounds();
+        window.click("chat-live-activity", cx);
+        window.render_frame(cx);
+        assert!(window.find("chat-live-subworkers").visible());
+        assert_eq!(window.find("chat-live-activity").bounds(), row);
+        assert!(window.find("chat-live-activity-steps").bounds().bottom() <= row.top());
+        let texts = gpui_kit::base::test_support::texts(window);
+        for expected in [
+            "Active workers",
+            "MBRU-117 · multibot-wt-w5-subworkers",
+            "codex · gpt-6.1-sol",
+            "3m",
+            "45s",
+        ] {
+            assert!(
+                texts.iter().any(|text| text.text() == expected),
+                "missing {expected}: {texts:?}"
+            );
+        }
+        view.update(cx, |v, cx| {
+            v.history.messages = vec![ChatMessage {
+                role: MessageRole::Assistant,
+                blocks: vec![activity_tool(
+                    "read_file",
+                    "",
+                    "/repo/chat_view.rs",
+                    ToolStatus::Running,
+                )],
+                ..Default::default()
+            }];
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(
+            gpui_kit::base::test_support::texts(window)
+                .iter()
+                .any(|text| text.text() == "2 workers · Reading chat_view.rs")
+        );
+        assert!(window.find("tool-row-0-0").visible());
+        assert!(
+            window.find("chat-live-subworkers").bounds().bottom()
+                <= window.find("tool-row-0-0").bounds().top()
+        );
+        view.update(cx, |v, cx| {
+            v.selection
+                .selected_session
+                .as_mut()
+                .unwrap()
+                .subworkers
+                .clear();
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(!view.read(cx).is_active_chat_working());
+        assert!(window.try_find("chat-live-activity").is_none());
+        assert!(window.try_find("chat-live-subworkers").is_none());
+        assert!(view.read(cx).chat_state.busy_timer.is_none());
+    })
+    .unwrap();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(5));
+    cx.run_until_parked();
+    view.read_with(cx, |v, _| {
+        assert!(v.chat_state.busy_timer.is_none());
+        assert!(v.chat_state.busy_timer_key.is_none());
+        assert_eq!(v.chat_state.busy_tick_phase, 0);
+    });
+}
+
+#[gpui_kit::test]
 fn live_activity_and_busy_timer_follow_active_session_and_surface(cx: &mut TestAppContext) {
     use std::time::Duration;
     let (handle, view) = open_test_chat_window(cx);

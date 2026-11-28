@@ -8,6 +8,7 @@ mod search;
 mod server_workspaces;
 mod sessions;
 mod shell_watch;
+mod subworkers;
 mod watcher;
 
 use anyhow::Result;
@@ -178,6 +179,7 @@ async fn async_main(
                 let home_c = home.clone();
                 let active_ids = process_mgr.active_session_ids();
                 let connected_ids = process_mgr.connected_session_ids();
+                let active_pids = process_mgr.active_session_pids();
                 let tx = out_tx.clone();
                 let lim = limit.unwrap_or(50);
                 let _ = disk_tx.send(Box::new(move || {
@@ -188,6 +190,7 @@ async fn async_main(
                         crate::server_workspaces::ServerWorkspaceIndex::load_default_cached();
                     let ctx = DiscoveryContext {
                         active_session_ids: &active_ids,
+                        active_session_pids: &active_pids,
                         connected_session_ids: &connected_ids,
                         metadata: &metadata,
                         archive: &archive,

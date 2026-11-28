@@ -877,6 +877,31 @@ impl MultibotView {
 
         let mut live_activity = None;
         if is_working {
+            let subworkers = self
+                .selection
+                .selected_session
+                .as_ref()
+                .map(|session| session.subworkers.as_slice())
+                .unwrap_or_default();
+            let label = activity_label(&self.history.messages);
+            let label = if subworkers.is_empty() {
+                label
+            } else {
+                let workers = format!(
+                    "{} {}",
+                    subworkers.len(),
+                    if subworkers.len() == 1 {
+                        "worker"
+                    } else {
+                        "workers"
+                    }
+                );
+                if label == "Thinking" {
+                    format!("{workers} running")
+                } else {
+                    format!("{workers} · {label}")
+                }
+            };
             let turn_start = self
                 .history
                 .messages
@@ -924,7 +949,8 @@ impl MultibotView {
                 .gap_2()
                 .items_center()
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.chat_state.live_activity_expanded = !this.chat_state.live_activity_expanded;
+                    this.chat_state.live_activity_expanded =
+                        !this.chat_state.live_activity_expanded;
                     cx.notify();
                 }))
                 .child(
@@ -940,21 +966,27 @@ impl MultibotView {
                         .child(dot(2)),
                 )
                 .child(
-                    Label::new(activity_label(&self.history.messages))
+                    Label::new(label)
                         .id("chat-activity-label")
                         .text_xs()
                         .text_color(theme::text_secondary())
                         .truncate(),
                 )
-                .when(has_activity, |el| {
-                    el.child(div().text_color(theme::text_muted()).child(lucide_icon(
-                        if expanded {
-                            icons::CHEVRON_DOWN
-                        } else {
-                            icons::CHEVRON_RIGHT
-                        },
-                        12.0,
-                    )))
+                .when(has_activity || !subworkers.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .id("chat-live-activity-chevron")
+                            .test_support()
+                            .text_color(theme::text_muted())
+                            .child(lucide_icon(
+                                if expanded {
+                                    icons::CHEVRON_DOWN
+                                } else {
+                                    icons::CHEVRON_RIGHT
+                                },
+                                12.0,
+                            )),
+                    )
                 });
             if expanded {
                 let mut steps = v_flex()
@@ -967,7 +999,81 @@ impl MultibotView {
                     .rounded(RADIUS_ROW)
                     .bg(theme::bg_surface())
                     .p_2();
-                for (msg_idx, message) in self.history.messages.iter().enumerate().skip(turn_start) {
+                if !subworkers.is_empty() {
+                    let mut workers = v_flex()
+                        .id("chat-live-subworkers")
+                        .test_support()
+                        .gap_1p5()
+                        .child(
+                            Label::new("Active workers")
+                                .text_xs()
+                                .text_color(theme::text_secondary()),
+                        );
+                    let now = now_unix_ms();
+                    for worker in subworkers {
+                        let folder = worker
+                            .cwd
+                            .as_deref()
+                            .map(extract_basename)
+                            .filter(|folder| !folder.is_empty() && *folder != worker.label);
+                        let title = folder.map_or_else(
+                            || worker.label.clone(),
+                            |folder| format!("{} · {folder}", worker.label),
+                        );
+                        let details = [worker.runtime.as_deref(), worker.model.as_deref()]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                        let elapsed = worker.started_at_ms.map(|started| {
+                            let seconds = now.saturating_sub(started).max(0) / 1000;
+                            if seconds >= 3600 {
+                                format!("{}h", seconds / 3600)
+                            } else if seconds >= 60 {
+                                format!("{}m", seconds / 60)
+                            } else {
+                                format!("{seconds}s")
+                            }
+                        });
+                        workers = workers.child(
+                            h_flex()
+                                .id(format!("chat-subworker-{}", worker.pid))
+                                .test_support()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(Label::new(title).text_xs().truncate())
+                                        .when(!details.is_empty(), |el| {
+                                            el.child(
+                                                Label::new(details)
+                                                    .text_xs()
+                                                    .text_color(theme::text_muted())
+                                                    .truncate(),
+                                            )
+                                        }),
+                                )
+                                .when_some(elapsed, |el, elapsed| {
+                                    el.child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .child(
+                                                Label::new(elapsed)
+                                                    .text_xs()
+                                                    .text_color(theme::text_muted()),
+                                            ),
+                                    )
+                                }),
+                        );
+                    }
+                    steps = steps.child(workers);
+                }
+                for (msg_idx, message) in self.history.messages.iter().enumerate().skip(turn_start)
+                {
                     for (block_idx, block) in message.blocks.iter().enumerate() {
                         if let MessageBlock::ToolUse {
                             call_id,

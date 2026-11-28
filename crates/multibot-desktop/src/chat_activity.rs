@@ -168,6 +168,7 @@ impl MultibotView {
             .is_some_and(|session| {
                 let key = self.session_key_for(session);
                 session.working
+                    || !session.subworkers.is_empty()
                     || self.chat_state.awaiting_reply_sessions.contains_key(&key)
                     || self
                         .history

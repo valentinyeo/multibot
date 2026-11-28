@@ -323,6 +323,49 @@ impl MultibotView {
                         h_flex()
                             .items_center()
                             .gap_1()
+                            .when_some(
+                                session.as_ref().filter(|s| !s.subworkers.is_empty()),
+                                |el, session| {
+                                    let count = session.subworkers.len();
+                                    let tooltip = format!(
+                                        "{count} active {}\n{}",
+                                        if count == 1 {
+                                            "subworker"
+                                        } else {
+                                            "subworkers"
+                                        },
+                                        session
+                                            .subworkers
+                                            .iter()
+                                            .map(|worker| worker.label.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join("\n")
+                                    );
+                                    el.child(
+                                        div()
+                                            .id(format!("sidebar-subworkers-{}", row.session_key))
+                                            .test_support()
+                                            .flex_shrink_0()
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded(RADIUS_CHIP)
+                                            .bg(theme::bg_surface())
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .tooltip(move |window, cx| {
+                                                gpui_kit::component::tooltip::Tooltip::new(
+                                                    tooltip.clone(),
+                                                )
+                                                .build(window, cx)
+                                            })
+                                            .child(
+                                                Label::new(format!("{count}w"))
+                                                    .text_xs()
+                                                    .text_color(theme::text_muted()),
+                                            ),
+                                    )
+                                },
+                            )
                             .when(row.favorite, |el| {
                                 el.child(
                                     lucide_icon(icons::STAR_FILLED, 14.0)
