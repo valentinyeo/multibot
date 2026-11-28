@@ -17,7 +17,37 @@ use multibot_core::workspaces::{
     ALL_WORKSPACES_ID, MAX_SESSION_TITLE_CHARS, ReorderDirection, STARRED_WORKSPACE_ID,
     SessionInput, SidebarRow, WorkspaceStore, WorkspaceView, canonical_session_key, now_unix_ms,
 };
-use multibot_proto::{ClientRequest, SessionSummary};
+use multibot_proto::{AgentKind, ClientRequest, SessionSummary};
+
+fn session_subtitle(agent: AgentKind, cwd: Option<&str>, shell_preview: Option<&str>) -> String {
+    let cli = match agent {
+        AgentKind::Claude => "cld",
+        AgentKind::Codex => "cdx",
+        AgentKind::Antigravity => "agy",
+        AgentKind::Pi => "pi",
+        AgentKind::Cursor => "cur",
+        AgentKind::Shell => shell_preview
+            .and_then(|preview| preview.split(" · ").next())
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+            .unwrap_or("shl"),
+    };
+    let directory = cwd
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            let trimmed = path.trim_end_matches(['/', '\\']);
+            if trimmed.is_empty() {
+                path
+            } else {
+                trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed)
+            }
+        });
+    match directory {
+        Some(directory) => format!("{cli} · {directory}"),
+        None => cli.to_string(),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InlineRenameState {
@@ -675,9 +705,6 @@ impl MultibotView {
     }
 
     pub(crate) fn set_workspace_view(&mut self, view: WorkspaceView, cx: &mut Context<Self>) {
-        if view == WorkspaceView::Frequent {
-            self.sidebar_state.active_workspace_id = ALL_WORKSPACES_ID.to_string();
-        }
         self.sidebar_state.active_workspace_view = view;
         self.sidebar_state.rename = None;
         self.cleanup_unmounted_surface_state();
@@ -977,7 +1004,7 @@ impl MultibotView {
                         .role(Role::Button)
                         .test_support()
                         .w(px(80.0))
-                        .h(px(84.0))
+                        .h(px(100.0))
                         .p_1p5()
                         .rounded(RADIUS_ROW)
                         .bg(if is_selected {
@@ -1070,6 +1097,25 @@ impl MultibotView {
                                         .child(rename_draft.unwrap_or_else(|| {
                                             gpui_kit::StyledText::new(row.title.clone())
                                         })),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "sidebar-subtitle-{}",
+                                            row.session_key
+                                        )))
+                                        .test_support()
+                                        .w_full()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .truncate()
+                                        .child(Label::new(session_subtitle(
+                                            row.agent,
+                                            row.cwd.as_deref(),
+                                            self.find_session_by_key(&row.session_key)
+                                                .as_ref()
+                                                .and_then(|s| s.last_assistant_preview.as_deref()),
+                                        ))),
                                 ),
                         ),
                 );
@@ -1148,7 +1194,6 @@ impl MultibotView {
                         row,
                         active_key.as_deref() == Some(row.session_key.as_str()),
                         badge,
-                        in_starred,
                         cx,
                     ));
                 }
@@ -1219,7 +1264,6 @@ impl MultibotView {
                     row,
                     active_key.as_deref() == Some(row.session_key.as_str()),
                     badge,
-                    in_starred,
                     cx,
                 ));
             }
@@ -1441,7 +1485,6 @@ impl MultibotView {
         row: &SidebarRow,
         is_selected: bool,
         jump_digit: Option<usize>,
-        in_starred: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let key_left = row.session_key.clone();
@@ -1459,17 +1502,14 @@ impl MultibotView {
         } else {
             None
         };
-        let subtitle = self
-            .find_session_by_key(&row.session_key)
-            .and_then(|s| s.last_assistant_preview)
-            .filter(|p| !p.trim().is_empty())
-            .or_else(|| {
-                if in_starred {
-                    Some(row.workspace_name.clone())
-                } else {
-                    row.cwd.clone()
-                }
-            });
+        let session = self.find_session_by_key(&row.session_key);
+        let subtitle = session_subtitle(
+            row.agent,
+            row.cwd.as_deref(),
+            session
+                .as_ref()
+                .and_then(|s| s.last_assistant_preview.as_deref()),
+        );
 
         div()
             .id(id)
@@ -1539,15 +1579,18 @@ impl MultibotView {
                                     .child(row.title.clone())
                                     .into_any_element()
                             })
-                            .when_some(subtitle, |el, sub| {
-                                el.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme::text_muted())
-                                        .truncate()
-                                        .child(sub),
-                                )
-                            }),
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "sidebar-subtitle-{}",
+                                        row.session_key
+                                    )))
+                                    .test_support()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .truncate()
+                                    .child(Label::new(subtitle)),
+                            ),
                     )
                     .child(
                         h_flex()
@@ -2576,6 +2619,229 @@ mod tests {
                 rx.try_recv().is_err(),
                 "confirmation must not transfer to next shell"
             );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn archive_acknowledgements_do_not_leak_into_live_chats(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.sessions = sample_sessions();
+                v.select_session(v.sessions[0].clone(), cx);
+                v.notice = Some("A session-specific notice".into());
+                v.select_session(v.sessions[1].clone(), cx);
+                assert!(v.notice.is_none());
+                for archived in [true, false] {
+                    v.handle_bridge_event(
+                        crate::state::UiBridgeEvent::Server(
+                            multibot_proto::ServerEvent::SessionArchived {
+                                session_id: "s1".into(),
+                                archived,
+                            },
+                        ),
+                        cx,
+                    );
+                    assert!(v.notice.is_none());
+                    assert_eq!(v.selected_session.as_ref().unwrap().id, "s2");
+                    assert!(!v.selected_session.as_ref().unwrap().archived);
+                }
+            });
+            window.render_frame(cx);
+            assert!(
+                !gpui_kit::base::test_support::texts(window)
+                    .iter()
+                    .any(|text| text.text().contains("Archived session")
+                        || text.text().contains("Restored session"))
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn codex_exit_commands_dissolve_without_sending_a_prompt(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            for command in ["ctrl-shift-w", "/exit", "/quit"] {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                view.update(cx, |v, cx| {
+                    v.sidebar_state.workspace_store = WorkspaceStore::new();
+                    v.daemon_tx = Some(tx);
+                    v.sessions = vec![SessionSummary { id: "codex-close".into(), agent: AgentKind::Codex,
+                        source_path: "/tmp/rollout-codex-close.jsonl".into(), ..Default::default() }];
+                    v.select_session(v.sessions[0].clone(), cx);
+                    while rx.try_recv().is_ok() {}
+                    if command != "ctrl-shift-w" {
+                        v.prompt_input.update(cx, |input, cx| input.set_value(command, window, cx));
+                        v.send_current_prompt(window, cx);
+                    }
+                });
+                if command == "ctrl-shift-w" {
+                    window.render_frame(cx);
+                    window.press(command, cx);
+                }
+                assert!(view.read(cx).selected_session.is_none());
+                let requests: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+                assert!(requests.iter().any(|request| matches!(request, ClientRequest::ArchiveSession {
+                    session_id, agent: AgentKind::Codex, kill_process: true, .. } if session_id == "codex-close")));
+                assert!(!requests.iter().any(|request| matches!(request, ClientRequest::SendPrompt { .. } | ClientRequest::SpawnSession { .. })));
+            }
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn frequent_ctrl_tab_keeps_order_and_workspace_scope(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            for workspace_id in [ALL_WORKSPACES_ID, DEFAULT_WORKSPACE_ID] {
+                let keys = view.update(cx, |v, cx| {
+                    v.sidebar_state.workspace_store = WorkspaceStore::new();
+                    v.sidebar_state.active_workspace_id = workspace_id.into();
+                    let other = v
+                        .sidebar_state
+                        .workspace_store
+                        .create_workspace("Other project", None)
+                        .unwrap();
+                    v.sessions = (0..6)
+                        .map(|i| SessionSummary {
+                            id: format!("frequent-{i}"),
+                            agent: AgentKind::Claude,
+                            title: format!("Frequent {i}"),
+                            updated_at_ms: 10_000 - i,
+                            ..Default::default()
+                        })
+                        .collect();
+                    let keys: Vec<_> = v.sessions.iter().map(|s| v.session_key_for(s)).collect();
+                    let now = now_unix_ms();
+                    for (i, key) in keys.iter().enumerate() {
+                        if i >= 4 {
+                            v.sidebar_state
+                                .workspace_store
+                                .assign_session_workspace(key, &other.id);
+                        }
+                        for visit in 0..(8 - i) {
+                            v.sidebar_state
+                                .workspace_store
+                                .record_frequent_visit(key, now - 100 - visit as i64);
+                        }
+                    }
+                    v.select_session(v.sessions[0].clone(), cx);
+                    v.set_workspace_view(WorkspaceView::Frequent, cx);
+                    assert_eq!(v.sidebar_state.active_workspace_id, workspace_id);
+                    keys
+                });
+                window.render_frame(cx);
+                let count = if workspace_id == ALL_WORKSPACES_ID {
+                    6
+                } else {
+                    4
+                };
+                assert_eq!(view.read(cx).active_ctrl_digit_order(), keys[..count]);
+                for _ in 0..2 {
+                    for (chord, indices) in [
+                        ("ctrl-tab", (1..count).chain([0]).collect::<Vec<_>>()),
+                        ("ctrl-shift-tab", (1..count).rev().chain([0]).collect()),
+                    ] {
+                        for index in indices {
+                            window.press(chord, cx);
+                            window.render_frame(cx);
+                            view.read_with(cx, |v, _| {
+                                assert_eq!(
+                                    v.session_key_for(v.selected_session.as_ref().unwrap()),
+                                    keys[index]
+                                );
+                                assert_eq!(v.active_ctrl_digit_order(), keys[..count]);
+                            });
+                        }
+                    }
+                }
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn session_subtitles_use_cli_and_directory_not_message_previews() {
+        for (agent, cli) in [
+            (AgentKind::Claude, "cld"),
+            (AgentKind::Codex, "cdx"),
+            (AgentKind::Antigravity, "agy"),
+            (AgentKind::Pi, "pi"),
+            (AgentKind::Cursor, "cur"),
+        ] {
+            for (cwd, suffix) in [
+                (Some("/home/valentin/projects/multibot/"), " · multibot"),
+                (Some("C:\\projects\\postbox-rs\\"), " · postbox-rs"),
+                (Some("/"), " · /"),
+                (Some("~"), " · ~"),
+                (Some(""), ""),
+                (None, ""),
+            ] {
+                assert_eq!(
+                    session_subtitle(agent, cwd, Some("old reply")),
+                    format!("{cli}{suffix}")
+                );
+            }
+        }
+        assert_eq!(
+            session_subtitle(AgentKind::Shell, Some("/projects/"), Some("btop · old")),
+            "btop · projects"
+        );
+        assert_eq!(session_subtitle(AgentKind::Shell, None, None), "shl");
+    }
+
+    #[gpui_kit::test]
+    fn every_sidebar_agent_paints_cli_and_directory_on_line_two(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            for pinned in [false, true] {
+                for (agent, expected) in [
+                    (AgentKind::Claude, "cld · repo"),
+                    (AgentKind::Codex, "cdx · repo"),
+                    (AgentKind::Antigravity, "agy · repo"),
+                    (AgentKind::Pi, "pi · repo"),
+                    (AgentKind::Cursor, "cur · repo"),
+                    (AgentKind::Shell, "btop · repo"),
+                ] {
+                    let key = view.update(cx, |v, cx| {
+                        v.sidebar_state.workspace_store = WorkspaceStore::new();
+                        v.sessions = vec![SessionSummary {
+                            id: "subtitle".into(),
+                            agent,
+                            title: "Session title".into(),
+                            cwd: Some("/home/valentin/repo/".into()),
+                            last_assistant_preview: Some(
+                                if agent == AgentKind::Shell {
+                                    "btop · old"
+                                } else {
+                                    "Last reply must not appear"
+                                }
+                                .into(),
+                            ),
+                            ..Default::default()
+                        }];
+                        let key = v.session_key_for(&v.sessions[0]);
+                        if pinned {
+                            v.sidebar_state.workspace_store.toggle_pin(&key, false);
+                        }
+                        cx.notify();
+                        key
+                    });
+                    window.render_frame(cx);
+                    let id = gpui_kit::ElementId::from(SharedString::from(format!(
+                        "sidebar-subtitle-{key}"
+                    )));
+                    assert!(window.find(id.clone()).visible());
+                    let texts = gpui_kit::base::test_support::texts(window);
+                    assert!(
+                        texts
+                            .iter()
+                            .any(|text| text.text() == expected && text.path().contains(&id)),
+                        "{agent:?}, pinned={pinned}: {texts:?}"
+                    );
+                }
+            }
         })
         .unwrap();
     }

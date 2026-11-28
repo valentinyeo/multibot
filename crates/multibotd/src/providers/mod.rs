@@ -537,7 +537,7 @@ impl DiscoveryContext<'_> {
     ///
     /// Nothing else counts: a transcript that is not archived but that no daemon, metadata
     /// record or live legacy chat holds open is history and must not cost RAM or latency.
-    fn is_shown(&self, summary: &SessionSummary) -> bool {
+    pub(crate) fn is_shown(&self, summary: &SessionSummary) -> bool {
         !summary.archived && self.holds_open(&summary.id)
     }
 
@@ -1544,7 +1544,25 @@ pub fn read_history_page(
     known_probe: Option<&str>,
 ) -> Result<HistoryPage> {
     let provider = provider_for(agent);
-    let mut file = File::open(path)?;
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HistoryPage {
+                messages: Vec::new(),
+                oldest_offset: 0,
+                latest_offset: 0,
+                has_more: false,
+                file_size: 0,
+                file_mtime_ms: 0,
+                probe_sha256: sha256_hex(&[]),
+                todos: Vec::new(),
+                tail_activity: TailActivity::Unknown,
+                has_pending_question: false,
+                model: None,
+            });
+        }
+        Err(err) => return Err(err.into()),
+    };
     let meta = file.metadata()?;
     let file_size = meta.len();
     let file_mtime_ms = meta.modified().map(system_time_ms).unwrap_or(0);
@@ -2941,6 +2959,88 @@ pub fn truncate_title(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_history_is_empty_for_every_agent_but_other_io_errors_survive() {
+        let home = unique_temp_dir("missing-history");
+        for agent in [
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::Antigravity,
+            AgentKind::Pi,
+            AgentKind::Cursor,
+            AgentKind::Shell,
+        ] {
+            let path = home.join(format!("absent/{agent:?}.jsonl"));
+            for before in [None, Some(100)] {
+                let page =
+                    read_history_page(agent, &path, before, None, None, Some("stale")).unwrap();
+                assert!(page.messages.is_empty(), "{agent:?}");
+                assert!(page.todos.is_empty());
+                assert_eq!(
+                    (page.oldest_offset, page.latest_offset, page.file_size),
+                    (0, 0, 0)
+                );
+                assert!(!page.has_more);
+            }
+            assert!(read_history_page(agent, &home, None, None, None, None).is_err());
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn summaries_preserve_each_agents_working_directory() {
+        let home = unique_temp_dir("agent-cwd");
+        let metadata = MetadataStore::default();
+        let archive = ArchiveStore::default();
+        let live = LiveActivity::default();
+        let ids = HashSet::new();
+        let workspaces = ServerWorkspaceIndex::default();
+        let ctx = DiscoveryContext {
+            active_session_ids: &ids,
+            connected_session_ids: &ids,
+            metadata: &metadata,
+            archive: &archive,
+            live: &live,
+            include_archived: true,
+            server_workspaces: &workspaces,
+        };
+        for (agent, record) in [
+            (
+                AgentKind::Claude,
+                json!({"type":"user", "cwd":"/repo/multibot", "message":{"content":"hello"}}),
+            ),
+            (
+                AgentKind::Codex,
+                json!({"type":"session_meta", "payload":{"id":"codex-cwd", "cwd":"/repo/multibot"}}),
+            ),
+            (
+                AgentKind::Antigravity,
+                json!({"type":"multibot_meta", "session_id":"agy-cwd", "cwd":"/repo/multibot"}),
+            ),
+            (
+                AgentKind::Pi,
+                json!({"type":"session", "id":"pi-cwd", "cwd":"/repo/multibot", "version":3}),
+            ),
+            (
+                AgentKind::Cursor,
+                json!({"type":"multibot_meta", "session_id":"cursor-cwd", "cwd":"/repo/multibot"}),
+            ),
+        ] {
+            let path = home.join(format!("{agent:?}.jsonl"));
+            fs::write(&path, format!("{record}\n")).unwrap();
+            assert_eq!(
+                summarize_session_by_agent(agent, &path, now_ms(), &ctx)
+                    .cwd
+                    .as_deref(),
+                Some("/repo/multibot"),
+                "{agent:?}"
+            );
+        }
+        let shells = tmux::parse_tmux_sessions_output("shell\t1\tbtop\t/repo/multibot\t0\tbtop");
+        assert_eq!(shells[0].cwd.as_deref(), Some("/repo/multibot"));
+        fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn pi_cursor_metadata_and_connected_sessions_survive_active_pruning() {

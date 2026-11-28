@@ -208,23 +208,6 @@ async fn async_main(
                                 todos: page.todos,
                             });
                         }
-                        Err(err)
-                            if err
-                                .downcast_ref::<std::io::Error>()
-                                .is_some_and(|err| err.kind() == std::io::ErrorKind::NotFound) =>
-                        {
-                            let _ = tx.send(ServerEvent::History {
-                                session_id,
-                                messages: Vec::new(),
-                                oldest_offset: Some(0),
-                                latest_offset: Some(0),
-                                has_more: false,
-                                file_size: Some(0),
-                                file_mtime_ms: None,
-                                probe_sha256: None,
-                                todos: Vec::new(),
-                            });
-                        }
                         Err(err) => {
                             let _ = tx.send(ServerEvent::Error {
                                 code: "read_history_failed".into(),

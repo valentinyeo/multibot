@@ -2480,6 +2480,13 @@ impl MultibotView {
         };
 
         let key = self.session_key_for(&session);
+        if session.agent == AgentKind::Codex && matches!(trimmed.as_str(), "/exit" | "/quit") {
+            self.prompt_input
+                .update(cx, |state, cx| state.set_value("", window, cx));
+            self.slash_picker_state.close();
+            self.dissolve_session_key(&key, cx);
+            return;
+        }
         if self
             .sidebar_state
             .workspace_store

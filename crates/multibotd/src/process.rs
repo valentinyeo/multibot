@@ -2136,60 +2136,62 @@ mod tests {
 
     #[tokio::test]
     async fn done_keeps_process_alive_and_dissolve_stops_it_without_touching_history() {
-        let home = temp_home("dissolve-process");
-        fs::create_dir_all(&home).unwrap();
-        let transcript = home.join("saved.jsonl");
-        let original = b"{\"role\":\"assistant\",\"text\":\"saved history\"}\n";
-        fs::write(&transcript, original).unwrap();
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let mgr = ProcessManager::new(home.clone(), tx);
-        let mut child = Command::new("sleep")
-            .arg("30")
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        let pid = child.id().unwrap();
-        mgr.state.lock().unwrap().active.insert(
-            "saved".into(),
-            ActiveProcess {
-                pid,
-                cwd: None,
-                source_path: transcript.clone(),
-                stdin_tx: None,
-                busy: true,
-                interrupted: false,
-            },
-        );
-        mgr.archive_session(
-            "saved".into(),
-            AgentKind::Claude,
-            transcript.to_string_lossy().into(),
-            false,
-        )
-        .await;
-        assert!(child.try_wait().unwrap().is_none());
-        assert!(mgr.active_session_ids().contains("saved"));
-        assert!(!ArchiveStore::load(&home).archived["saved"].kill_process);
-        mgr.archive_session(
-            "saved".into(),
-            AgentKind::Claude,
-            transcript.to_string_lossy().into(),
-            true,
-        )
-        .await;
-        assert!(!mgr.active_session_ids().contains("saved"));
-        assert!(!child.wait().await.unwrap().success());
-        let saved = ArchiveStore::load(&home);
-        assert!(saved.archived["saved"].kill_process);
-        assert_eq!(
-            saved.archived["saved"].source_path.as_deref(),
-            transcript.to_str()
-        );
-        assert_eq!(fs::read(&transcript).unwrap(), original);
-        mgr.unarchive_session("saved".into());
-        assert!(!ArchiveStore::load(&home).is_archived("saved"));
-        assert_eq!(fs::read(&transcript).unwrap(), original);
-        let _ = fs::remove_dir_all(&home);
+        for agent in [AgentKind::Claude, AgentKind::Codex] {
+            let home = temp_home(&format!("dissolve-process-{agent:?}"));
+            fs::create_dir_all(&home).unwrap();
+            let transcript = home.join("saved.jsonl");
+            let original = b"{\"role\":\"assistant\",\"text\":\"saved history\"}\n";
+            fs::write(&transcript, original).unwrap();
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mgr = ProcessManager::new(home.clone(), tx);
+            let mut child = Command::new("sleep")
+                .arg("30")
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let pid = child.id().unwrap();
+            mgr.state.lock().unwrap().active.insert(
+                "saved".into(),
+                ActiveProcess {
+                    pid,
+                    cwd: None,
+                    source_path: transcript.clone(),
+                    stdin_tx: None,
+                    busy: true,
+                    interrupted: false,
+                },
+            );
+            mgr.archive_session(
+                "saved".into(),
+                agent,
+                transcript.to_string_lossy().into(),
+                false,
+            )
+            .await;
+            assert!(child.try_wait().unwrap().is_none());
+            assert!(mgr.active_session_ids().contains("saved"));
+            assert!(!ArchiveStore::load(&home).archived["saved"].kill_process);
+            mgr.archive_session(
+                "saved".into(),
+                agent,
+                transcript.to_string_lossy().into(),
+                true,
+            )
+            .await;
+            assert!(!mgr.active_session_ids().contains("saved"));
+            assert!(!child.wait().await.unwrap().success());
+            let saved = ArchiveStore::load(&home);
+            assert!(saved.archived["saved"].kill_process);
+            assert_eq!(
+                saved.archived["saved"].source_path.as_deref(),
+                transcript.to_str()
+            );
+            assert_eq!(fs::read(&transcript).unwrap(), original);
+            mgr.unarchive_session("saved".into());
+            assert!(!ArchiveStore::load(&home).is_archived("saved"));
+            assert_eq!(fs::read(&transcript).unwrap(), original);
+            let _ = fs::remove_dir_all(&home);
+        }
     }
 
     #[tokio::test]

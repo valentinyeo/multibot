@@ -22,7 +22,6 @@ const MAX_DELTA_CHUNKS_PER_WAKEUP: usize = 64;
 pub type DiskJob = Box<dyn FnOnce() + Send + 'static>;
 
 struct ActiveSessionWatch {
-    _watcher: RecommendedWatcher,
     stop_tx: mpsc::Sender<()>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -121,17 +120,18 @@ impl WatchManager {
             let _ = prev.stop_tx.try_send(());
         }
 
-        if !source_path.is_file() && !source_path.parent().is_some_and(|p| p.is_dir()) {
-            return Err(anyhow!(
-                "path and parent directory do not exist: {}",
-                source_path.display()
-            ));
-        }
+        // New agents may not have created their transcript directory yet. Watch its
+        // nearest existing ancestor so the first write still arrives without polling.
+        let parent = source_path.parent().unwrap_or(&source_path);
+        let watch_dir = parent
+            .ancestors()
+            .find(|path| path.is_dir())
+            .ok_or_else(|| anyhow!("no existing ancestor for {}", source_path.display()))?
+            .to_path_buf();
 
         // Register inotify watch BEFORE reading and emitting initial History so any write
         // occurring during or immediately after the initial snapshot is never missed.
-        let watch_dir = source_path.parent().unwrap_or(&source_path);
-        let target_name = source_path.file_name().map(|s| s.to_os_string());
+        let target_path = source_path.clone();
         let (fs_tx, mut fs_rx) = mpsc::unbounded_channel::<()>();
         let fs_tx_requeue = fs_tx.clone();
         let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
@@ -143,20 +143,16 @@ impl WatchManager {
             if is_ignored_read_event(&event.kind) {
                 return;
             }
-            let matches_name = target_name.as_ref().is_none_or(|name| {
-                event
-                    .paths
-                    .iter()
-                    .any(|p| p.file_name().is_some_and(|n| n == name))
-            }) || (matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
-                && event.paths.is_empty());
+            let matches_name = event.paths.iter().any(|p| target_path.starts_with(p))
+                || (matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
+                    && event.paths.is_empty());
 
             if matches_name {
                 let _ = fs_tx.send(());
             }
         })?;
 
-        watcher.watch(watch_dir, RecursiveMode::NonRecursive)?;
+        watcher.watch(&watch_dir, RecursiveMode::NonRecursive)?;
 
         let (initial_offset, initial_probe) = if source_path.is_file() {
             let path_for_read = source_path.clone();
@@ -210,6 +206,8 @@ impl WatchManager {
         let sid_task = session_id.clone();
 
         let task = tokio::spawn(async move {
+            let mut watcher = watcher;
+            let mut watch_dir = watch_dir;
             let mut consumed_offset = initial_offset;
             let mut last_probe = initial_probe;
 
@@ -235,6 +233,23 @@ impl WatchManager {
                             }
                         }
                         while fs_rx.try_recv().is_ok() {}
+
+                        // Follow newly created parents with one shallow watch, never a
+                        // recursive watch of the whole home directory.
+                        if let Some(next_dir) = source_path.parent()
+                            .and_then(|parent| parent.ancestors().find(|path| path.is_dir()))
+                            && next_dir != watch_dir
+                        {
+                            if let Err(err) = watcher.watch(next_dir, RecursiveMode::NonRecursive) {
+                                let _ = out_tx.send(ServerEvent::Error {
+                                    code: "watch_failed".into(),
+                                    message: format!("Failed to watch {}: {err}", source_path.display()),
+                                });
+                                return;
+                            }
+                            let _ = watcher.unwatch(&watch_dir);
+                            watch_dir = next_dir.to_path_buf();
+                        }
 
                         let home_c = home.clone();
                         let sid_c = sid_task.clone();
@@ -272,14 +287,8 @@ impl WatchManager {
             }
         });
 
-        self.sessions.insert(
-            session_id,
-            ActiveSessionWatch {
-                _watcher: watcher,
-                stop_tx,
-                task,
-            },
-        );
+        self.sessions
+            .insert(session_id, ActiveSessionWatch { stop_tx, task });
         Ok(())
     }
 
@@ -485,14 +494,15 @@ impl WatchManager {
                                     .and_then(|m| m.modified().ok())
                                     .map(system_time_ms)
                                     .unwrap_or_else(now_ms);
-                                if matches!(agent, AgentKind::Pi | AgentKind::Cursor)
+                                if matches!(agent, AgentKind::Codex | AgentKind::Pi | AgentKind::Cursor)
                                     && !ctx.is_held_open_path(&path, &HashSet::new()) {
                                     continue;
                                 }
                                 let summary =
                                     summarize_session_by_agent(agent, &path, mtime_ms, &ctx);
-                                if matches!(agent, AgentKind::Pi | AgentKind::Cursor)
-                                    && summary.archived && summary.archive_kill_process {
+                                if (agent == AgentKind::Codex && !ctx.is_shown(&summary))
+                                    || (matches!(agent, AgentKind::Pi | AgentKind::Cursor)
+                                        && summary.archived && summary.archive_kill_process) {
                                     continue;
                                 }
                                 let _ = out_c.send(ServerEvent::SessionUpdated { session: summary });
@@ -699,6 +709,9 @@ fn emit_session_updated(
         .map(system_time_ms)
         .unwrap_or_else(now_ms);
     let summary = summarize_session_by_agent(agent, path, mtime_ms, &ctx);
+    if agent == AgentKind::Codex && summary.archived {
+        return;
+    }
     let _ = out_tx.send(ServerEvent::SessionUpdated { session: summary });
 }
 
@@ -1065,6 +1078,105 @@ mod tests {
 
         wm.unwatch_session(None);
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    async fn new_chat_watches_missing_transcript_and_parent_until_first_message() {
+        let home = temp_home("missing-parent");
+        let path = home.join(".claude/projects/new/chat.jsonl");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let pm = ProcessManager::new(home.clone(), tx.clone());
+        let mut wm = WatchManager::new(home.clone(), tx, pm);
+        wm.watch_session("chat".into(), path.clone(), AgentKind::Claude)
+            .await
+            .unwrap();
+        assert!(
+            matches!(rx.try_recv(), Ok(ServerEvent::History { messages, has_more: false, .. }) if messages.is_empty())
+        );
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "{\"type\":\"user\",\"uuid\":\"first\",\"message\":{\"content\":\"Hello\"}}\n",
+        )
+        .unwrap();
+        let event = recv_matching(&mut rx, Duration::from_secs(2), |e| {
+            matches!(e, ServerEvent::HistoryAppend { .. })
+        })
+        .await;
+        assert!(
+            matches!(event, Some(ServerEvent::HistoryAppend { messages, .. }) if messages[0].text == "Hello")
+        );
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            file,
+            "{{\"type\":\"assistant\",\"uuid\":\"reply\",\"message\":{{\"content\":\"Reply\"}}}}"
+        )
+        .unwrap();
+        file.flush().unwrap();
+        let event = recv_matching(&mut rx, Duration::from_secs(2), |e| {
+            matches!(e, ServerEvent::HistoryAppend { .. })
+        })
+        .await;
+        assert!(
+            matches!(event, Some(ServerEvent::HistoryAppend { messages, .. }) if messages[0].text == "Reply")
+        );
+        wm.shutdown().await;
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_directory_watch_ignores_unheld_and_dissolved_rollouts() {
+        use crate::providers::SessionMetaEntry;
+        let home = temp_home("codex-lifecycle");
+        let dir = home.join(".codex/sessions/2026/11/28");
+        fs::create_dir_all(&dir).unwrap();
+        let ids = [
+            "11111111-2222-3333-4444-555555555555",
+            "aaaaaaaa-2222-3333-4444-555555555555",
+            "bbbbbbbb-2222-3333-4444-555555555555",
+        ];
+        let paths = ids.map(|id| dir.join(format!("rollout-{id}.jsonl")));
+        let mut metadata = MetadataStore::default();
+        for i in 0..2 {
+            metadata.sessions.insert(
+                ids[i].into(),
+                SessionMetaEntry {
+                    agent: Some(AgentKind::Codex),
+                    source_path: Some(paths[i].to_string_lossy().into()),
+                    ..Default::default()
+                },
+            );
+        }
+        metadata.save(&home).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let pm = ProcessManager::new(home.clone(), tx.clone());
+        pm.archive_session(
+            ids[1].into(),
+            AgentKind::Codex,
+            paths[1].to_string_lossy().into(),
+            true,
+        )
+        .await;
+        while rx.try_recv().is_ok() {}
+        let mut wm = WatchManager::new(home.clone(), tx, pm);
+        wm.watch_directory();
+        for (id, path) in ids.iter().zip(&paths) {
+            fs::write(path, format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"/repo\"}}}}\n")).unwrap();
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+        let mut seen = Vec::new();
+        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+            if let ServerEvent::SessionUpdated { session } = event {
+                seen.push(session.id);
+            }
+        }
+        assert!(!seen.is_empty(), "live Codex session must still appear");
+        assert!(
+            seen.iter().all(|id| id == ids[0]),
+            "stray rollouts: {seen:?}"
+        );
+        wm.shutdown().await;
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 use crate::chat_view::{ChatViewState, FailedSend};
+use crate::computer_view::ComputerViewState;
 use crate::icons::{self, lucide_icon};
 use crate::inbox::InboxState;
 use crate::palette::PaletteState;
@@ -10,7 +11,6 @@ use crate::state::{
     settings_visible_eq, update_footprint_if_changed,
 };
 use crate::table_modal::TableModalState;
-use crate::computer_view::ComputerViewState;
 use crate::terminal_pane::TerminalPaneState;
 use crate::theme::{self, RADIUS_CHIP};
 use crate::update_ui::{UpdateUiAction, UpdateUiState};
@@ -18,12 +18,7 @@ use gpui_kit::{
     App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement,
     IntoElement, KeyDownEvent, ModifiersChangedEvent, ParentElement, Render, Styled, Subscription,
     Task, TestSupportExt, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
-    component::{
-        Sizable,
-        button::Button,
-        h_flex,
-        input::InputState,
-    },
+    component::{Sizable, button::Button, h_flex, input::InputState},
     div,
     prelude::FluentBuilder,
     px, size,
@@ -55,8 +50,8 @@ use multibot_updater::{
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use sysinfo::System;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -204,20 +199,18 @@ fn has_millisecond_or_timeout_pattern(text: &str) -> bool {
                 u += 1;
             }
             let rest = &lower[u..];
-            let unit_len = if rest.starts_with("ms")
-                || rest.starts_with("us")
-                || rest.starts_with("ns")
-            {
-                2
-            } else if rest.starts_with("sec") || rest.starts_with("min") {
-                3
-            } else if u == j
-                && (rest.starts_with('s') || rest.starts_with('m') || rest.starts_with('h'))
-            {
-                1
-            } else {
-                0
-            };
+            let unit_len =
+                if rest.starts_with("ms") || rest.starts_with("us") || rest.starts_with("ns") {
+                    2
+                } else if rest.starts_with("sec") || rest.starts_with("min") {
+                    3
+                } else if u == j
+                    && (rest.starts_with('s') || rest.starts_with('m') || rest.starts_with('h'))
+                {
+                    1
+                } else {
+                    0
+                };
             if unit_len > 0 {
                 let after = u + unit_len;
                 if after >= bytes.len() || !bytes[after].is_ascii_alphanumeric() {
@@ -1325,7 +1318,8 @@ impl MultibotView {
     }
 
     pub(crate) fn start_update_runtime(&mut self, cx: &mut Context<Self>) {
-        if cx.has_global::<SharedAppStore>() && cx.global::<SharedAppStore>().update_poller_started {
+        if cx.has_global::<SharedAppStore>() && cx.global::<SharedAppStore>().update_poller_started
+        {
             self.update_action_tx = cx.global::<SharedAppStore>().update_action_tx.clone();
             return;
         }
@@ -1506,7 +1500,8 @@ impl MultibotView {
                                 c.download_and_stage_update(&release, &dir, |done, total| {
                                     let should_emit = match total {
                                         Some(t) if t > 0 => {
-                                            let pct = ((done.saturating_mul(100)) / t).min(100) as u8;
+                                            let pct =
+                                                ((done.saturating_mul(100)) / t).min(100) as u8;
                                             if last_pct != Some(pct) {
                                                 last_pct = Some(pct);
                                                 true
@@ -1515,7 +1510,8 @@ impl MultibotView {
                                             }
                                         }
                                         _ => {
-                                            if done.saturating_sub(last_reported_bytes) >= 256 * 1024
+                                            if done.saturating_sub(last_reported_bytes)
+                                                >= 256 * 1024
                                             {
                                                 last_reported_bytes = done;
                                                 true
@@ -1667,7 +1663,10 @@ impl MultibotView {
                             cx.notify();
                         }
                     }
-                    CheckOutcome::RateLimited { retry_after: _, etag } => {
+                    CheckOutcome::RateLimited {
+                        retry_after: _,
+                        etag,
+                    } => {
                         if etag.is_some() && etag != self.settings.last_update_etag {
                             self.settings.last_update_etag = etag;
                             self.persist_update_settings(cx);
@@ -1791,7 +1790,10 @@ impl MultibotView {
         };
     }
 
-    fn is_update_state_visible_for_settings(state: &UpdateState, settings: &MultibotSettings) -> bool {
+    fn is_update_state_visible_for_settings(
+        state: &UpdateState,
+        settings: &MultibotSettings,
+    ) -> bool {
         let mut probe = UpdateUiState::default();
         probe.state = state.clone();
         probe.is_card_visible(
@@ -1838,8 +1840,10 @@ impl MultibotView {
                         store.settings.last_update_etag = etag;
                         Self::persist_shared_update_settings(store);
                     }
-                    let was_visible =
-                        Self::is_update_state_visible_for_settings(&store.update_state, &store.settings);
+                    let was_visible = Self::is_update_state_visible_for_settings(
+                        &store.update_state,
+                        &store.settings,
+                    );
                     let changed = store.update_state != UpdateState::UpToDate;
                     store.update_state = UpdateState::UpToDate;
                     if manual {
@@ -1851,7 +1855,10 @@ impl MultibotView {
                         store.bump_revision();
                     }
                 }
-                CheckOutcome::RateLimited { retry_after: _, etag } => {
+                CheckOutcome::RateLimited {
+                    retry_after: _,
+                    etag,
+                } => {
                     if !manual {
                         let needs_etag = etag.is_some()
                             && etag != cx.global::<SharedAppStore>().settings.last_update_etag;
@@ -1904,14 +1911,18 @@ impl MultibotView {
                     if settings_dirty {
                         Self::persist_shared_update_settings(store);
                     }
-                    let was_visible =
-                        Self::is_update_state_visible_for_settings(&store.update_state, &store.settings);
+                    let was_visible = Self::is_update_state_visible_for_settings(
+                        &store.update_state,
+                        &store.settings,
+                    );
                     let next_state = UpdateState::Available(release.clone());
                     let changed = store.update_state != next_state;
                     store.update_last_release = Some(release.clone());
                     store.update_state = next_state;
-                    let now_visible =
-                        Self::is_update_state_visible_for_settings(&store.update_state, &store.settings);
+                    let now_visible = Self::is_update_state_visible_for_settings(
+                        &store.update_state,
+                        &store.settings,
+                    );
                     if manual {
                         let ver = UpdateUiState::normalize_version(&release.version);
                         store.update_notice = Some(format!("Multibot v{ver} is ready."));
@@ -2038,7 +2049,9 @@ impl MultibotView {
             entry.status = "Disconnected".into();
             entry.sessions.clear();
             let history_prefix = format!("{}:{host_label}", host_label.len());
-            store.pending_older_page_before.retain(|key, _| !key.starts_with(&history_prefix));
+            store
+                .pending_older_page_before
+                .retain(|key, _| !key.starts_with(&history_prefix));
             store.rebuild_merged_sessions();
             store.refresh_connection_summary();
             store.bump_revision();
@@ -2186,7 +2199,9 @@ impl MultibotView {
         store.connection_gen = store.connection_gen.wrapping_add(1);
         store.connection_shutdown_tx = None;
         let history_prefix = format!("{}:{label}", label.len());
-        store.pending_older_page_before.retain(|key, _| !key.starts_with(&history_prefix));
+        store
+            .pending_older_page_before
+            .retain(|key, _| !key.starts_with(&history_prefix));
         store.rebuild_merged_sessions();
         store.refresh_connection_summary();
         store.bump_revision();
@@ -2314,7 +2329,9 @@ impl MultibotView {
             UiBridgeEvent::Disconnected(reason) => {
                 let store = cx.global_mut::<SharedAppStore>();
                 let entry = store.host_connections.get_mut(host_label).unwrap();
-                if !entry.connected && entry.shutdown_tx.is_none() { return false; }
+                if !entry.connected && entry.shutdown_tx.is_none() {
+                    return false;
+                }
                 entry.daemon_tx = None;
                 entry.shutdown_tx = None;
                 entry.connected = false;
@@ -2564,7 +2581,9 @@ impl MultibotView {
                                 });
                             }
                         }
-                        store.workspace_store.reconcile_session(host_label, &session);
+                        store
+                            .workspace_store
+                            .reconcile_session(host_label, &session);
                         if store.persist_to_disk {
                             let _ = store.workspace_store.save();
                         }
@@ -2589,7 +2608,9 @@ impl MultibotView {
                                 .sessions
                                 .insert(0, session.clone());
                         }
-                        let moved = store.workspace_store.reconcile_session(host_label, &session);
+                        let moved = store
+                            .workspace_store
+                            .reconcile_session(host_label, &session);
                         if moved > 0 && store.persist_to_disk {
                             let _ = store.workspace_store.save();
                         }
@@ -2612,12 +2633,6 @@ impl MultibotView {
                                 s.archive_kill_process = *archived;
                             }
                         }
-                        store.daemon_notice = Some(if *archived {
-                            format!("Archived session {session_id}.")
-                        } else {
-                            format!("Restored session {session_id}.")
-                        });
-                        store.daemon_notice_seq = store.daemon_notice_seq.wrapping_add(1);
                         store.bump_revision();
                     }
                     ServerEvent::SessionInterrupted {
@@ -2729,11 +2744,20 @@ impl MultibotView {
         runtime: &Arc<tokio::runtime::Runtime>,
         cx: &mut App,
     ) -> bool {
-        if !cx.has_global::<SharedAppStore>() { return false; }
+        if !cx.has_global::<SharedAppStore>() {
+            return false;
+        }
         let store = cx.global::<SharedAppStore>();
-        let host = store.connected_host.clone().unwrap_or_else(|| "local".into());
+        let host = store
+            .connected_host
+            .clone()
+            .unwrap_or_else(|| "local".into());
         #[cfg(test)]
-        if store.host_connections.get(&host).is_none_or(|h| h.connection_gen != store.connection_gen) {
+        if store
+            .host_connections
+            .get(&host)
+            .is_none_or(|h| h.connection_gen != store.connection_gen)
+        {
             return Self::apply_legacy_bridge_event_to_app(conn_gen, event, runtime, cx);
         }
         Self::apply_host_bridge_event_to_app(&host, conn_gen, event, runtime, cx)
@@ -2967,7 +2991,9 @@ impl MultibotView {
                                 });
                             }
                         }
-                        store.workspace_store.reconcile_session(host_label, &session);
+                        store
+                            .workspace_store
+                            .reconcile_session(host_label, &session);
                         if store.persist_to_disk {
                             let _ = store.workspace_store.save();
                         }
@@ -2985,7 +3011,9 @@ impl MultibotView {
                             store.sessions.insert(0, session.clone());
                         }
                         let host_label = store.connected_host.as_deref().unwrap_or("local");
-                        let moved = store.workspace_store.reconcile_session(host_label, &session);
+                        let moved = store
+                            .workspace_store
+                            .reconcile_session(host_label, &session);
                         if moved > 0 && store.persist_to_disk {
                             let _ = store.workspace_store.save();
                         }
@@ -3008,12 +3036,6 @@ impl MultibotView {
                                 s.archive_kill_process = *archived;
                             }
                         }
-                        store.daemon_notice = Some(if *archived {
-                            format!("Archived session {session_id}.")
-                        } else {
-                            format!("Restored session {session_id}.")
-                        });
-                        store.daemon_notice_seq = store.daemon_notice_seq.wrapping_add(1);
                         store.bump_revision();
                     }
                     ServerEvent::SessionInterrupted {
@@ -3062,8 +3084,7 @@ impl MultibotView {
                             .rev()
                             .find(|m| m.role == MessageRole::Assistant)
                         {
-                            let preview: String =
-                                last_asst.text.trim().chars().take(120).collect();
+                            let preview: String = last_asst.text.trim().chars().take(120).collect();
                             for s in &mut store.sessions {
                                 if s.id == *session_id {
                                     s.last_assistant_id = Some(last_asst.id.clone());
@@ -3389,9 +3410,7 @@ impl MultibotView {
                         .collect();
                     self.sidebar_state
                         .workspace_store
-                        .reconcile_live_sessions(
-                            live.iter().map(|(host, s)| (host.as_str(), s)),
-                        );
+                        .reconcile_live_sessions(live.iter().map(|(host, s)| (host.as_str(), s)));
                     self.persist_workspace_store_if_enabled();
                     self.sync_workspace_to_shared(cx);
                     if let Some(ref sel) = self.selected_session.clone()
@@ -3490,11 +3509,6 @@ impl MultibotView {
                         sel.archive_kill_process = archived;
                     }
                     self.sync_sessions_to_shared(cx);
-                    self.notice = Some(if archived {
-                        format!("Archived session {session_id}.")
-                    } else {
-                        format!("Restored session {session_id}.")
-                    });
                 }
                 ServerEvent::SessionInterrupted {
                     session_id,
@@ -3621,7 +3635,11 @@ impl MultibotView {
                         }
                     }
                 }
-                ServerEvent::Commands { agent, cwd: _, items } => {
+                ServerEvent::Commands {
+                    agent,
+                    cwd: _,
+                    items,
+                } => {
                     self.slash_picker_state.set_daemon_commands(agent, items);
                 }
                 ev @ ServerEvent::Error { .. } => {
@@ -3675,17 +3693,22 @@ impl MultibotView {
                     .map(|t| t.key.clone())
             })
             .or_else(|| {
-                self.session_inputs().into_iter()
+                self.session_inputs()
+                    .into_iter()
                     .find(|s| s.host == self.active_session_host() && s.summary.id == *session_id)
                     .map(|s| CacheKey::new(s.host, s.summary.agent, &s.summary.id))
-                    .or_else(|| self.selected_session.as_ref().filter(|s| s.id == *session_id)
-                        .map(|s| CacheKey::new(self.active_session_host(), s.agent, &s.id)))
+                    .or_else(|| {
+                        self.selected_session
+                            .as_ref()
+                            .filter(|s| s.id == *session_id)
+                            .map(|s| CacheKey::new(self.active_session_host(), s.agent, &s.id))
+                    })
             });
         let cached_entry = cache_key.as_ref().and_then(|k| self.chat_cache.get(k));
         let cached_oldest_offset = cached_entry.map(|c| c.oldest_offset);
         let cached_file_size = cached_entry.map(|c| c.file_size);
-        let is_truncated_eof_tail = file_size
-            .is_some_and(|fs| cached_file_size.is_some_and(|cfs| cfs > 0 && fs < cfs));
+        let is_truncated_eof_tail =
+            file_size.is_some_and(|fs| cached_file_size.is_some_and(|cfs| cfs > 0 && fs < cfs));
 
         // Older-page pagination detection (works across ALL multi-window broadcast receivers
         // via App-scoped `is_older_page_hint` without misclassifying active `.jsonl` transcripts
@@ -3748,9 +3771,7 @@ impl MultibotView {
                 .is_some_and(|s| s.id == *session_id)
             {
                 if added_count > 0 {
-                    if self.chat_state.scroll.pending_scroll
-                        == PendingScrollTarget::None
-                    {
+                    if self.chat_state.scroll.pending_scroll == PendingScrollTarget::None {
                         let handle = &self.chat_state.scroll_handle;
                         self.chat_state.prepend_scroll_anchor =
                             Some((handle.max_offset().y, handle.offset()));
@@ -3772,10 +3793,16 @@ impl MultibotView {
         // truncated/rotated tail can never be misclassified as an older page.
         self.pending_older_page_before.remove(session_id);
 
-        let source_path = self.session_inputs().into_iter()
+        let source_path = self
+            .session_inputs()
+            .into_iter()
             .find(|s| s.host == self.active_session_host() && s.summary.id == *session_id)
             .map(|s| s.summary.source_path.clone())
-            .or_else(|| self.selected_session.as_ref().map(|s| s.source_path.clone()))
+            .or_else(|| {
+                self.selected_session
+                    .as_ref()
+                    .map(|s| s.source_path.clone())
+            })
             .unwrap_or_default();
 
         let token = self
@@ -3790,7 +3817,10 @@ impl MultibotView {
             });
 
         if let Some(token) = token {
-            match self.chat_cache.reconcile_server_event(&token, source_path, &ev) {
+            match self
+                .chat_cache
+                .reconcile_server_event(&token, source_path, &ev)
+            {
                 Some(ReconcileOutcome::AppliedToActive) => {
                     if let Some(cached) = self.chat_cache.get(&token.key) {
                         self.messages =
@@ -3856,9 +3886,7 @@ impl MultibotView {
             .as_ref()
             .is_some_and(|s| s.id == *session_id);
         let added_count = if is_active {
-            if self.chat_state.scroll.pending_scroll
-                == PendingScrollTarget::None
-            {
+            if self.chat_state.scroll.pending_scroll == PendingScrollTarget::None {
                 let handle = &self.chat_state.scroll_handle;
                 let distance = f32::from(handle.max_offset().y + handle.offset().y);
                 self.chat_state.scroll.sync_position(distance);
@@ -3874,10 +3902,16 @@ impl MultibotView {
             0
         };
         let mut visible_changed = false;
-        let source_path = self.session_inputs().into_iter()
+        let source_path = self
+            .session_inputs()
+            .into_iter()
             .find(|s| s.host == self.active_session_host() && s.summary.id == *session_id)
             .map(|s| s.summary.source_path.clone())
-            .or_else(|| self.selected_session.as_ref().map(|s| s.source_path.clone()))
+            .or_else(|| {
+                self.selected_session
+                    .as_ref()
+                    .map(|s| s.source_path.clone())
+            })
             .unwrap_or_default();
 
         let token = self
@@ -3893,7 +3927,8 @@ impl MultibotView {
 
         if let Some(token) = token {
             if matches!(
-                self.chat_cache.reconcile_server_event(&token, source_path, &ev),
+                self.chat_cache
+                    .reconcile_server_event(&token, source_path, &ev),
                 Some(ReconcileOutcome::AppliedToActive)
             ) {
                 if let Some(cached) = self.chat_cache.get(&token.key) {
@@ -3935,7 +3970,11 @@ impl MultibotView {
 
         let mut sessions_changed = false;
         if let Some(is_working) = working {
-            for s in self.sessions.iter_mut().filter(|_| self.host_statuses.is_empty()) {
+            for s in self
+                .sessions
+                .iter_mut()
+                .filter(|_| self.host_statuses.is_empty())
+            {
                 if s.id == *session_id {
                     s.working = is_working;
                     sessions_changed = true;
@@ -3959,7 +3998,11 @@ impl MultibotView {
             .find(|m| m.role == MessageRole::Assistant)
         {
             let preview: String = last_asst.text.trim().chars().take(120).collect();
-            for s in self.sessions.iter_mut().filter(|_| self.host_statuses.is_empty()) {
+            for s in self
+                .sessions
+                .iter_mut()
+                .filter(|_| self.host_statuses.is_empty())
+            {
                 if s.id == *session_id {
                     s.last_assistant_id = Some(last_asst.id.clone());
                     if !preview.is_empty() {
@@ -4108,7 +4151,11 @@ impl MultibotView {
                 let (vis, _) = self.apply_history_append_event(ev);
                 changed = vis;
             }
-            ServerEvent::Commands { agent, cwd: _, items } => {
+            ServerEvent::Commands {
+                agent,
+                cwd: _,
+                items,
+            } => {
                 self.slash_picker_state.set_daemon_commands(agent, items);
                 changed = true;
             }
@@ -4191,9 +4238,10 @@ impl MultibotView {
                                 }
                                 (message_id, matched_text)
                             } else {
-                                self.last_dispatched_prompt
-                                    .take()
-                                    .unwrap_or((format!("failed-{}", self.messages.len()), String::new()))
+                                self.last_dispatched_prompt.take().unwrap_or((
+                                    format!("failed-{}", self.messages.len()),
+                                    String::new(),
+                                ))
                             };
                             let reason = if detail.is_empty() {
                                 "Message delivery failed".to_string()
@@ -4287,8 +4335,20 @@ impl MultibotView {
         cx: &mut Context<Self>,
     ) {
         self.sidebar_state.pending_shell_dissolve = None;
+        if self.selected_session_host.as_deref() != Some(host.as_str())
+            || self
+                .selected_session
+                .as_ref()
+                .is_none_or(|selected| selected.id != session.id || selected.agent != session.agent)
+        {
+            self.notice = None;
+        }
         self.voice.cancel();
-        if self.selected_session_host.as_deref().is_some_and(|h| h != host) {
+        if self
+            .selected_session_host
+            .as_deref()
+            .is_some_and(|h| h != host)
+        {
             self.pending_switch_tokens.clear();
             self.pending_older_page_before.clear();
             self.chat_state.session_todos.clear();
@@ -4389,7 +4449,13 @@ impl MultibotView {
         self.send_or_queue_prompt_on_host(&host, session, msg_id, text);
     }
 
-    pub(crate) fn send_or_queue_prompt_on_host(&mut self, host: &str, session: &SessionSummary, msg_id: String, text: String) {
+    pub(crate) fn send_or_queue_prompt_on_host(
+        &mut self,
+        host: &str,
+        session: &SessionSummary,
+        msg_id: String,
+        text: String,
+    ) {
         let key = canonical_session_key(host, session.agent, &session.id);
         let options = self
             .chat_state
@@ -4416,7 +4482,13 @@ impl MultibotView {
                 }
             };
             if tx.send(req).is_ok() {
-                if self.host_statuses.is_empty() || (host == self.active_session_host() && self.selected_session.as_ref().is_some_and(|s| s.id == session.id && s.agent == session.agent)) {
+                if self.host_statuses.is_empty()
+                    || (host == self.active_session_host()
+                        && self
+                            .selected_session
+                            .as_ref()
+                            .is_some_and(|s| s.id == session.id && s.agent == session.agent))
+                {
                     self.last_dispatched_prompt = Some((msg_id, text));
                 }
                 return;
@@ -4832,11 +4904,14 @@ impl MultibotView {
         if let Some((host, session)) = self.host_for_session_key(&order[next]) {
             if active_key.as_deref() != Some(order[next].as_str()) {
                 self.sidebar_state.previous_session_key = active_key;
-                self.sidebar_state
-                    .workspace_store
-                    .record_frequent_visit(&order[next], now_unix_ms());
-                self.persist_workspace_store_if_enabled();
-                self.sync_workspace_to_shared(cx);
+                // Frequent navigation must not change the ranking it is traversing.
+                if self.sidebar_state.active_workspace_view != WorkspaceView::Frequent {
+                    self.sidebar_state
+                        .workspace_store
+                        .record_frequent_visit(&order[next], now_unix_ms());
+                    self.persist_workspace_store_if_enabled();
+                    self.sync_workspace_to_shared(cx);
+                }
             }
             self.inbox_state.step_index = None;
             self.inbox_state.step_order.clear();
@@ -5114,14 +5189,14 @@ impl MultibotView {
 
     /// Returns `true` when focus is currently on one of the known view-owned `FocusHandle`s
     /// whose subtree is mounted in the current render state.
-    pub(crate) fn is_focused_on_mounted_known_handle(
-        &self,
-        window: &Window,
-        cx: &App,
-    ) -> bool {
+    pub(crate) fn is_focused_on_mounted_known_handle(&self, window: &Window, cx: &App) -> bool {
         self.root_focus_handle.is_focused(window)
             || (self.active_modal == ActiveModal::Palette
-                && self.palette_input.read(cx).focus_handle(cx).is_focused(window))
+                && self
+                    .palette_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window))
             || (self.table_modal_state.is_open()
                 && self
                     .table_modal_state
@@ -5216,7 +5291,11 @@ impl MultibotView {
     /// `gpui_base::Root` above `#multibot-root`, breaking all global shortcuts).
     fn has_focused_unmounted_child(&self, window: &Window, cx: &Context<Self>) -> bool {
         (self.active_modal != ActiveModal::Palette
-            && self.palette_input.read(cx).focus_handle(cx).is_focused(window))
+            && self
+                .palette_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window))
             || (!self.table_modal_state.is_open()
                 && self
                     .table_modal_state
@@ -5270,11 +5349,7 @@ impl Render for MultibotView {
                 .read(cx)
                 .focus_handle(cx)
                 .is_focused(window)
-                || self
-                    .host_input
-                    .read(cx)
-                    .focus_handle(cx)
-                    .is_focused(window))
+                || self.host_input.read(cx).focus_handle(cx).is_focused(window))
         {
             self.sidebar_state.rename = None;
             self.sidebar_state.new_workspace_draft = None;
@@ -6121,10 +6196,9 @@ impl Render for MultibotView {
                     .child({
                         let surface = match self.main_surface {
                             MainSurface::Chat
-                                if self
-                                    .selected_session
-                                    .as_ref()
-                                    .is_some_and(|s| s.agent == AgentKind::Shell && !s.archived) =>
+                                if self.selected_session.as_ref().is_some_and(|s| {
+                                    s.agent == AgentKind::Shell && !s.archived
+                                }) =>
                             {
                                 self.render_shell_panel(cx).into_any_element()
                             }
@@ -6362,7 +6436,10 @@ mod tests {
             window.render_frame(cx);
             window.press("e", cx);
             window.render_frame(cx);
-            assert_eq!(view.read(cx).inbox_state.lifecycle, SessionLifecycle::Active);
+            assert_eq!(
+                view.read(cx).inbox_state.lifecycle,
+                SessionLifecycle::Active
+            );
         })
         .unwrap();
     }
@@ -7014,27 +7091,53 @@ mod tests {
     #[gpui_kit::test]
     fn multi_host_connect_and_reconnect_replace_only_the_requested_host(cx: &mut TestAppContext) {
         let (handle, view) = open_test_view_with_entity(cx);
-        let rt = cx.update_window(handle, |_, _, cx| view.read(cx).runtime.clone()).unwrap();
+        let rt = cx
+            .update_window(handle, |_, _, cx| view.read(cx).runtime.clone())
+            .unwrap();
         let (_rx_a, mut shutdown_a) = cx.update(|cx| install_test_host(cx, "host-a"));
         let (_rx_b, mut shutdown_b) = cx.update(|cx| install_test_host(cx, "host-b"));
         cx.update(|cx| {
-            let generation = MultibotView::connect_host_on_app(rt.clone(), "host-b".into(),
-                DaemonTarget::LocalBinary("/unused-in-headless-tests".into()), false, cx);
+            let generation = MultibotView::connect_host_on_app(
+                rt.clone(),
+                "host-b".into(),
+                DaemonTarget::LocalBinary("/unused-in-headless-tests".into()),
+                false,
+                cx,
+            );
             assert_eq!(generation, 2);
             let store = cx.global::<SharedAppStore>();
             assert_eq!(store.host_connections["host-a"].connection_gen, 1);
             assert!(store.host_connections["host-a"].connected);
             assert!(store.host_connections["host-a"].daemon_tx.is_some());
             assert_eq!(store.connection_status, "1/2 hosts · 0 sessions");
-            assert!(!MultibotView::apply_host_bridge_event_to_app("host-b", 1,
-                UiBridgeEvent::Disconnected("stale".into()), &rt, cx));
-            let generation = MultibotView::connect_host_on_app(rt.clone(), "host-b".into(),
-                DaemonTarget::LocalBinary("/unused-in-headless-tests".into()), false, cx);
+            assert!(!MultibotView::apply_host_bridge_event_to_app(
+                "host-b",
+                1,
+                UiBridgeEvent::Disconnected("stale".into()),
+                &rt,
+                cx
+            ));
+            let generation = MultibotView::connect_host_on_app(
+                rt.clone(),
+                "host-b".into(),
+                DaemonTarget::LocalBinary("/unused-in-headless-tests".into()),
+                false,
+                cx,
+            );
             assert_eq!(generation, 3);
-            assert_eq!(cx.global::<SharedAppStore>().host_connections["host-a"].connection_gen, 1);
+            assert_eq!(
+                cx.global::<SharedAppStore>().host_connections["host-a"].connection_gen,
+                1
+            );
         });
-        assert!(matches!(shutdown_a.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
-        assert!(matches!(shutdown_b.try_recv(), Err(oneshot::error::TryRecvError::Closed)));
+        assert!(matches!(
+            shutdown_a.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            shutdown_b.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
     }
 
     #[gpui_kit::test]
@@ -7230,7 +7333,9 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn account_settings_and_palette_keep_secrets_out_of_saved_voice_settings(cx: &mut TestAppContext) {
+    fn account_settings_and_palette_keep_secrets_out_of_saved_voice_settings(
+        cx: &mut TestAppContext,
+    ) {
         let (handle, view) = open_test_view_with_entity(cx);
         cx.update_window(handle, |_, window, cx| {
             window.press("ctrl-,", cx);
@@ -7240,7 +7345,11 @@ mod tests {
             assert!(window.try_find("account-sign-in").is_some());
             assert!(window.try_find("account-sign-out").is_none());
             let catalog = view.read(cx).build_palette_command_catalog(now_unix_ms());
-            assert!(catalog.iter().any(|c| c.label == "Account: Sign in to Multibot"));
+            assert!(
+                catalog
+                    .iter()
+                    .any(|c| c.label == "Account: Sign in to Multibot")
+            );
             assert!(catalog.iter().any(|c| c.label == "Account: Sign out"));
             let local_key = view.read(cx).settings.voice.api_key.clone();
             {
@@ -7257,13 +7366,17 @@ mod tests {
             assert!(window.try_find("account-sign-out").is_some());
             assert!(window.try_find("account-sign-in").is_none());
             assert_eq!(view.read(cx).settings.voice.api_key, local_key);
-            assert!(!format!("{:?}", cx.global::<SharedAppStore>().account).contains("account-test-key"));
+            assert!(
+                !format!("{:?}", cx.global::<SharedAppStore>().account)
+                    .contains("account-test-key")
+            );
             view.update(cx, |v, cx| {
                 cx.global_mut::<SharedAppStore>().account.busy = true;
                 v.start_account_job(crate::account::AccountJob::SignOut, cx);
             });
             assert!(cx.global::<SharedAppStore>().account.email.is_some());
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
@@ -7287,46 +7400,80 @@ mod tests {
             window.render_frame(cx);
             window.press("ctrl-d", cx);
             assert!(view.read(cx).notice.as_deref().unwrap().contains("API key"));
-            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "Unsent draft");
+            assert_eq!(
+                view.read(cx).prompt_input.read(cx).value().as_str(),
+                "Unsent draft"
+            );
             view.update(cx, |v, _| {
                 v.notice = None;
                 v.voice.phase.start();
             });
             window.press("ctrl-shift-d", cx);
-            assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some("let answer = 42;"));
-            assert_eq!(view.read(cx).voice.phase, multibot_core::voice::DictationPhase::Listening);
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+                Some("let answer = 42;")
+            );
+            assert_eq!(
+                view.read(cx).voice.phase,
+                multibot_core::voice::DictationPhase::Listening
+            );
             window.press("ctrl-alt-d", cx);
-            assert_eq!(view.read(cx).voice.phase, multibot_core::voice::DictationPhase::Listening);
+            assert_eq!(
+                view.read(cx).voice.phase,
+                multibot_core::voice::DictationPhase::Listening
+            );
             window.press("ctrl-d", cx);
-            assert_eq!(view.read(cx).voice.phase, multibot_core::voice::DictationPhase::Finishing);
-            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "Unsent draft");
+            assert_eq!(
+                view.read(cx).voice.phase,
+                multibot_core::voice::DictationPhase::Finishing
+            );
+            assert_eq!(
+                view.read(cx).prompt_input.read(cx).value().as_str(),
+                "Unsent draft"
+            );
             view.update(cx, |v, _| v.voice.phase.start());
             window.press("ctrl-shift-space", cx);
-            assert_eq!(view.read(cx).voice.phase, multibot_core::voice::DictationPhase::Finishing);
-        }).unwrap();
+            assert_eq!(
+                view.read(cx).voice.phase,
+                multibot_core::voice::DictationPhase::Finishing
+            );
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
-    fn dictation_shortcut_and_mic_report_invalid_key_without_changing_draft(cx: &mut TestAppContext) {
+    fn dictation_shortcut_and_mic_report_invalid_key_without_changing_draft(
+        cx: &mut TestAppContext,
+    ) {
         let (handle, view) = open_test_view_with_entity(cx);
         cx.update_window(handle, |_, window, cx| {
             view.update(cx, |v, cx| {
                 v.settings.voice.api_key = "invalid key".into();
-                v.prompt_input.update(cx, |input, cx| input.set_value("Unsent draft", window, cx));
+                v.prompt_input
+                    .update(cx, |input, cx| input.set_value("Unsent draft", window, cx));
             });
             window.press("ctrl-shift-space", cx);
             assert!(view.read(cx).notice.as_deref().unwrap().contains("API key"));
-            assert_eq!(view.read(cx).voice.phase, multibot_core::voice::DictationPhase::Off);
+            assert_eq!(
+                view.read(cx).voice.phase,
+                multibot_core::voice::DictationPhase::Off
+            );
             view.update(cx, |v, _| v.notice = None);
             window.render_frame(cx);
             window.click("composer-voice", cx);
             assert!(view.read(cx).notice.as_deref().unwrap().contains("API key"));
-            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "Unsent draft");
-        }).unwrap();
+            assert_eq!(
+                view.read(cx).prompt_input.read(cx).value().as_str(),
+                "Unsent draft"
+            );
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
-    fn dictation_settings_save_language_and_key_and_escape_stops_listening(cx: &mut TestAppContext) {
+    fn dictation_settings_save_language_and_key_and_escape_stops_listening(
+        cx: &mut TestAppContext,
+    ) {
         let (handle, view) = open_test_view_with_entity(cx);
         cx.update_window(handle, |_, window, cx| {
             window.press("ctrl-,", cx);
@@ -7336,8 +7483,10 @@ mod tests {
             assert!(window.try_find("deepgram-api-key").is_some());
             assert!(window.try_find("deepgram-language").is_some());
             view.update(cx, |v, cx| {
-                v.deepgram_key_input.update(cx, |input, cx| input.set_value("test-key", window, cx));
-                v.deepgram_language_input.update(cx, |input, cx| input.set_value("de", window, cx));
+                v.deepgram_key_input
+                    .update(cx, |input, cx| input.set_value("test-key", window, cx));
+                v.deepgram_language_input
+                    .update(cx, |input, cx| input.set_value("de", window, cx));
             });
             window.click("save-deepgram-settings", cx);
             assert_eq!(view.read(cx).settings.voice.api_key, "test-key");
@@ -7352,14 +7501,21 @@ mod tests {
                 });
             });
             window.press("escape", cx);
-            assert_eq!(view.read(cx).voice.phase, multibot_core::voice::DictationPhase::Off);
-            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_str(), "Keep this draft");
+            assert_eq!(
+                view.read(cx).voice.phase,
+                multibot_core::voice::DictationPhase::Off
+            );
+            assert_eq!(
+                view.read(cx).prompt_input.read(cx).value().as_str(),
+                "Keep this draft"
+            );
             view.update(cx, |v, _| {
                 v.voice.phase.start();
                 v.set_main_surface(MainSurface::Inbox);
                 assert_eq!(v.voice.phase, multibot_core::voice::DictationPhase::Off);
             });
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
@@ -7641,11 +7797,12 @@ mod tests {
             );
             assert!(window.try_find("session-0").is_some());
             assert!(window.try_find("session-1").is_none());
+            let workspace_id = view.read(cx).sidebar_state.active_workspace_id.clone();
             window.press("alt-shift-2", cx);
             window.render_frame(cx);
             assert_eq!(
                 view.read(cx).sidebar_state.active_workspace_id,
-                multibot_core::workspaces::ALL_WORKSPACES_ID
+                workspace_id
             );
             assert_eq!(
                 view.read(cx).sidebar_state.active_workspace_view,
@@ -8096,15 +8253,22 @@ mod tests {
             let pill_x_open = window.find("header-title-pill").bounds().origin.x;
 
             view.update(cx, |v, cx| {
-                v.computer.open().unwrap().url_input.update(cx, |state, cx| {
-                    state.set_value("http://localhost:6080", window, cx);
-                });
+                v.computer
+                    .open()
+                    .unwrap()
+                    .url_input
+                    .update(cx, |state, cx| {
+                        state.set_value("http://localhost:6080", window, cx);
+                    });
                 v.connect_computer_view_with_window(window, cx);
             });
             window.render_frame(cx);
             assert_eq!(view.read(cx).computer.backend_handle_count(), 1);
             assert_eq!(
-                view.read(cx).computer.open().map(|open| open.status.clone()),
+                view.read(cx)
+                    .computer
+                    .open()
+                    .map(|open| open.status.clone()),
                 Some(crate::computer_view::ComputerStatus::Loaded)
             );
 
@@ -8124,9 +8288,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn computer_view_rejects_a_dangerous_url_without_starting_a_backend(
-        cx: &mut TestAppContext,
-    ) {
+    fn computer_view_rejects_a_dangerous_url_without_starting_a_backend(cx: &mut TestAppContext) {
         let (handle, view) = open_test_view_with_entity(cx);
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
@@ -8140,9 +8302,13 @@ mod tests {
                 "data:text/html,x",
             ] {
                 view.update(cx, |v, cx| {
-                    v.computer.open().unwrap().url_input.update(cx, |state, cx| {
-                        state.set_value(bad, window, cx);
-                    });
+                    v.computer
+                        .open()
+                        .unwrap()
+                        .url_input
+                        .update(cx, |state, cx| {
+                            state.set_value(bad, window, cx);
+                        });
                     v.connect_computer_view_with_window(window, cx);
                 });
                 window.render_frame(cx);
@@ -8170,9 +8336,13 @@ mod tests {
             window.render_frame(cx);
             view.update(cx, |v, cx| {
                 v.open_computer_view(window, cx);
-                v.computer.open().unwrap().url_input.update(cx, |state, cx| {
-                    state.set_value("https://vnc.example.com:6080", window, cx);
-                });
+                v.computer
+                    .open()
+                    .unwrap()
+                    .url_input
+                    .update(cx, |state, cx| {
+                        state.set_value("https://vnc.example.com:6080", window, cx);
+                    });
                 v.connect_computer_view_with_window(window, cx);
             });
             window.render_frame(cx);
@@ -8347,7 +8517,12 @@ mod tests {
             window.press("alt-s", cx);
             window.render_frame(cx);
             let s1_key = view.read(cx).session_key_for(&s1);
-            assert!(view.read(cx).sidebar_state.workspace_store.is_favorite(&s1_key));
+            assert!(
+                view.read(cx)
+                    .sidebar_state
+                    .workspace_store
+                    .is_favorite(&s1_key)
+            );
             window.press("alt-1", cx);
             window.render_frame(cx);
             assert_eq!(
@@ -8388,13 +8563,19 @@ mod tests {
             }
             window.render_frame(cx);
             assert_eq!(view.read(cx).chat_state.font_size_pt, MAX_CHAT_FONT_SIZE_PT);
-            assert_eq!(view.read(cx).settings.chat_font_size_pt, MAX_CHAT_FONT_SIZE_PT);
+            assert_eq!(
+                view.read(cx).settings.chat_font_size_pt,
+                MAX_CHAT_FONT_SIZE_PT
+            );
             for _ in 0..30 {
                 window.press("ctrl--", cx);
             }
             window.render_frame(cx);
             assert_eq!(view.read(cx).chat_state.font_size_pt, MIN_CHAT_FONT_SIZE_PT);
-            assert_eq!(view.read(cx).settings.chat_font_size_pt, MIN_CHAT_FONT_SIZE_PT);
+            assert_eq!(
+                view.read(cx).settings.chat_font_size_pt,
+                MIN_CHAT_FONT_SIZE_PT
+            );
             window.press("ctrl-0", cx);
             window.render_frame(cx);
             assert_eq!(
@@ -8447,13 +8628,21 @@ mod tests {
                     cx,
                 );
                 v.execute_palette_row(
-                    mk_cmd("pal-cmd-toggle-tools", "Chat: Show / hide tool call details", ""),
+                    mk_cmd(
+                        "pal-cmd-toggle-tools",
+                        "Chat: Show / hide tool call details",
+                        "",
+                    ),
                     now,
                     Some(window),
                     cx,
                 );
                 v.execute_palette_row(
-                    mk_cmd("pal-cmd-copy-code", "Copy Latest Code Block", "Ctrl+Shift+D"),
+                    mk_cmd(
+                        "pal-cmd-copy-code",
+                        "Copy Latest Code Block",
+                        "Ctrl+Shift+D",
+                    ),
                     now,
                     Some(window),
                     cx,
@@ -8563,7 +8752,10 @@ mod tests {
         let (handle1, view1) = open_test_view_with_entity(cx);
         let (handle2, view2) = open_test_view_with_entity(cx);
 
-        assert_eq!(cx.update(|cx| cx.global::<SharedAppStore>().window_count), 2);
+        assert_eq!(
+            cx.update(|cx| cx.global::<SharedAppStore>().window_count),
+            2
+        );
 
         let s1 = make_session("sync-1", AgentKind::Claude, "Synced", false);
         cx.update_window(handle1, |_, _window, cx| {
@@ -8596,7 +8788,10 @@ mod tests {
         .unwrap();
         cx.run_until_parked();
 
-        assert_eq!(cx.update(|cx| cx.global::<SharedAppStore>().window_count), 1);
+        assert_eq!(
+            cx.update(|cx| cx.global::<SharedAppStore>().window_count),
+            1
+        );
         let _ = (handle1, view1);
     }
 
@@ -8725,7 +8920,10 @@ mod tests {
                         store.workspace_by_id(&ws_id).unwrap().name.clone()
                     };
                     assert_eq!(place(&v.sidebar_state.workspace_store), "HT Product");
-                    assert_eq!(place(&cx.global::<SharedAppStore>().workspace_store), "HT Product");
+                    assert_eq!(
+                        place(&cx.global::<SharedAppStore>().workspace_store),
+                        "HT Product"
+                    );
 
                     // The user moves the session somewhere else; the next refresh must
                     // not drag it back to the server's workspace.
@@ -8987,10 +9185,12 @@ mod tests {
             swapper: DefaultFileSwapper,
             launcher: DefaultProcessLauncher,
         };
-        assert_eq!(plat.preserved_cli_args(), vec!["--gpu=software".to_string()]);
-        let sanitized = sanitize_update_error_copy(&anyhow::anyhow!(
-            "request timed out after 30 seconds"
-        ));
+        assert_eq!(
+            plat.preserved_cli_args(),
+            vec!["--gpu=software".to_string()]
+        );
+        let sanitized =
+            sanitize_update_error_copy(&anyhow::anyhow!("request timed out after 30 seconds"));
         assert!(!contains_forbidden_duration_wording(&sanitized));
 
         let _ = std::fs::remove_file(&tmp_settings);
@@ -9135,18 +9335,41 @@ mod tests {
         cx.update_window(handle, |_, window, cx| {
             view.update(cx, |v, cx| {
                 v.daemon_tx = Some(tx);
-                assert!(v.spawn_new_session(AgentKind::Antigravity, "/repo".into(), None, None, cx));
-                assert!(matches!(rx.try_recv(), Ok(ClientRequest::SpawnSession {
-                    agent: AgentKind::Antigravity, initial_prompt: None, ..
-                })));
-                v.handle_bridge_event(UiBridgeEvent::Server(ServerEvent::SessionSpawned {
-                    session: session.clone(),
-                }), cx);
-                v.handle_bridge_event(UiBridgeEvent::Server(ServerEvent::History {
-                    session_id: session.id.clone(), messages: Vec::new(),
-                    oldest_offset: Some(0), latest_offset: Some(0), has_more: false,
-                    file_size: Some(0), file_mtime_ms: None, probe_sha256: None, todos: Vec::new(),
-                }), cx);
+                assert!(v.spawn_new_session(
+                    AgentKind::Antigravity,
+                    "/repo".into(),
+                    None,
+                    None,
+                    cx
+                ));
+                assert!(matches!(
+                    rx.try_recv(),
+                    Ok(ClientRequest::SpawnSession {
+                        agent: AgentKind::Antigravity,
+                        initial_prompt: None,
+                        ..
+                    })
+                ));
+                v.handle_bridge_event(
+                    UiBridgeEvent::Server(ServerEvent::SessionSpawned {
+                        session: session.clone(),
+                    }),
+                    cx,
+                );
+                v.handle_bridge_event(
+                    UiBridgeEvent::Server(ServerEvent::History {
+                        session_id: session.id.clone(),
+                        messages: Vec::new(),
+                        oldest_offset: Some(0),
+                        latest_offset: Some(0),
+                        has_more: false,
+                        file_size: Some(0),
+                        file_mtime_ms: None,
+                        probe_sha256: None,
+                        todos: Vec::new(),
+                    }),
+                    cx,
+                );
                 assert_eq!(v.selected_session.as_ref().unwrap().id, session.id);
                 assert!(v.messages.is_empty());
                 v.prompt_input.update(cx, |input, cx| {
@@ -9159,7 +9382,13 @@ mod tests {
             window.render_frame(cx);
             let mut sent = false;
             while let Ok(request) = rx.try_recv() {
-                if let ClientRequest::SendPrompt { agent, session_id, text, .. } = request {
+                if let ClientRequest::SendPrompt {
+                    agent,
+                    session_id,
+                    text,
+                    ..
+                } = request
+                {
                     assert_eq!(agent, AgentKind::Antigravity);
                     assert_eq!(session_id, session.id);
                     assert_eq!(text, "Hello new AGY");
@@ -9168,22 +9397,40 @@ mod tests {
             }
             assert!(sent, "first prompt must reach the new AGY session");
             view.update(cx, |v, cx| {
-                v.handle_bridge_event(UiBridgeEvent::Server(ServerEvent::HistoryAppend {
-                    session_id: session.id.clone(),
-                    messages: vec![ChatMessage {
-                        id: "first-reply".into(), role: MessageRole::Assistant,
-                        text: "First AGY reply".into(), ..Default::default()
-                    }],
-                    latest_offset: Some(300), working: Some(false),
-                    probe_sha256: None, todos: Vec::new(),
-                }), cx);
+                v.handle_bridge_event(
+                    UiBridgeEvent::Server(ServerEvent::HistoryAppend {
+                        session_id: session.id.clone(),
+                        messages: vec![ChatMessage {
+                            id: "first-reply".into(),
+                            role: MessageRole::Assistant,
+                            text: "First AGY reply".into(),
+                            ..Default::default()
+                        }],
+                        latest_offset: Some(300),
+                        working: Some(false),
+                        probe_sha256: None,
+                        todos: Vec::new(),
+                    }),
+                    cx,
+                );
                 assert!(v.messages.iter().any(|m| m.text == "First AGY reply"));
-                assert!(!v.notice.as_deref().unwrap_or("").contains("read_history_failed"));
+                assert!(
+                    !v.notice
+                        .as_deref()
+                        .unwrap_or("")
+                        .contains("read_history_failed")
+                );
             });
             window.render_frame(cx);
-            let reply_index = view.read(cx).messages.iter().position(|m| m.id == "first-reply").unwrap();
+            let reply_index = view
+                .read(cx)
+                .messages
+                .iter()
+                .position(|m| m.id == "first-reply")
+                .unwrap();
             assert!(window.find(format!("msg-bubble-{reply_index}")).visible());
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
@@ -9399,7 +9646,9 @@ mod tests {
                         port: 22,
                         identity_file: None,
                     },
-                    bundled_linux_binary: Some(PathBuf::from("/nonexistent/multibotd-linux-x86_64")),
+                    bundled_linux_binary: Some(PathBuf::from(
+                        "/nonexistent/multibotd-linux-x86_64",
+                    )),
                 };
 
                 // Simulate post-upgrade reconnect preserving daemon_upgrade_attempted = true
@@ -9529,8 +9778,11 @@ mod tests {
                     preview: "q".into(),
                     full_text: "q".into(),
                 });
-                v.sidebar_state.rename =
-                    Some(InlineRenameState::new(k1.clone(), "esc1".into(), "Alpha".into()));
+                v.sidebar_state.rename = Some(InlineRenameState::new(
+                    k1.clone(),
+                    "esc1".into(),
+                    "Alpha".into(),
+                ));
                 v.inbox_state.rename =
                     Some(InlineRenameState::new(k1, "esc1".into(), "Alpha".into()));
                 v.focus_inbox(window, cx);
@@ -9628,7 +9880,10 @@ mod tests {
         })
         .unwrap();
         cx.run_until_parked();
-        assert_eq!(cx.update(|cx| cx.global::<SharedAppStore>().window_count), 1);
+        assert_eq!(
+            cx.update(|cx| cx.global::<SharedAppStore>().window_count),
+            1
+        );
 
         // App-scoped updater still delivers updates to surviving Window 2!
         let rel = ReleaseInfo {
@@ -9734,8 +9989,14 @@ mod tests {
             window.render_frame(cx);
             {
                 let v = view.read(cx);
-                assert!(v.selected_session.is_none(), "Done removes the final active chat");
-                assert!(v.messages.is_empty(), "the final chat must not leave a stale transcript");
+                assert!(
+                    v.selected_session.is_none(),
+                    "Done removes the final active chat"
+                );
+                assert!(
+                    v.messages.is_empty(),
+                    "the final chat must not leave a stale transcript"
+                );
                 assert!(v.active_switch_token.is_none());
                 let key = v.session_key_for(&s2);
                 assert!(
@@ -9840,7 +10101,10 @@ mod tests {
         cx.update_window(handle2, |_, _window, cx| {
             let v2 = view2.read(cx);
             assert_eq!(
-                v2.messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+                v2.messages
+                    .iter()
+                    .map(|m| m.text.as_str())
+                    .collect::<Vec<_>>(),
                 vec!["Hello Window 2", "Live append Window 2"]
             );
             assert!(
@@ -9957,9 +10221,8 @@ mod tests {
         assert!(!contains_forbidden_duration_wording(&post_trunc));
 
         // Plain non-duration error passes through untouched
-        let plain = sanitize_update_error_copy(&anyhow::anyhow!(
-            "checksum mismatch on multibot.exe"
-        ));
+        let plain =
+            sanitize_update_error_copy(&anyhow::anyhow!("checksum mismatch on multibot.exe"));
         assert_eq!(plain, "checksum mismatch on multibot.exe");
     }
 
@@ -9969,7 +10232,9 @@ mod tests {
     ) {
         let (handle1, view1) = open_test_view_with_entity(cx);
         let (handle2, view2) = open_test_view_with_entity(cx);
-        let rt = cx.update_window(handle1, |_, _, cx| view1.read(cx).runtime.clone()).unwrap();
+        let rt = cx
+            .update_window(handle1, |_, _, cx| view1.read(cx).runtime.clone())
+            .unwrap();
 
         let target_a = DaemonTarget::RemoteSsh {
             host: multibot_core::SshHostConfig {
@@ -10076,7 +10341,10 @@ mod tests {
         })
         .unwrap();
         cx.run_until_parked();
-        assert_eq!(cx.update(|cx| cx.global::<SharedAppStore>().window_count), 1);
+        assert_eq!(
+            cx.update(|cx| cx.global::<SharedAppStore>().window_count),
+            1
+        );
         assert!(
             matches!(
                 shutdown_b_rx.try_recv(),
@@ -10091,7 +10359,12 @@ mod tests {
         });
 
         // Surviving Window 2 still receives App-scoped ServerEvents cleanly
-        let live_sess = make_session("survive-1", AgentKind::Claude, "Alive After W1 Close", false);
+        let live_sess = make_session(
+            "survive-1",
+            AgentKind::Claude,
+            "Alive After W1 Close",
+            false,
+        );
         cx.update(|cx| {
             assert!(MultibotView::apply_daemon_bridge_event_to_app(
                 gen_b,
@@ -10171,7 +10444,9 @@ mod tests {
 
         let (handle1, view1) = open_test_view_with_entity(cx);
         let (handle2, view2) = open_test_view_with_entity(cx);
-        let rt = cx.update_window(handle1, |_, _, cx| view1.read(cx).runtime.clone()).unwrap();
+        let rt = cx
+            .update_window(handle1, |_, _, cx| view1.read(cx).runtime.clone())
+            .unwrap();
         let (req_tx, mut req_rx) = mpsc::unbounded_channel::<ClientRequest>();
 
         let sess_a = make_session("sess-a", AgentKind::Claude, "Session A", false);
@@ -10280,7 +10555,8 @@ mod tests {
 
         // BOTH Window 1 and Window 2 must have prepended [msg-027, msg-028] ahead of [msg-029, msg-030]!
         let key_a = CacheKey::new("local", AgentKind::Claude, "sess-a");
-        for (label, handle, view) in [("Window 1", handle1, &view1), ("Window 2", handle2, &view2)] {
+        for (label, handle, view) in [("Window 1", handle1, &view1), ("Window 2", handle2, &view2)]
+        {
             cx.update_window(handle, |_, _window, cx| {
                 let v = view.read(cx);
                 let ids: Vec<&str> = v.messages.iter().map(|m| m.id.as_str()).collect();
@@ -10301,7 +10577,8 @@ mod tests {
         let mut disk_checker = ChatCache::new(cache_dir.clone());
         match disk_checker.load_from_disk(&key_a) {
             multibot_core::cache::DiskLoadResult::Hit(disk_sess) => {
-                let disk_ids: Vec<&str> = disk_sess.messages.iter().map(|m| m.id.as_str()).collect();
+                let disk_ids: Vec<&str> =
+                    disk_sess.messages.iter().map(|m| m.id.as_str()).collect();
                 assert_eq!(disk_ids, vec!["msg-029", "msg-030"]);
                 assert_eq!(disk_sess.consumed_offset, 11700);
                 assert_eq!(disk_sess.probe_sha256.as_deref(), Some("b2ddfa98de80"));
@@ -10369,7 +10646,10 @@ mod tests {
             let v1 = view1.read(cx);
             assert_eq!(v1.selected_session.as_ref().unwrap().id, "sess-b");
             assert_eq!(
-                v1.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+                v1.messages
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>(),
                 vec!["b-only"]
             );
             assert!(v1.chat_cache.get(&key_a).is_none());
@@ -10379,15 +10659,21 @@ mod tests {
         cx.update_window(handle2, |_, _window, cx| {
             let v2 = view2.read(cx);
             assert_eq!(
-                v2.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-                vec!["msg-025", "msg-026", "msg-027", "msg-028", "msg-029", "msg-030"]
+                v2.messages
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "msg-025", "msg-026", "msg-027", "msg-028", "msg-029", "msg-030"
+                ]
             );
         })
         .unwrap();
         // Tier-2 disk cache for Session A is STILL completely uncorrupted!
         match disk_checker.load_from_disk(&key_a) {
             multibot_core::cache::DiskLoadResult::Hit(disk_sess) => {
-                let disk_ids: Vec<&str> = disk_sess.messages.iter().map(|m| m.id.as_str()).collect();
+                let disk_ids: Vec<&str> =
+                    disk_sess.messages.iter().map(|m| m.id.as_str()).collect();
                 assert_eq!(disk_ids, vec!["msg-029", "msg-030"]);
                 assert_eq!(disk_sess.consumed_offset, 11700);
                 assert_eq!(disk_sess.probe_sha256.as_deref(), Some("b2ddfa98de80"));
@@ -10468,7 +10754,10 @@ mod tests {
                 let v = view.read(cx);
                 assert_eq!(v.update_ui.state, UpdateState::Available(rel.clone()));
                 assert_eq!(
-                    v.update_ui.last_release.as_ref().map(|r| r.version.as_str()),
+                    v.update_ui
+                        .last_release
+                        .as_ref()
+                        .map(|r| r.version.as_str()),
                     Some("0.2.0")
                 );
                 let entries = v.update_ui.palette_entries(multibot_proto::build_version());
@@ -10527,9 +10816,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn partial_trailing_line_history_loads_cold_warm_and_truncated_reset(
-        cx: &mut TestAppContext,
-    ) {
+    fn partial_trailing_line_history_loads_cold_warm_and_truncated_reset(cx: &mut TestAppContext) {
         let (handle, view) = open_test_view_with_entity(cx);
         let rt = cx
             .update_window(handle, |_, _, cx| view.read(cx).runtime.clone())
@@ -10599,7 +10886,10 @@ mod tests {
                 vec!["u1", "a1"],
                 "cold-open uncached session with partial trailing line must NOT be dropped"
             );
-            let cached = v.chat_cache.get(&key).expect("cold-open must populate Tier-1 cache");
+            let cached = v
+                .chat_cache
+                .get(&key)
+                .expect("cold-open must populate Tier-1 cache");
             assert_eq!(cached.oldest_offset, 0);
             assert_eq!(cached.consumed_offset, 138);
             assert_eq!(cached.file_size, 214);
@@ -10778,7 +11068,12 @@ mod tests {
         // Test BOTH newline-terminated (149/149) AND partial-trailing-line (119/156) rotated fallbacks
         for (variant, latest, fsize, msg_id) in [
             ("newline-terminated", 149u64, 149u64, "rotated-001"),
-            ("partial-trailing-line", 119u64, 156u64, "rotated-partial-001"),
+            (
+                "partial-trailing-line",
+                119u64,
+                156u64,
+                "rotated-partial-001",
+            ),
         ] {
             // Seed pre-truncation tail (oldest=11667, latest=12501, file_size=12501)
             cx.update(|cx| {
@@ -11071,7 +11366,9 @@ mod tests {
             let ids: Vec<&str> = v1.messages.iter().map(|m| m.id.as_str()).collect();
             assert_eq!(
                 ids,
-                vec!["msg-025", "msg-026", "msg-027", "msg-028", "msg-029", "msg-030"]
+                vec![
+                    "msg-025", "msg-026", "msg-027", "msg-028", "msg-029", "msg-030"
+                ]
             );
             let c1 = v1.chat_cache.get(&key_a).unwrap();
             assert_eq!(c1.oldest_offset, 9360);
@@ -11349,7 +11646,10 @@ mod tests {
             window.press("y", cx);
             window.press("enter", cx);
             window.render_frame(cx);
-            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "keepme");
+            assert_eq!(
+                view.read(cx).prompt_input.read(cx).value().as_ref(),
+                "keepme"
+            );
             assert!(view.read(cx).messages.is_empty());
             assert_eq!(
                 view.read(cx)
@@ -11403,7 +11703,12 @@ mod tests {
             .update_window(handle2, |_, window, cx| {
                 window.render_frame(cx);
                 assert_eq!(
-                    view2.read(cx).sidebar_state.workspace_store.workspaces.len(),
+                    view2
+                        .read(cx)
+                        .sidebar_state
+                        .workspace_store
+                        .workspaces
+                        .len(),
                     2,
                     "Window 2 must receive Workspace 2 created via the palette in Window 1"
                 );
@@ -11484,10 +11789,8 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (handle, view) = open_test_view_with_entity(cx);
-        let tmp_dir = std::env::temp_dir().join(format!(
-            "multibot-app-att-clear-{}",
-            std::process::id()
-        ));
+        let tmp_dir =
+            std::env::temp_dir().join(format!("multibot-app-att-clear-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp_dir);
         let secret_png = tmp_dir.join("secret.png");
         std::fs::write(&secret_png, b"\x89PNG\r\n\x1a\nsecret").unwrap();
@@ -12474,12 +12777,13 @@ mod tests {
                 });
                 window.render_frame(cx);
                 assert!(view.read(cx).table_modal_state.is_open());
-                assert!(view
-                    .read(cx)
-                    .table_modal_state
-                    .focus_handle
-                    .as_ref()
-                    .is_some_and(|fh| fh.is_focused(window)));
+                assert!(
+                    view.read(cx)
+                        .table_modal_state
+                        .focus_handle
+                        .as_ref()
+                        .is_some_and(|fh| fh.is_focused(window))
+                );
             };
 
             // 1. Alt+I (OpenInbox) closes Table Modal, opens Inbox, and leaves Inbox j-nav interactive
@@ -12532,12 +12836,13 @@ mod tests {
                 "Ctrl+Shift+I from Chat must close open Table Modal"
             );
             assert_eq!(view.read(cx).main_surface, MainSurface::Inbox);
-            assert!(view
-                .read(cx)
-                .inbox_state
-                .focus_handle
-                .as_ref()
-                .is_some_and(|fh| fh.is_focused(window)));
+            assert!(
+                view.read(cx)
+                    .inbox_state
+                    .focus_handle
+                    .as_ref()
+                    .is_some_and(|fh| fh.is_focused(window))
+            );
             view.update(cx, |v, cx| {
                 v.inbox_state.select_all_split();
                 v.inbox_state.selected_row = 0;
@@ -13172,7 +13477,11 @@ mod tests {
             window.press("ctrl-2", cx);
             window.render_frame(cx);
             assert_eq!(
-                view1.read(cx).selected_session.as_ref().map(|s| s.id.as_str()),
+                view1
+                    .read(cx)
+                    .selected_session
+                    .as_ref()
+                    .map(|s| s.id.as_str()),
                 Some("r6-sb2")
             );
             assert!(
@@ -13340,7 +13649,11 @@ mod tests {
                 "Ctrl+Shift+W must clear Open-sidebar rename"
             );
             assert_eq!(
-                view1.read(cx).selected_session.as_ref().map(|s| s.id.as_str()),
+                view1
+                    .read(cx)
+                    .selected_session
+                    .as_ref()
+                    .map(|s| s.id.as_str()),
                 Some("r6-sb2")
             );
             window.press("f2", cx);
@@ -13615,7 +13928,11 @@ mod tests {
                 let (rename, focused) = if surface == MainSurface::Inbox {
                     (
                         v.inbox_state.rename.as_ref().unwrap(),
-                        v.inbox_state.focus_handle.as_ref().unwrap().is_focused(window),
+                        v.inbox_state
+                            .focus_handle
+                            .as_ref()
+                            .unwrap()
+                            .is_focused(window),
                     )
                 } else {
                     (
@@ -13649,7 +13966,10 @@ mod tests {
                     "new",
                     "Typing after F2 must replace the entire name on {surface:?}/{mode:?}"
                 );
-                assert_eq!(v.prompt_input.read(cx).value().as_ref(), "composer untouched");
+                assert_eq!(
+                    v.prompt_input.read(cx).value().as_ref(),
+                    "composer untouched"
+                );
                 assert!(v.sidebar_state.rename.is_none());
                 assert!(v.inbox_state.rename.is_none());
             }
@@ -14093,7 +14413,10 @@ mod tests {
             window.render_frame(cx);
             assert_eq!(view.read(cx).main_surface, MainSurface::Chat);
             assert_eq!(
-                view.read(cx).selected_session.as_ref().map(|s| s.id.as_str()),
+                view.read(cx)
+                    .selected_session
+                    .as_ref()
+                    .map(|s| s.id.as_str()),
                 Some("r7-inb-1"),
                 "Enter must open the selected Inbox row"
             );
@@ -14491,6 +14814,3 @@ mod tests {
         .unwrap();
     }
 }
-
-
-
