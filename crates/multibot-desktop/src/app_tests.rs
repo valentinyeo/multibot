@@ -9859,6 +9859,7 @@ fn force_send_shortcut_targets_first_active_queued_message_in_both_focus_context
             v.send_or_queue_prompt(&other, "other".into(), "leave queued".into());
             v.send_or_queue_prompt(&active, "first".into(), "first queued".into());
             v.send_or_queue_prompt(&active, "second".into(), "second queued".into());
+            v.apply_pending_draft(window, cx);
             v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("keep draft", window, cx);
                 input.focus(window, cx);
@@ -9927,6 +9928,7 @@ fn force_send_idle_draft_and_palette_command_use_registered_shortcut(cx: &mut Te
                 .find(|command| command.id == "pal-cmd-force-send").unwrap();
             assert_eq!(command.label, "Force Send Queued Message");
             assert_eq!(command.chord, multibot_keys::by_id("chat.force_send").unwrap().display);
+            v.apply_pending_draft(window, cx);
             v.inputs.prompt_input.update(cx, |input, cx| {
                 input.set_value("idle draft", window, cx);
                 input.focus(window, cx);

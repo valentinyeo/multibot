@@ -396,7 +396,7 @@ impl MultibotView {
                         self.start_account_job(job, cx);
                     }
                     "pal-cmd-force-send" => {
-                        if let Some(window) = window.as_deref_mut() {
+                        if let Some(window) = window {
                             self.force_send_next_queued(window, cx);
                         }
                     }

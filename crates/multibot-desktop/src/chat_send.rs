@@ -240,9 +240,10 @@ impl MultibotView {
         let raw = self.bound_mention_prompt(cx);
         let trimmed = raw.trim().to_string();
         if trimmed.is_empty()
-            && self.chat_state.pending_attachments.is_empty()
-            && self.chat_state.quoted_snippets.is_empty()
-            && self.chat_state.reply_quote.is_none()
+            && (!force
+                || (self.chat_state.pending_attachments.is_empty()
+                    && self.chat_state.quoted_snippets.is_empty()
+                    && self.chat_state.reply_quote.is_none()))
         {
             return;
         }
@@ -293,24 +294,29 @@ impl MultibotView {
         let quote = self.chat_state.reply_quote.take();
         let snippets = std::mem::take(&mut self.chat_state.quoted_snippets);
         self.chat_state.selection_quote_popover = None;
-        let expanded = compose_snippet_quotes(&trimmed, &snippets);
-        let mut payload =
-            compose_quoted_reply(quote.as_ref().map(|q| q.full_text.as_str()), &expanded);
+        let staged = std::mem::take(&mut self.chat_state.pending_attachments);
+        let mut expanded = compose_snippet_quotes(&trimmed, &snippets);
+        if force && expanded.is_empty() && !staged.is_empty() {
+            expanded = staged
+                .iter()
+                .map(|attachment| attachment.inserted_token.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+        let payload = if force && expanded.is_empty() {
+            quote
+                .as_ref()
+                .map(|q| format_quote_block(&q.full_text))
+                .unwrap_or_default()
+        } else {
+            compose_quoted_reply(quote.as_ref().map(|q| q.full_text.as_str()), &expanded)
+        };
         let quoted_id = quote.as_ref().map(|q| q.message_id.clone());
 
         self.inputs.prompt_input.update(cx, |state, cx| {
             state.set_value("", window, cx);
         });
         self.slash_picker_state.close();
-        let staged = std::mem::take(&mut self.chat_state.pending_attachments);
-
-        if payload.is_empty() && !staged.is_empty() {
-            payload = staged
-                .iter()
-                .map(|attachment| attachment.inserted_token.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
-        }
         if payload.is_empty() {
             return;
         }
