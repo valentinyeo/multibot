@@ -87,10 +87,16 @@ impl MultibotView {
                 .selection
                 .selected_session
                 .as_ref()
-                .is_some_and(|s| !matches!(s.agent, AgentKind::Claude | AgentKind::Codex))
+                .is_some_and(|s| {
+                    !matches!(
+                        s.agent,
+                        AgentKind::Claude | AgentKind::Codex | AgentKind::Antigravity
+                    )
+                })
             {
-                self.notice =
-                    Some("Permission overrides are supported by Claude and Codex.".into());
+                self.notice = Some(
+                    "Permission overrides are supported by Claude, Codex, and Antigravity.".into(),
+                );
                 self.active_modal = ActiveModal::None;
                 cx.notify();
                 return;
@@ -431,6 +437,11 @@ impl MultibotView {
                     "pal-cmd-toggle-terminal" => {
                         self.toggle_terminal_pane(cx);
                         return;
+                    }
+                    "pal-browser-google-signin" => {
+                        if let Some(win) = window {
+                            self.start_browser_google_signin(win, cx);
+                        }
                     }
                     "pal-cmd-browser-toggle" => {
                         if let Some(win) = window {

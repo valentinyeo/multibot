@@ -24,6 +24,28 @@ fn open_view(cx: &mut TestAppContext) -> (gpui_kit::AnyWindowHandle, Entity<Mult
 }
 
 #[gpui_kit::test]
+fn google_signin_is_discoverable_in_ctrl_k(cx: &mut TestAppContext) {
+    let (handle, view) = open_view(cx);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("ctrl-k", cx);
+        window.input("Browser: Sign in to Google", cx);
+        window.render_frame(cx);
+        assert!(window.find("pal-browser-google-signin").visible());
+        let rows = view.read(cx).build_palette_rows("Browser: Sign in to Google", now_unix_ms());
+        assert!(rows.iter().any(|row| matches!(row,
+            PaletteRow::Command { id, label, .. }
+                if id == "pal-browser-google-signin" && label == "Browser: Sign in to Google"
+        )));
+        #[cfg(not(windows))]
+        {
+            window.press("enter", cx);
+            assert_eq!(view.read(cx).notice.as_deref(), Some("The docked Chrome sign-in flow requires Windows."));
+        }
+    }).unwrap();
+}
+
+#[gpui_kit::test]
 fn dissolve_workspace_confirms_stops_agents_keeps_split_and_restores_on_reactivate(
     cx: &mut TestAppContext,
 ) {

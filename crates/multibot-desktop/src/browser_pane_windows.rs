@@ -1,8 +1,8 @@
 use anyhow::{Context as _, Result, bail};
 use multibot_core::browser_pane::{
     BrowserPaneRect, beacon_url, browser_profile_root, client_to_screen_rect, discover_browser,
-    launch_args_with_bounds, locked_popup_style, shared_profile, toolwindow_ex_style,
-    window_matches_beacon,
+    launch_args_with_bounds, locked_popup_style, shared_profile, signin_launch_args,
+    toolwindow_ex_style, window_matches_beacon,
 };
 use std::{
     cell::RefCell,
@@ -68,6 +68,112 @@ fn shared_job() -> Result<HANDLE> {
     .as_ref()
     .map(|handle| *handle as HANDLE)
     .map_err(|error| anyhow::anyhow!(error.clone()))
+}
+
+static SIGNIN_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn signin_active() -> bool {
+    SIGNIN_ACTIVE.load(Ordering::SeqCst)
+}
+
+pub(super) struct SigninProcess {
+    handle: Option<usize>,
+}
+
+impl SigninProcess {
+    pub(super) fn reserve() -> Result<Self> {
+        if SIGNIN_ACTIVE
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            bail!("Finish signing in and close the Google sign-in Chrome window first.");
+        }
+        Ok(Self { handle: None })
+    }
+}
+
+impl Drop for SigninProcess {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle {
+            unsafe { CloseHandle(handle as HANDLE) };
+        }
+        SIGNIN_ACTIVE.store(false, Ordering::SeqCst);
+    }
+}
+
+// Runs off the UI thread, holding the shared profile reservation through process exit.
+pub(super) fn launch_google_signin(mut session: SigninProcess) -> Result<()> {
+    let roots = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    let program = discover_browser(&roots, Path::is_file)
+        .context("Install Google Chrome or Microsoft Edge to sign in")?;
+    let profile = shared_profile(&isolated_root()?);
+    real_directory(&profile)?;
+    let job = shared_job()?;
+    for hwnd in DOCKED_BY_BROWSER_HWND.lock().unwrap().keys() {
+        unsafe { PostMessageW(*hwnd as HWND, WM_CLOSE, 0, 0) };
+    }
+    // WM_CLOSE from Browser::drop gets time to flush cookies before terminating leftovers.
+    std::thread::sleep(Duration::from_millis(500));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        unsafe {
+            if QueryInformationJobObject(
+                job,
+                JobObjectBasicAccountingInformation,
+                &mut accounting as *mut _ as _,
+                size_of_val(&accounting) as u32,
+                null_mut(),
+            ) == 0
+            {
+                return Err(io::Error::last_os_error().into());
+            }
+            if accounting.ActiveProcesses == 0 {
+                break;
+            }
+            if Instant::now() >= deadline {
+                bail!("Docked Chrome is still closing. Try signing in again.");
+            }
+            if TerminateJobObject(job, 0) == 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut command = command_line(&program, &signin_launch_args(&profile));
+    let program = wide(program.as_os_str());
+    unsafe {
+        let mut startup = STARTUPINFOW::default();
+        startup.cb = size_of_val(&startup) as u32;
+        startup.dwFlags = STARTF_USESHOWWINDOW;
+        startup.wShowWindow = SW_SHOWNORMAL as u16;
+        let mut info = PROCESS_INFORMATION::default();
+        if CreateProcessW(
+            program.as_ptr(),
+            command.as_mut_ptr(),
+            null(),
+            null(),
+            0,
+            0,
+            null(),
+            null(),
+            &startup,
+            &mut info,
+        ) == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        let _thread = Handle(info.hThread);
+        session.handle = Some(info.hProcess as usize);
+        if WaitForSingleObject(info.hProcess, INFINITE) != WAIT_OBJECT_0 {
+            return Err(io::Error::last_os_error().into());
+        }
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -166,6 +272,9 @@ fn isolated_root() -> Result<PathBuf> {
 
 impl Browser {
     pub(super) fn launch(parent: usize, rect: Option<BrowserPaneRect>) -> Result<(Self, Process)> {
+        if signin_active() {
+            bail!("Finish signing in and close the Google sign-in Chrome window first.");
+        }
         let roots = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
             .into_iter()
             .filter_map(std::env::var_os)
@@ -386,6 +495,9 @@ impl Process {
         let start = Instant::now();
         // Startup-only discovery runs off the UI thread. Lifetime tracking uses WinEvents.
         while start.elapsed() < Duration::from_secs(10) {
+            if signin_active() {
+                bail!("Browser opening cancelled for Google sign-in");
+            }
             let cancelled = self.window.cancelled.load(Ordering::SeqCst);
             for hwnd in chrome_windows() {
                 if self.before.contains(&hwnd)

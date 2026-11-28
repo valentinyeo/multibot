@@ -1463,7 +1463,7 @@ fn composer_options_are_session_and_host_scoped_and_reset_to_defaults(cx: &mut T
         window.render_frame(cx);
         window.click("attach-file-btn", cx);
         for id in [
-            "composer-model-2",
+            "composer-model-3",
             "composer-effort-4",
             "composer-permission-1",
         ] {
@@ -1529,7 +1529,7 @@ fn composer_options_without_a_session_apply_to_new_claude_chats(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
-fn composer_options_offline_snapshot_and_unsupported_provider(cx: &mut TestAppContext) {
+fn composer_options_offline_snapshot_and_antigravity_controls(cx: &mut TestAppContext) {
     let (handle, view) = open_test_chat_window(cx);
     let session = SessionSummary {
         id: "offline-controls".into(),
@@ -1557,7 +1557,7 @@ fn composer_options_offline_snapshot_and_unsupported_provider(cx: &mut TestAppCo
         window.click("attach-file-btn", cx);
         window.render_frame(cx);
         for id in ["composer-model-0", "composer-effort-1", "composer-permission-1"] {
-            assert_eq!(window.find(id).disabled(), Some(true));
+            assert_ne!(window.find(id).disabled(), Some(true));
         }
         view.update(cx, |v, _| assert!(v.active_composer_options().is_default()));
     }).unwrap();
@@ -6904,6 +6904,70 @@ fn image_viewer_fits_inline_images_and_closes_on_backdrop_or_session_switch(
     })
     .unwrap();
     std::fs::remove_file(path).unwrap();
+}
+
+#[gpui_kit::test]
+fn antigravity_composer_chips_and_palette_forward_options(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let session = SessionSummary {
+        id: "agy-switch-controls".into(),
+        agent: AgentKind::Antigravity,
+        ..Default::default()
+    };
+    let expected = SessionOptions {
+        model: Some("gemini-4-neon".into()),
+        effort: Some(EffortLevel::Max),
+        permission: Some(PermissionLevel::Auto),
+    };
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.connection.daemon_tx = Some(tx);
+            v.connection.sessions = vec![session.clone()];
+            v.selection.selected_session = Some(session);
+            v.inputs.prompt_input.update(cx, |input, cx| input.set_value("use these settings", window, cx));
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.click("attach-file-btn", cx);
+        window.render_frame(cx);
+        for (prefix, count) in [("model", 10), ("effort", 5), ("permission", 3)] {
+            for index in 0..count {
+                let chip = window.find(format!("composer-{prefix}-{index}"));
+                assert_ne!(chip.disabled(), Some(true));
+                let menu = window.find("composer-options").bounds();
+                assert!(chip.bounds().left() >= menu.left());
+                assert!(chip.bounds().right() <= menu.right());
+            }
+        }
+        for id in ["composer-model-1", "composer-effort-4", "composer-permission-2"] {
+            window.click(id, cx);
+            window.render_frame(cx);
+            assert_eq!(window.find(id).checked(), Some(true));
+        }
+        view.update(cx, |v, _| {
+            assert_eq!(v.active_composer_options(), expected);
+            assert_eq!(v.spawn_composer_options(AgentKind::Antigravity), Some(expected.clone()));
+        });
+        window.click("attach-file-btn", cx);
+        window.click("send-prompt", cx);
+        assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { options: Some(ref o), .. }) if o == &expected));
+        window.press("ctrl-k", cx);
+        window.input("Change permission mode", cx);
+        window.render_frame(cx);
+        assert!(window.find("pal-cmd-permission-mode").visible());
+        window.press("enter", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).palette_state.permission_picker);
+        window.click("pal-permission-ask", cx);
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).active_composer_options().permission, Some(PermissionLevel::Ask));
+        window.press("ctrl-k", cx);
+        window.press("escape", cx);
+        window.click("attach-file-btn", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("composer-permission-1").checked(), Some(true));
+    }).unwrap();
 }
 
 #[gpui_kit::test]
