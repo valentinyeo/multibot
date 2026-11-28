@@ -339,6 +339,22 @@ pub struct SearchHit {
     pub role: MessageRole,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SubworkerInfo {
+    pub pid: u32,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub id: String,
@@ -350,6 +366,8 @@ pub struct SessionSummary {
     pub source_path: String,
     pub updated_at_ms: i64,
     pub working: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subworkers: Vec<SubworkerInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_attached: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -395,6 +413,7 @@ impl Default for SessionSummary {
             source_path: String::new(),
             updated_at_ms: 0,
             working: false,
+            subworkers: Vec::new(),
             shell_attached: None,
             last_assistant_id: None,
             last_assistant_preview: None,
@@ -744,6 +763,46 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<SessionSummary>(&json).unwrap(),
             session
+        );
+    }
+
+    #[test]
+    fn subworkers_are_backward_compatible_and_roundtrip() {
+        let legacy = r#"{"id":"old","agent":"claude","title":"Old","cwd":null,"source_path":"old.jsonl","updated_at_ms":0,"working":false}"#;
+        let mut session: SessionSummary = serde_json::from_str(legacy).unwrap();
+        assert!(session.subworkers.is_empty());
+        assert!(
+            serde_json::to_value(&session)
+                .unwrap()
+                .get("subworkers")
+                .is_none()
+        );
+        session.subworkers.push(SubworkerInfo {
+            pid: 42,
+            label: "MBRU-117".into(),
+            ticket: Some("MBRU-117".into()),
+            cwd: Some("/repo/worktree".into()),
+            runtime: Some("codex".into()),
+            model: Some("gpt-6.1-sol".into()),
+            started_at_ms: Some(1000),
+        });
+        assert_eq!(
+            serde_json::from_value::<SessionSummary>(serde_json::to_value(&session).unwrap())
+                .unwrap(),
+            session
+        );
+        let minimal: SubworkerInfo = serde_json::from_str(r#"{"pid":1,"label":"worker"}"#).unwrap();
+        assert_eq!(
+            minimal,
+            SubworkerInfo {
+                pid: 1,
+                label: "worker".into(),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(minimal).unwrap(),
+            serde_json::json!({"pid":1,"label":"worker"})
         );
     }
 
@@ -1199,6 +1258,7 @@ mod tests {
             source_path: "/p.jsonl".into(),
             updated_at_ms: 999,
             working: false,
+            subworkers: Vec::new(),
             shell_attached: None,
             last_assistant_id: Some("m-rich".into()),
             last_assistant_preview: Some("Summary".into()),

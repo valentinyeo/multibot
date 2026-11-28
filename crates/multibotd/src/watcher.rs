@@ -468,6 +468,7 @@ impl WatchManager {
                                 crate::server_workspaces::ServerWorkspaceIndex::load_default_cached();
                             let ctx = DiscoveryContext {
                                 active_session_ids: &active_ids,
+                                active_session_pids: &pm_c.active_session_pids(),
                                 connected_session_ids: &connected_ids,
                                 metadata: &metadata,
                                 archive: &archive,
@@ -475,6 +476,7 @@ impl WatchManager {
                                 include_archived: true,
                                 server_workspaces: &server_workspaces,
                             };
+                            let mut summaries = Vec::new();
                             for (path, agent) in targets {
                                 if !path.is_file() {
                                     continue;
@@ -496,7 +498,11 @@ impl WatchManager {
                                         && summary.archived && summary.archive_kill_process) {
                                     continue;
                                 }
-                                let _ = out_c.send(ServerEvent::SessionUpdated { session: summary });
+                                summaries.push(summary);
+                            }
+                            crate::subworkers::populate(&mut summaries, &metadata, ctx.active_session_pids);
+                            for session in summaries {
+                                let _ = out_c.send(ServerEvent::SessionUpdated { session });
                             }
                         })
                         .await
@@ -734,6 +740,7 @@ fn emit_session_updated(
     let server_workspaces = crate::server_workspaces::ServerWorkspaceIndex::load_default_cached();
     let ctx = DiscoveryContext {
         active_session_ids: &active_ids,
+        active_session_pids: &process_mgr.active_session_pids(),
         connected_session_ids: &connected_ids,
         metadata: &metadata,
         archive: &archive,
@@ -747,7 +754,12 @@ fn emit_session_updated(
         .and_then(|m| m.modified().ok())
         .map(system_time_ms)
         .unwrap_or_else(now_ms);
-    let summary = summarize_session_by_agent(agent, path, mtime_ms, &ctx);
+    let mut summary = summarize_session_by_agent(agent, path, mtime_ms, &ctx);
+    crate::subworkers::populate(
+        std::slice::from_mut(&mut summary),
+        &metadata,
+        ctx.active_session_pids,
+    );
     if agent == AgentKind::Codex && summary.archived {
         return;
     }

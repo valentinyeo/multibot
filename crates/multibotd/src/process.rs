@@ -213,6 +213,15 @@ impl ProcessManager {
             .collect()
     }
 
+    pub fn active_session_pids(&self) -> HashMap<String, u32> {
+        let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .active
+            .iter()
+            .map(|(id, process)| (id.clone(), process.pid))
+            .collect()
+    }
+
     /// Sessions this daemon holds open, busy or idle-connected.
     ///
     /// A chat nobody is prompting is still a chat the person has open. The desktop lists these,
@@ -1470,6 +1479,7 @@ impl ProcessManager {
             crate::server_workspaces::ServerWorkspaceIndex::load_default_cached();
         let ctx = DiscoveryContext {
             active_session_ids: &active_ids,
+            active_session_pids: &self.active_session_pids(),
             connected_session_ids: &connected_ids,
             metadata: &meta,
             archive: &archive,

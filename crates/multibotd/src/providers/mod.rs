@@ -252,6 +252,7 @@ impl ArchiveStore {
 pub struct DiscoveryContext<'a> {
     /// Sessions with a prompt in flight (`busy == true`).
     pub active_session_ids: &'a HashSet<String>,
+    pub active_session_pids: &'a HashMap<String, u32>,
     /// Sessions this daemon holds open, busy or idle-connected. A chat that is open here is
     /// live even when nothing has written to its transcript for weeks.
     pub connected_session_ids: &'a HashSet<String>,
@@ -348,6 +349,7 @@ pub fn discover_all_sessions_owned(
     );
     let ctx = DiscoveryContext {
         active_session_ids: &none,
+        active_session_pids: &std::collections::HashMap::new(),
         connected_session_ids: &none,
         metadata: &metadata,
         archive: &archive,
@@ -606,6 +608,7 @@ pub fn discover_live_sessions_with_ctx(
     });
     // The transcript limit must never hide a live terminal.
     sessions.extend(shells);
+    crate::subworkers::populate(&mut sessions, ctx.metadata, ctx.active_session_pids);
     sessions.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
     sessions
 }
@@ -836,6 +839,7 @@ pub fn summarize_session(
         source_path: path.to_string_lossy().to_string(),
         updated_at_ms,
         working,
+        subworkers: Vec::new(),
         shell_attached: None,
         last_assistant_id,
         last_assistant_preview,
@@ -3144,6 +3148,7 @@ mod tests {
         let workspaces = ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &ids,
+            active_session_pids: &std::collections::HashMap::new(),
             connected_session_ids: &ids,
             metadata: &metadata,
             archive: &archive,
@@ -3237,6 +3242,7 @@ mod tests {
         let workspaces = ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &ids,
+            active_session_pids: &std::collections::HashMap::new(),
             connected_session_ids: &ids,
             metadata: &metadata,
             archive: &archive,
@@ -3301,6 +3307,7 @@ mod tests {
         let workspaces = ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &none,
+            active_session_pids: &std::collections::HashMap::new(),
             connected_session_ids: &none,
             metadata: &metadata,
             archive: &archive,
@@ -3359,6 +3366,7 @@ mod tests {
         let workspaces = ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &ids,
+            active_session_pids: &std::collections::HashMap::new(),
             connected_session_ids: &ids,
             metadata: &metadata,
             archive: &archive,
@@ -3439,6 +3447,7 @@ mod tests {
             let workspaces = ServerWorkspaceIndex::default();
             let ctx = DiscoveryContext {
                 active_session_ids: &active,
+                active_session_pids: &std::collections::HashMap::new(),
                 connected_session_ids: &none,
                 metadata: &metadata,
                 archive: &archive,
@@ -3504,6 +3513,7 @@ mod tests {
         let workspaces = ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &active,
+            active_session_pids: &std::collections::HashMap::new(),
             connected_session_ids: &none,
             metadata: &metadata,
             archive: &archive,
@@ -3554,6 +3564,7 @@ mod tests {
         let workspaces = ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &none,
+            active_session_pids: &std::collections::HashMap::new(),
             connected_session_ids: &connected,
             metadata: &metadata,
             archive: &archive,
@@ -3577,6 +3588,7 @@ mod tests {
         }
         let ctx = DiscoveryContext {
             active_session_ids: &none,
+            active_session_pids: &std::collections::HashMap::new(),
             connected_session_ids: &none,
             metadata: &metadata,
             archive: &archive,
@@ -4059,6 +4071,7 @@ mod tests {
         let workspaces = crate::server_workspaces::ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &active,
+            active_session_pids: &std::collections::HashMap::new(),
             connected_session_ids: &active,
             metadata: &metadata,
             archive: &archive,
@@ -4437,6 +4450,7 @@ mod tests {
         let server_workspaces = ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &busy,
+            active_session_pids: &std::collections::HashMap::new(),
             connected_session_ids: &connected,
             metadata: &metadata,
             archive: &archive,
@@ -5601,6 +5615,7 @@ mod tests {
         let server_workspaces = ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &active,
+            active_session_pids: &std::collections::HashMap::new(),
             connected_session_ids: &active,
             metadata: &meta,
             archive: &archive,
@@ -6011,6 +6026,7 @@ mod tests {
         let server_workspaces = ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &active,
+            active_session_pids: &std::collections::HashMap::new(),
             connected_session_ids: &active,
             metadata: &meta,
             archive: &archive,
@@ -6220,6 +6236,7 @@ mod tests {
         let server_workspaces = ServerWorkspaceIndex::default();
         let ctx = DiscoveryContext {
             active_session_ids: &active,
+            active_session_pids: &std::collections::HashMap::new(),
             connected_session_ids: &active,
             metadata: &meta,
             archive: &archive,

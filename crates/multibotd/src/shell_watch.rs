@@ -44,14 +44,18 @@ pub fn start(
         let dir = socket_dir();
         let (wake, mut wakes) = mpsc::unbounded_channel();
         let watch_dir = dir.clone();
+        let lease_dir = home.join(".local/state/fleet/leases");
+        let watch_leases = lease_dir.clone();
         let Ok(mut watcher) =
             notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
                 if let Ok(ev) = ev
                     && !matches!(ev.kind, notify::EventKind::Access(_))
-                    && ev
-                        .paths
-                        .iter()
-                        .any(|p| p == &watch_dir || p.parent() == Some(watch_dir.as_path()))
+                    && ev.paths.iter().any(|p| {
+                        p == &watch_dir
+                            || p.parent() == Some(watch_dir.as_path())
+                            || p.starts_with(&watch_leases)
+                            || watch_leases.starts_with(p)
+                    })
                 {
                     let _ = wake.send(());
                 }
@@ -62,6 +66,10 @@ pub fn start(
         if let Some(parent) = dir.parent() {
             let _ = watcher.watch(parent, RecursiveMode::NonRecursive);
         }
+        if let Some(parent) = lease_dir.ancestors().skip(1).find(|p| p.is_dir()) {
+            let _ = watcher.watch(parent, RecursiveMode::NonRecursive);
+        }
+        let mut watched_leases = false;
         let mut watched_dir = false;
         let mut previous = Vec::new();
         let mut attach_retries = 0;
@@ -94,6 +102,11 @@ pub fn start(
                 if !watched_dir && dir.is_dir() {
                     watched_dir = watcher.watch(&dir, RecursiveMode::NonRecursive).is_ok();
                 }
+                if !watched_leases && lease_dir.is_dir() {
+                    watched_leases = watcher
+                        .watch(&lease_dir, RecursiveMode::NonRecursive)
+                        .is_ok();
+                }
                 if refresh {
                     let home = home.clone();
                     let out = out.clone();
@@ -112,6 +125,7 @@ pub fn start(
                                 );
                             let ctx = DiscoveryContext {
                                 active_session_ids: &active,
+                                active_session_pids: &process.active_session_pids(),
                                 connected_session_ids: &connected,
                                 metadata: &metadata,
                                 archive: &archive,
@@ -120,26 +134,26 @@ pub fn start(
                                 server_workspaces: &index,
                             };
                             let sessions = discover_live_sessions_with_ctx(&home, 500, &ctx);
-                            let shells: Vec<_> = sessions
-                                .iter()
-                                .filter(|s| s.agent == multibot_proto::AgentKind::Shell)
-                                .cloned()
-                                .collect();
-                            if shells != old {
-                                let _ = out.send(ServerEvent::Sessions { sessions });
+                            if sessions != old {
+                                let _ = out.send(ServerEvent::Sessions {
+                                    sessions: sessions.clone(),
+                                });
                             }
-                            let _ = tx.send(shells);
+                            let _ = tx.send(sessions);
                         }))
                         .is_err()
                     {
                         return;
                     }
-                    let Ok(shells) = rx.await else { return };
-                    previous = shells;
+                    let Ok(sessions) = rx.await else { return };
+                    previous = sessions;
                     // Live shells need a control client even after the startup grace.
                     // Empty servers return to event-only waiting after bounded retries.
                     if lines.is_none()
-                        && (!previous.is_empty() || (dir.is_dir() && attach_retries < 5))
+                        && (previous
+                            .iter()
+                            .any(|s| s.agent == multibot_proto::AgentKind::Shell)
+                            || (dir.is_dir() && attach_retries < 5))
                     {
                         tokio::time::sleep(std::time::Duration::from_millis(25 << attach_retries))
                             .await;

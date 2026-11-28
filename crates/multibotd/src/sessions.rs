@@ -57,6 +57,7 @@ impl Sessions {
         let home = self.home.clone();
         let active = self.manager.active_session_ids();
         let connected = self.manager.connected_session_ids();
+        let active_pids = self.manager.active_session_pids();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.disk
             .send(Box::new(move || {
@@ -67,6 +68,7 @@ impl Sessions {
                     crate::server_workspaces::ServerWorkspaceIndex::load_default_cached();
                 let ctx = providers::DiscoveryContext {
                     active_session_ids: &active,
+                    active_session_pids: &active_pids,
                     connected_session_ids: &connected,
                     metadata: &metadata,
                     archive: &archive,
