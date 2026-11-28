@@ -1393,6 +1393,11 @@ fn palette_copy_and_reply_use_focused_message_or_latest(cx: &mut TestAppContext)
                 .unwrap()
                 .full_text,
             "Latest reply"
+        );
+    })
+    .unwrap();
+}
+
 /// Left edge of the Command Palette text that reads exactly `needle`.
 fn palette_text_lead(window: &gpui_kit::Window, needle: &str) -> gpui_kit::Pixels {
     let modal = gpui_kit::ElementId::from("palette-modal");
@@ -1465,12 +1470,9 @@ fn palette_search_breadcrumb_headers_and_labels_share_one_leading_edge(cx: &mut 
         });
         window.render_frame(cx);
         assert_eq!(
-            palette_text_lead(
-                window,
-                "Workspaces · Up/Down then Enter · Backspace to return"
-            ),
+            palette_text_lead(window, "Workspaces"),
             header,
-            "the Workspaces breadcrumb must start on the palette lead line"
+            "the Workspaces breadcrumb title must start on the palette lead line"
         );
         assert_eq!(
             palette_text_lead(window, "All"),

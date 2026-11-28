@@ -14,6 +14,7 @@ use gpui_kit::{
     ClipboardItem, Context, Focusable, FontWeight, InteractiveElement, IntoElement, KeyDownEvent,
     MouseButton, ParentElement, Role, ScrollHandle, SharedString, StatefulInteractiveElement,
     Styled, Subscription, TestSupportExt, Window,
+    base::TestTextExt,
     component::{
         Sizable,
         button::Button,
@@ -636,7 +637,7 @@ impl MultibotView {
                                 .text_xs()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme::text_muted())
-                                .child(title),
+                                .child(title.clone().test_text(title)),
                         );
                     }
                     PaletteRow::Session {
@@ -714,7 +715,11 @@ impl MultibotView {
                                                         .text_sm()
                                                         .text_color(theme::text_primary())
                                                         .truncate()
-                                                        .child(title_owned),
+                                                        .child(
+                                                            title_owned
+                                                                .clone()
+                                                                .test_text(title_owned),
+                                                        ),
                                                 ),
                                         )
                                         .child(
@@ -833,7 +838,11 @@ impl MultibotView {
                                                             theme::text_primary()
                                                         })
                                                         .truncate()
-                                                        .child(label_owned),
+                                                        .child(
+                                                            label_owned
+                                                                .clone()
+                                                                .test_text(label_owned),
+                                                        ),
                                                 ),
                                         )
                                         .when(!chord_owned.is_empty(), |el| {
@@ -910,7 +919,11 @@ impl MultibotView {
                                                         .text_sm()
                                                         .text_color(theme::text_primary())
                                                         .truncate()
-                                                        .child(name_owned),
+                                                        .child(
+                                                            name_owned
+                                                                .clone()
+                                                                .test_text(name_owned),
+                                                        ),
                                                 ),
                                         )
                                         .child(
@@ -1141,7 +1154,7 @@ impl MultibotView {
                                             .text_sm()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(theme::text_primary())
-                                            .child(title),
+                                            .child(title.clone().test_text(title)),
                                     )
                                     .when(hibernate, |el| {
                                         el.child(
