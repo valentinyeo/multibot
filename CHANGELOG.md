@@ -8,6 +8,7 @@ This file is embedded in Multibot so Changelog works offline.
 ## Unreleased
 - Open Google sign-in in plain stock Chrome without extra software GPU or automation flags.
 - Keep Done and Hibernated sessions searchable in Ctrl+K (excluding only Dissolved sessions) with Done and Hibernated labels (MBRU-142).
+- Give sidebar sessions vibrant portrait icons matched to their topic, with distinct sibling colors and saved face/color overrides (MBRU-144).
 - Widen Inbox, quiet row borders, hide repeated workspace badges, and show preview text without Markdown formatting (MBRU-143).
 - Format chat URLs, /skills, @bot mentions, inline code, and code blocks with clean, borderless tokens and clickable links (MBRU-126).
 - Unlock model, effort, and permission switching for Antigravity sessions and add GPT-6.1 Sol for Codex (MBRU-139).

@@ -70,6 +70,72 @@ fn open_view(cx: &mut TestAppContext) -> (gpui_kit::AnyWindowHandle, Entity<Mult
 }
 
 #[gpui_kit::test]
+fn session_verticons_are_portrait_in_rows_pins_and_rail(cx: &mut TestAppContext) {
+    let (handle, view) = open_view(cx);
+    cx.update_window(handle, |_, window, cx| {
+        let keys = view.update(cx, |v, cx| {
+            v.sidebar_state.workspace_store = WorkspaceStore::new();
+            v.connection.sessions = sample_sessions();
+            let keys = v
+                .connection
+                .sessions
+                .iter()
+                .map(|session| v.session_key_for(session))
+                .collect::<Vec<_>>();
+            v.sidebar_state.workspace_store.toggle_pin(&keys[0], false);
+            v.set_sidebar_mode_synced(SidebarMode::Open, cx);
+            cx.notify();
+            keys
+        });
+        window.render_frame(cx);
+        let row = window.find("session-0").bounds();
+        let icon = window.find("session-0-verticon").bounds();
+        assert_eq!(icon.size, gpui_kit::size(px(24.0), px(34.0)));
+        assert!(icon.size.height > icon.size.width);
+        assert_eq!(icon.left() - row.left(), px(10.0));
+        assert_eq!(icon.center().y, row.center().y);
+        let pin = window.find("sidebar-pin-0").bounds();
+        let pinned_icon = window.find("sidebar-pin-0-verticon").bounds();
+        assert_eq!(pinned_icon.size, gpui_kit::size(px(28.0), px(40.0)));
+        let subtitle_id = gpui_kit::ElementId::Name(format!("sidebar-subtitle-{}", keys[0]).into());
+        let subtitle = window.find(subtitle_id).bounds();
+        assert!(pinned_icon.top() >= pin.top());
+        assert!(pinned_icon.bottom() < subtitle.top());
+        assert!(subtitle.bottom() <= pin.bottom());
+        for face in 0..24 {
+            view.update(cx, |v, cx| {
+                let meta = v
+                    .sidebar_state
+                    .workspace_store
+                    .session_meta
+                    .entry(keys[1].clone())
+                    .or_default();
+                meta.face = Some(face);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("session-0-verticon").bounds().size,
+                gpui_kit::size(px(24.0), px(34.0)),
+                "face {face}"
+            );
+        }
+        view.update(cx, |v, cx| {
+            v.sidebar_state.show_jump_badges = false;
+            v.set_sidebar_mode_synced(SidebarMode::Collapsed, cx);
+            cx.notify();
+        });
+        window.render_frame(cx);
+        let rail = window.find("sidebar-rail").bounds();
+        let rail_icon = window.find("rail-session-0-verticon").bounds();
+        assert_eq!(rail.size.width, px(56.0));
+        assert_eq!(rail_icon.size, gpui_kit::size(px(24.0), px(34.0)));
+        assert!(f32::from(rail_icon.center().x - rail.center().x).abs() <= 1.0);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn sidebar_subworker_badges_only_show_for_live_workers(cx: &mut TestAppContext) {
     let (handle, view) = open_view(cx);
     cx.update_window(handle, |_, window, cx| {
