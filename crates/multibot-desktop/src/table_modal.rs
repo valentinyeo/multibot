@@ -1166,6 +1166,15 @@ impl MultibotView {
                                 .child(
                                     div()
                                         .id("close-table-modal")
+                                        .tooltip(|window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(
+                                                crate::icons::shortcut_tooltip(
+                                                    "Close",
+                                                    "system.escape",
+                                                ),
+                                            )
+                                            .build(window, cx)
+                                        })
                                         .role(Role::Button)
                                         .test_support()
                                         .px_2()

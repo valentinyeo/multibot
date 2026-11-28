@@ -1026,6 +1026,7 @@ impl crate::app::MultibotView {
                     .icon(lucide_icon(icons::REFRESH_CW, 16.0))
                     .label("Reload")
                     .accessibility_label("Reload Computer View")
+                    .tooltip("Reload")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.reload_computer_view(cx);
                     })),
@@ -1036,6 +1037,7 @@ impl crate::app::MultibotView {
                     .icon(lucide_icon(icons::EXTERNAL_LINK, 16.0))
                     .label("Browser")
                     .accessibility_label("Open in external browser")
+                    .tooltip("Open in browser")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.open_computer_view_externally(cx);
                     })),
@@ -1046,6 +1048,10 @@ impl crate::app::MultibotView {
                     .icon(lucide_icon(icons::X, 12.0))
                     .label("Close")
                     .accessibility_label("Close Computer View")
+                    .tooltip(crate::icons::shortcut_tooltip(
+                        "Close Computer",
+                        "browser.toggle",
+                    ))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.close_computer_view(cx);
                     })),

@@ -10,6 +10,12 @@ updated: 2026-10-03
 
 # Keyboard shortcuts
 
+## Chat & Voice
+
+| Shortcut | Action |
+| --- | --- |
+| Ctrl+Shift+Enter | Force send next queued message immediately (interrupts current turn); with no queue, send the composer draft |
+
 ## Multibot chat tools and links
 
 - Click the tool-call chip to reveal or hide a message's tool rows.
@@ -326,6 +332,7 @@ The search bar stays hidden so the Inbox opens clean. Ctrl+F or / opens and focu
 | Ctrl+K "Chat View: More Menu" | Chat View: open the round three-dot menu next to the title as one grouped panel: Approve, Stop, Terminal, Rename, History, Done, Hibernate, Dissolve, the current Model, End session and Remove from list; Up/Down/Enter or the mouse choose, Esc or a click outside closes |
 | Inbox icon in the chat header | Click the envelope left of the three dots to open the Inbox, same as Alt+I; a blue dot shows while Inbox items wait |
 | Up / Down / Enter in Chat View | Up in an empty message box focuses the newest message; Up/Down move between messages including waiting ones, Enter opens the right-click options, Delete cancels a waiting message, Esc or typing returns to the box |
+| Ctrl+Shift+Enter | Force send next queued message immediately (interrupts current turn); with no queue, send the composer draft |
 | Ctrl+Enter in Chat View | Send your message; while dictating, stops dictation and sends it with the spoken words |
 | Enter / Shift+Enter in Chat View | New line; plain Enter selects an open slash command suggestion or opens the focused message menu |
 | / in Chat View | Suggest Claude or Codex commands and skills; Up/Down, Tab or Enter inserts, Esc closes |

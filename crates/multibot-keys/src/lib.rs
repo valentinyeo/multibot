@@ -57,6 +57,14 @@ pub const SHORTCUTS: &[ShortcutSpec] = &[
         wired: true,
     },
     ShortcutSpec {
+        id: "chat.force_send",
+        display: "Ctrl+Shift+Enter",
+        gpui_key: "ctrl-shift-enter",
+        category: ShortcutCategory::Chat,
+        description: "Force send next queued message immediately (interrupts current turn)",
+        wired: true,
+    },
+    ShortcutSpec {
         id: "chat.newline",
         display: "Enter / Shift+Enter",
         gpui_key: "enter",
@@ -1114,7 +1122,7 @@ mod tests {
             }
         }
 
-        assert_eq!(SHORTCUTS.len(), 103);
+        assert_eq!(SHORTCUTS.len(), 104);
     }
 
     #[test]
@@ -1490,11 +1498,25 @@ mod tests {
         let fullscreen = by_id("view.fullscreen").unwrap();
         assert_eq!(fullscreen.gpui_key, "ctrl-shift-f");
         assert!(fullscreen.wired);
-        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 74);
+        assert_eq!(SHORTCUTS.iter().filter(|s| s.wired).count(), 75);
         assert_eq!(by_id("chat.send").unwrap().gpui_key, "ctrl-enter");
         assert_eq!(by_id("chat.newline").unwrap().gpui_key, "enter");
         assert!(!by_id("browser.close_tab").unwrap().wired);
         assert!(!by_id("chat.steer").unwrap().wired);
         assert!(by_gpui_key("ctrl-shift-j").is_none());
     }
+}
+
+#[test]
+fn force_send_contract_is_wired_and_documented() {
+    let shortcut = by_id("chat.force_send").unwrap();
+    assert_eq!(shortcut.display, "Ctrl+Shift+Enter");
+    assert_eq!(shortcut.gpui_key, "ctrl-shift-enter");
+    assert_eq!(shortcut.category, ShortcutCategory::Chat);
+    assert_eq!(
+        shortcut.description,
+        "Force send next queued message immediately (interrupts current turn)"
+    );
+    assert!(shortcut.wired);
+    assert!(include_str!("../../../docs/keyboard-shortcuts.md").contains(shortcut.display));
 }

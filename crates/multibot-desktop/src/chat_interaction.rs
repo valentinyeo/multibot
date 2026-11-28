@@ -1061,7 +1061,7 @@ impl MultibotView {
                                         .xsmall()
                                         .icon(lucide_icon(icons::CHEVRON_UP, 14.0))
                                         .accessibility_label("Previous match")
-                                        .tooltip("Previous match")
+                                        .tooltip("Previous match · Shift+Enter")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             if let Some(idx) = this.chat_state.find_prev() {
                                                 this.chat_state.scroll_handle.scroll_to_item(idx);
@@ -1074,7 +1074,7 @@ impl MultibotView {
                                         .xsmall()
                                         .icon(lucide_icon(icons::CHEVRON_DOWN, 14.0))
                                         .accessibility_label("Next match")
-                                        .tooltip("Next match")
+                                        .tooltip("Next match · Enter")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             if let Some(idx) = this.chat_state.find_next() {
                                                 this.chat_state.scroll_handle.scroll_to_item(idx);
@@ -1087,6 +1087,10 @@ impl MultibotView {
                                         .xsmall()
                                         .icon(lucide_icon(icons::X, 12.0))
                                         .accessibility_label("Close find bar")
+                                        .tooltip(crate::icons::shortcut_tooltip(
+                                            "Close search",
+                                            "system.escape",
+                                        ))
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.chat_state.close_find();
                                             this.focus_active_surface_default(window, cx);

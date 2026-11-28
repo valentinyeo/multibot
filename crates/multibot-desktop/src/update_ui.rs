@@ -547,6 +547,7 @@ impl MultibotView {
                             .rounded(RADIUS_CHIP)
                             .icon(lucide_icon(icons::X, 12.0))
                             .accessibility_label("Dismiss update")
+                            .tooltip("Dismiss update")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.dismiss_current_update(cx);
                                 this.focus_active_surface_default(window, cx);
@@ -836,6 +837,7 @@ impl MultibotView {
                                     .rounded(RADIUS_CHIP)
                                     .icon(lucide_icon(icons::X, 12.0))
                                     .accessibility_label("Dismiss update")
+                                    .tooltip("Dismiss update")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.dismiss_current_update(cx);
                                         this.focus_active_surface_default(window, cx);

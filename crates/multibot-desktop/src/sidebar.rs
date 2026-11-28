@@ -609,7 +609,10 @@ impl MultibotView {
             .bg(theme::bg_surface())
             .rounded(RADIUS_CHIP)
             .label(active_label.to_string())
-            .tooltip("Switch workspace (Alt+Shift+W)")
+            .tooltip(crate::icons::shortcut_tooltip(
+                "Switch workspace",
+                "workspace.switcher",
+            ))
             .child(div().flex_1())
             .child(lucide_icon(icons::CHEVRON_DOWN, 12.0))
             .on_click(cx.listener(|this, _, window, cx| {
@@ -1028,6 +1031,15 @@ impl MultibotView {
                         el.child(
                             div()
                                 .id("sidebar-unread-only-pill")
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(
+                                        crate::icons::shortcut_tooltip(
+                                            "Show all messages",
+                                            "inbox.unread_only",
+                                        ),
+                                    )
+                                    .build(window, cx)
+                                })
                                 .role(Role::Button)
                                 .test_support()
                                 .px_2p5()

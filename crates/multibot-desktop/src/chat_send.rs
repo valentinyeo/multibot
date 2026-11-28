@@ -198,6 +198,15 @@ impl MultibotView {
     }
 
     pub(crate) fn send_current_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.send_current_prompt_with_force(false, window, cx);
+    }
+
+    pub(crate) fn send_current_prompt_with_force(
+        &mut self,
+        force: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.apply_pending_draft(window, cx);
         self.sync_chat_interaction_session(cx);
         if self
@@ -230,7 +239,11 @@ impl MultibotView {
         }
         let raw = self.bound_mention_prompt(cx);
         let trimmed = raw.trim().to_string();
-        if trimmed.is_empty() {
+        if trimmed.is_empty()
+            && self.chat_state.pending_attachments.is_empty()
+            && self.chat_state.quoted_snippets.is_empty()
+            && self.chat_state.reply_quote.is_none()
+        {
             return;
         }
         let Some(session) = self.selection.selected_session.clone() else {
@@ -281,7 +294,8 @@ impl MultibotView {
         let snippets = std::mem::take(&mut self.chat_state.quoted_snippets);
         self.chat_state.selection_quote_popover = None;
         let expanded = compose_snippet_quotes(&trimmed, &snippets);
-        let payload = compose_quoted_reply(quote.as_ref().map(|q| q.full_text.as_str()), &expanded);
+        let mut payload =
+            compose_quoted_reply(quote.as_ref().map(|q| q.full_text.as_str()), &expanded);
         let quoted_id = quote.as_ref().map(|q| q.message_id.clone());
 
         self.inputs.prompt_input.update(cx, |state, cx| {
@@ -290,6 +304,13 @@ impl MultibotView {
         self.slash_picker_state.close();
         let staged = std::mem::take(&mut self.chat_state.pending_attachments);
 
+        if payload.is_empty() && !staged.is_empty() {
+            payload = staged
+                .iter()
+                .map(|attachment| attachment.inserted_token.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
         if payload.is_empty() {
             return;
         }
@@ -342,6 +363,11 @@ impl MultibotView {
                     Ok(Ok(replacements)) => {
                         let final_payload =
                             substitute_uploaded_attachment_paths(&payload, &replacements);
+                        let outbox_key = multibot_core::outbox::ChatOutbox::session_key(
+                            &session_host,
+                            session.agent,
+                            &session.id,
+                        );
                         this.dispatch_text_prompt_for_session(
                             &session_host,
                             session,
@@ -349,6 +375,9 @@ impl MultibotView {
                             quoted_id,
                             cx,
                         );
+                        if force {
+                            this.force_send_first_for_key(&outbox_key, cx);
+                        }
                     }
                     Ok(Err(err)) => {
                         this.restore_failed_upload_draft(
@@ -381,7 +410,15 @@ impl MultibotView {
             return;
         }
 
+        let outbox_key = multibot_core::outbox::ChatOutbox::session_key(
+            &session_host,
+            session.agent,
+            &session.id,
+        );
         self.dispatch_text_prompt_for_session(&session_host, session, payload, quoted_id, cx);
+        if force {
+            self.force_send_first_for_key(&outbox_key, cx);
+        }
     }
 
     pub(crate) fn restore_failed_upload_draft(

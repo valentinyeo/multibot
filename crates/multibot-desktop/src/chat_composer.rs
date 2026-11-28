@@ -343,7 +343,10 @@ impl MultibotView {
                             .small()
                             .icon(lucide_icon(icons::SEND, 14.0))
                             .accessibility_label("Send now")
-                            .tooltip("Send now")
+                            .tooltip(crate::icons::shortcut_tooltip(
+                                "Send now",
+                                "chat.force_send",
+                            ))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.force_send_queued_entry(&force_id, cx);
                             })),
@@ -449,6 +452,11 @@ impl MultibotView {
                                 .child(
                                     div()
                                         .id("dismiss-quote-btn")
+                                        .tooltip(|window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(
+                                                crate::icons::shortcut_tooltip("Cancel reply", "system.escape"),
+                                            ).build(window, cx)
+                                        })
                                         .role(Role::Button)
                                         .test_support()
                                         .px_2()
@@ -481,7 +489,7 @@ impl MultibotView {
                         .gap_2().items_center().px_2p5().py_1().rounded(RADIUS_CHIP)
                         .bg(rgb(0x1E293B)).text_xs().text_color(theme::text_secondary())
                         .child(format!("« {} »", snippet.preview))
-                        .child(div().id(format!("remove-quote-{id}")).role(Role::Button).test_support()
+                        .child(div().id(format!("remove-quote-{id}")).tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Remove").build(window, cx)).role(Role::Button).test_support()
                             .cursor_pointer().child(lucide_icon(icons::X, 12.0))
                             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
@@ -531,6 +539,9 @@ impl MultibotView {
                             .child(
                                 div()
                                     .id(SharedString::from(format!("remove-att-{att_idx}")))
+                                    .tooltip(|window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new("Remove").build(window, cx)
+                                    })
                                     .role(Role::Button)
                                     .test_support()
                                     .cursor_pointer()
@@ -594,6 +605,10 @@ impl MultibotView {
                         .child(
                             div()
                                 .id("attach-file-btn")
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new("Attach, model & permissions")
+                                        .build(window, cx)
+                                })
                                 .role(Role::Button)
                                 .test_support()
                                 .w(px(32.0))
@@ -650,7 +665,7 @@ impl MultibotView {
                                 .bg(rgb(0x262626))
                                 .text_color(rgb(0xA3A3A3))
                                 .accessibility_label("Voice dictation")
-                                .tooltip(self.voice.error.clone().unwrap_or_else(|| "Start / stop dictation · Ctrl+D / Ctrl+Shift+Space · Esc cancels".into()))
+                                .tooltip(format!("{} / {}", crate::icons::shortcut_tooltip("Start / stop dictation", "chat.dictation_inline"), multibot_keys::by_id("chat.dictation").unwrap().display))
                                 .w(px(32.0))
                                 .flex_shrink_0()
                                 .icon(lucide_icon(icons::MIC, 16.0))
@@ -683,7 +698,7 @@ impl MultibotView {
                                 .text_color(rgb(0xD4D4D4))
                                 .icon(lucide_icon(icons::ARROW_UP, 16.0))
                                 .accessibility_label(if is_working { "Queue" } else { "Send" })
-                                .tooltip(if is_working { "Queue message · Ctrl+Enter" } else { "Send message · Ctrl+Enter" })
+                                .tooltip(if is_working { format!("{} ({} to force send)", crate::icons::shortcut_tooltip("Queue message", "chat.send"), multibot_keys::by_id("chat.force_send").unwrap().display) } else { crate::icons::shortcut_tooltip("Send message", "chat.send") })
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.send_current_prompt(window, cx);
                                 })),

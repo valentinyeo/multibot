@@ -9838,3 +9838,140 @@ fn test_round7_chat_find_slash_picker_and_message_nav_restore_focus_after_modals
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+fn force_send_shortcut_targets_first_active_queued_message_in_both_focus_contexts(
+    cx: &mut TestAppContext,
+) {
+    let spec = multibot_keys::by_id("chat.force_send").unwrap();
+    assert!(spec.wired);
+    assert_eq!(spec.display, "Ctrl+Shift+Enter");
+    assert_eq!(spec.gpui_key, "ctrl-shift-enter");
+    let (handle, view) = open_test_view_with_entity(cx);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let active = make_session("force-active", AgentKind::Claude, "Active", true);
+            let other = make_session("force-other", AgentKind::Claude, "Other", true);
+            v.connection.sessions = vec![active.clone(), other.clone()];
+            v.connection.daemon_tx = Some(tx);
+            v.select_session(active.clone(), cx);
+            v.send_or_queue_prompt(&other, "other".into(), "leave queued".into());
+            v.send_or_queue_prompt(&active, "first".into(), "first queued".into());
+            v.send_or_queue_prompt(&active, "second".into(), "second queued".into());
+            v.inputs.prompt_input.update(cx, |input, cx| {
+                input.set_value("keep draft", window, cx);
+                input.focus(window, cx);
+            });
+        });
+        while rx.try_recv().is_ok() {}
+        window.render_frame(cx);
+        window.press("ctrl-shift-enter", cx);
+        assert!(matches!(rx.try_recv(), Ok(ClientRequest::InterruptSession { session_id, .. }) if session_id == "force-active"));
+        assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "first queued"));
+        assert_eq!(view.read(cx).inputs.prompt_input.read(cx).value().as_ref(), "keep draft");
+        view.update(cx, |v, cx| v.focus_chat_panel(window, cx));
+        window.render_frame(cx);
+        window.press("ctrl-shift-enter", cx);
+        assert!(matches!(rx.try_recv(), Ok(ClientRequest::InterruptSession { session_id, .. }) if session_id == "force-active"));
+        assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "second queued"));
+        assert_eq!(view.read(cx).outbox.chat_outbox.entries.len(), 1);
+        assert_eq!(view.read(cx).outbox.chat_outbox.entries[0].text, "leave queued");
+        window.press("ctrl-shift-enter", cx);
+        assert!(matches!(rx.try_recv(), Ok(ClientRequest::InterruptSession { .. })));
+        assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "keep draft"));
+        assert!(view.read(cx).inputs.prompt_input.read(cx).value().is_empty());
+    }).unwrap();
+}
+
+#[gpui_kit::test]
+fn force_send_shortcut_respects_surfaces_modals_and_shells(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_view_with_entity(cx);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let session = make_session("force-guard", AgentKind::Claude, "Guard", true);
+            v.connection.sessions = vec![session.clone()];
+            v.connection.daemon_tx = Some(tx);
+            v.select_session(session.clone(), cx);
+            v.send_or_queue_prompt(&session, "queued".into(), "stay queued".into());
+        });
+        while rx.try_recv().is_ok() {}
+        view.update(cx, |v, cx| {
+            v.main_surface = MainSurface::Inbox;
+            v.force_send_next_queued(window, cx);
+            v.main_surface = MainSurface::Chat;
+            v.active_modal = ActiveModal::Shortcuts;
+            v.force_send_next_queued(window, cx);
+            v.active_modal = ActiveModal::None;
+            v.selection.selected_session.as_mut().unwrap().agent = AgentKind::Shell;
+            v.force_send_next_queued(window, cx);
+        });
+        assert!(rx.try_recv().is_err());
+        assert_eq!(view.read(cx).outbox.chat_outbox.entries.len(), 1);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn force_send_idle_draft_and_palette_command_use_registered_shortcut(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_view_with_entity(cx);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let session = make_session("force-idle", AgentKind::Claude, "Idle", false);
+            v.connection.sessions = vec![session.clone()];
+            v.connection.daemon_tx = Some(tx);
+            v.select_session(session, cx);
+            let command = v.build_palette_command_catalog(now_unix_ms()).into_iter()
+                .find(|command| command.id == "pal-cmd-force-send").unwrap();
+            assert_eq!(command.label, "Force Send Queued Message");
+            assert_eq!(command.chord, multibot_keys::by_id("chat.force_send").unwrap().display);
+            v.inputs.prompt_input.update(cx, |input, cx| {
+                input.set_value("idle draft", window, cx);
+                input.focus(window, cx);
+            });
+        });
+        while rx.try_recv().is_ok() {}
+        window.render_frame(cx);
+        window.press("ctrl-shift-enter", cx);
+        assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text == "idle draft"));
+        assert!(rx.try_recv().is_err(), "idle sends must not interrupt or duplicate");
+        window.press("ctrl-shift-enter", cx);
+        assert!(rx.try_recv().is_err(), "empty composer must not send");
+    }).unwrap();
+}
+
+#[gpui_kit::test]
+fn force_send_accepts_attachment_or_reply_without_typed_text(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_view_with_entity(cx);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let session = make_session("force-content", AgentKind::Claude, "Content", true);
+            v.connection.sessions = vec![session.clone()];
+            v.connection.daemon_tx = Some(tx);
+            v.select_session(session, cx);
+            v.apply_pending_draft(window, cx);
+            v.chat_state.pending_attachments.push(crate::chat_view::StagedAttachment {
+                path: std::path::PathBuf::from("/tmp/force-attachment.txt"),
+                is_image: false,
+                size_bytes: 3,
+                inserted_token: "/tmp/force-attachment.txt".into(),
+            });
+        });
+        while rx.try_recv().is_ok() {}
+        view.update(cx, |v, cx| v.force_send_next_queued(window, cx));
+        assert!(matches!(rx.try_recv(), Ok(ClientRequest::InterruptSession { .. })));
+        assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text.contains("/tmp/force-attachment.txt")));
+        view.update(cx, |v, cx| {
+            v.chat_state.reply_quote = Some(crate::chat_view::ReplyQuote {
+                message_id: "quoted".into(), preview: "Quoted reply".into(), full_text: "Quoted reply".into(),
+            });
+            v.force_send_next_queued(window, cx);
+        });
+        assert!(matches!(rx.try_recv(), Ok(ClientRequest::InterruptSession { .. })));
+        assert!(matches!(rx.try_recv(), Ok(ClientRequest::SendPrompt { text, .. }) if text.contains("Quoted reply")));
+        assert!(rx.try_recv().is_err());
+    }).unwrap();
+}

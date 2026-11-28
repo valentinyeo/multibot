@@ -444,6 +444,10 @@ impl MultibotView {
         ws_rail = ws_rail.child(
             div()
                 .id("ws-pill-starred")
+                .tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new("Open Starred workspace")
+                        .build(window, cx)
+                })
                 .role(Role::Button)
                 .test_support()
                 .w(px(28.0))
@@ -641,6 +645,10 @@ impl MultibotView {
                     .icon(lucide_icon(icons::COMMAND, 16.0))
                     .label("K")
                     .accessibility_label("Command palette")
+                    .tooltip(crate::icons::shortcut_tooltip(
+                        "Command Palette",
+                        "palette.open",
+                    ))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_palette(window, cx);
                     })),
@@ -649,6 +657,12 @@ impl MultibotView {
                 el.child(
                     div()
                         .id("sidebar-inbox-btn")
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(
+                                crate::icons::shortcut_tooltip("Inbox", "inbox.open"),
+                            )
+                            .build(window, cx)
+                        })
                         .role(Role::Button)
                         .test_support()
                         .w(px(32.0))

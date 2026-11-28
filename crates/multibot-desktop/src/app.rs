@@ -629,7 +629,7 @@ impl MultibotView {
                             )
                             .icon(lucide_icon(icons::INBOX, 16.0))
                             .accessibility_label("Inbox")
-                            .tooltip("Inbox · Alt+I")
+                            .tooltip(crate::icons::shortcut_tooltip("Inbox", "inbox.open"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if this.table_modal_state.is_open() {
                                     this.table_modal_state.close();
@@ -655,7 +655,7 @@ impl MultibotView {
                             )
                             .icon(lucide_icon(icons::MORE_HORIZONTAL, 16.0))
                             .accessibility_label("Chat menu")
-                            .tooltip("Chat menu")
+                            .tooltip(crate::icons::shortcut_tooltip("Chat menu", "palette.open"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if let Some(session) = &this.selection.selected_session {
                                     this.open_palette_tab_context(
@@ -813,7 +813,9 @@ impl Render for MultibotView {
                 el.child(self.render_chat_info(cx))
             })
             .when_some(self.render_table_modal(cx), |el, modal| el.child(modal))
-            .when_some(self.render_image_viewer(window, cx), |el, modal| el.child(modal))
+            .when_some(self.render_image_viewer(window, cx), |el, modal| {
+                el.child(modal)
+            })
     }
 }
 

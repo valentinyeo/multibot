@@ -796,7 +796,7 @@ impl MultibotView {
                                                     .small()
                                                     .icon(lucide_icon(icons::SQUARE_FILLED, 12.0))
                                                     .accessibility_label("End shell")
-                                                    .tooltip("End shell")
+                                                    .tooltip("Kill shell")
                                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                                         cx.stop_propagation()
                                                     })

@@ -180,3 +180,63 @@ mod tests {
         }
     }
 }
+
+/// Shortcut labels come from the same registry as F1 and key bindings.
+pub(crate) fn shortcut_tooltip(label: &str, shortcut_id: &str) -> String {
+    let shortcut = multibot_keys::by_id(shortcut_id).expect("unknown tooltip shortcut");
+    assert!(
+        shortcut.wired,
+        "tooltip shortcut must be wired: {shortcut_id}"
+    );
+    format!("{label} · {}", shortcut.display)
+}
+
+#[cfg(test)]
+mod tooltip_tests {
+    #[test]
+    fn shortcut_tooltips_use_wired_registry_entries() {
+        assert_eq!(
+            super::shortcut_tooltip("Send now", "chat.force_send"),
+            "Send now · Ctrl+Shift+Enter"
+        );
+        for source in [
+            include_str!("app.rs"),
+            include_str!("chat_composer.rs"),
+            include_str!("sidebar.rs"),
+            include_str!("sidebar_rows.rs"),
+            include_str!("chat_interaction.rs"),
+            include_str!("chat_blocks.rs"),
+            include_str!("chat_info.rs"),
+            include_str!("table_modal.rs"),
+            include_str!("settings.rs"),
+            include_str!("computer_view.rs"),
+            include_str!("terminal_pane.rs"),
+            include_str!("palette.rs"),
+            include_str!("chat_view.rs"),
+            include_str!("update_ui.rs"),
+        ] {
+            for button in source.split("Button::new(").skip(1) {
+                let before_click = button.split(".on_click").next().unwrap();
+                if before_click.contains(".icon(lucide_icon(")
+                    && !before_click.contains(".when(selected")
+                {
+                    assert!(
+                        before_click.contains(".tooltip("),
+                        "icon button without tooltip: {before_click}"
+                    );
+                }
+            }
+            for call in source.split("shortcut_tooltip(").skip(1) {
+                let args: Vec<_> = call.split('"').take(5).collect();
+                let id = args[3];
+                let spec =
+                    multibot_keys::by_id(id).unwrap_or_else(|| panic!("unknown tooltip ID: {id}"));
+                assert!(spec.wired, "unwired tooltip ID: {id}");
+                assert_eq!(
+                    super::shortcut_tooltip(args[1], id),
+                    format!("{} · {}", args[1], spec.display)
+                );
+            }
+        }
+    }
+}

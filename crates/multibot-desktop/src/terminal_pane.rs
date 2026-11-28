@@ -1373,6 +1373,7 @@ impl crate::app::MultibotView {
                             .icon(lucide_icon(icons::TRASH_2, 16.0))
                             .label("Clear")
                             .accessibility_label("Clear terminal")
+                            .tooltip("Clear terminal")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.clear_terminal_pane(cx);
                             })),
@@ -1383,6 +1384,7 @@ impl crate::app::MultibotView {
                             .icon(lucide_icon(icons::REFRESH_CW, 16.0))
                             .label("Reconnect")
                             .accessibility_label("Reconnect terminal")
+                            .tooltip("Restart terminal")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.reconnect_terminal_pane(cx);
                             })),
@@ -1393,6 +1395,10 @@ impl crate::app::MultibotView {
                             .icon(lucide_icon(icons::X, 12.0))
                             .label("Close")
                             .accessibility_label("Close terminal")
+                            .tooltip(crate::icons::shortcut_tooltip(
+                                "Close terminal",
+                                "view.chat_terminal_toggle",
+                            ))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.close_terminal_pane(cx);
                             })),

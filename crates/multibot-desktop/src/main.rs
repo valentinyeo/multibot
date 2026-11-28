@@ -29,18 +29,18 @@ mod voice;
 
 use app::{
     ArchiveSession, BrowseCommands, CaptureBrowserPane, CloseOverlay, CopyLatestCodeBlock,
-    DeleteSession, FindInChat, FocusBrowserPane, FontZoomIn, FontZoomOut, FontZoomReset, InboxNext,
-    InboxNextSplit, InboxPrev, InboxPrevSplit, JumpSession1, JumpSession2, JumpSession3,
-    JumpSession4, JumpSession5, JumpSession6, JumpSession7, JumpSession8, JumpSession9,
-    JumpWorkspace1, JumpWorkspace2, JumpWorkspace3, JumpWorkspace4, JumpWorkspace5, JumpWorkspace6,
-    JumpWorkspace7, JumpWorkspace8, JumpWorkspace9, MarkSessionUnread, MoveSessionDown,
-    MoveSessionUp, MoveSessionWaiting, MultibotView, NewSession, NewWindow, NextSession,
-    NextWorkspace, OpenDissolved, OpenDone, OpenHibernated, OpenInbox, OpenPalette, OpenShortcuts,
-    OpenWorkspaces, PrevSession, PrevWorkspace, ReconnectSession, RemindSession,
-    RenameActiveSession, ReopenClosedSession, SnoozeWorkspace, ToggleBrowserPane, ToggleFavorite,
-    ToggleFullscreen, ToggleGroup, ToggleHibernateMode, ToggleInbox, ToggleSettings, ToggleSidebar,
-    ToggleTerminal, ToggleUnreadOnly, UndoWaiting, VoiceDictation, WorkspaceViewAll,
-    WorkspaceViewFavorites, WorkspaceViewFrequent,
+    DeleteSession, FindInChat, FocusBrowserPane, FontZoomIn, FontZoomOut, FontZoomReset,
+    ForceSendQueued, InboxNext, InboxNextSplit, InboxPrev, InboxPrevSplit, JumpSession1,
+    JumpSession2, JumpSession3, JumpSession4, JumpSession5, JumpSession6, JumpSession7,
+    JumpSession8, JumpSession9, JumpWorkspace1, JumpWorkspace2, JumpWorkspace3, JumpWorkspace4,
+    JumpWorkspace5, JumpWorkspace6, JumpWorkspace7, JumpWorkspace8, JumpWorkspace9,
+    MarkSessionUnread, MoveSessionDown, MoveSessionUp, MoveSessionWaiting, MultibotView,
+    NewSession, NewWindow, NextSession, NextWorkspace, OpenDissolved, OpenDone, OpenHibernated,
+    OpenInbox, OpenPalette, OpenShortcuts, OpenWorkspaces, PrevSession, PrevWorkspace,
+    ReconnectSession, RemindSession, RenameActiveSession, ReopenClosedSession, SnoozeWorkspace,
+    ToggleBrowserPane, ToggleFavorite, ToggleFullscreen, ToggleGroup, ToggleHibernateMode,
+    ToggleInbox, ToggleSettings, ToggleSidebar, ToggleTerminal, ToggleUnreadOnly, UndoWaiting,
+    VoiceDictation, WorkspaceViewAll, WorkspaceViewFavorites, WorkspaceViewFrequent,
 };
 use gpui_kit::{
     App, AppContext, Bounds, KeyBinding, Pixels, TitlebarOptions, WindowBounds, WindowOptions, px,
@@ -87,6 +87,8 @@ fn configure_gpu_env_before_gpui(settings: &MultibotSettings) {
 pub fn bind_multibot_keys(cx: &mut App) {
     cx.bind_keys([
         // Slice 1 (20 bindings)
+        KeyBinding::new("ctrl-shift-enter", ForceSendQueued, None),
+        KeyBinding::new("ctrl-shift-enter", ForceSendQueued, Some("Input")),
         KeyBinding::new("ctrl-k", OpenPalette, None),
         KeyBinding::new("ctrl-shift-k", OpenPalette, None),
         KeyBinding::new("alt-i", OpenInbox, None),

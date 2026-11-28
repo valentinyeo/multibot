@@ -803,13 +803,21 @@ impl MultibotView {
                                                     .xsmall()
                                                     .icon(lucide_icon(icons::X, 12.0))
                                                     .accessibility_label("Close settings")
-                                                    .on_click(cx.listener(|this, _, window, cx| {
-                                                        this.set_main_surface(
-                                                            crate::state::MainSurface::Chat,
-                                                        );
-                                                        this.focus_active_surface_default(window, cx);
-                                                        cx.notify();
-                                                    })),
+                                                    .tooltip(crate::icons::shortcut_tooltip(
+                                                        "Close",
+                                                        "system.escape",
+                                                    ))
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.set_main_surface(
+                                                                crate::state::MainSurface::Chat,
+                                                            );
+                                                            this.focus_active_surface_default(
+                                                                window, cx,
+                                                            );
+                                                            cx.notify();
+                                                        },
+                                                    )),
                                             ),
                                     )
                                     .child(

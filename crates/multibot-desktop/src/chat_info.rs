@@ -161,7 +161,10 @@ impl MultibotView {
                                     .xsmall()
                                     .icon(lucide_icon(icons::X, 14.0))
                                     .accessibility_label("Close")
-                                    .tooltip("Close · Esc")
+                                    .tooltip(crate::icons::shortcut_tooltip(
+                                        "Close",
+                                        "system.escape",
+                                    ))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.active_modal = ActiveModal::None;
                                         this.focus_active_surface_default(window, cx);

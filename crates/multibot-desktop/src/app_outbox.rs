@@ -335,6 +335,47 @@ impl MultibotView {
         Some(entry)
     }
 
+    pub(crate) fn force_send_next_queued(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.main_surface != MainSurface::Chat
+            || self.active_modal != ActiveModal::None
+            || self.table_modal_state.is_open()
+            || self.chat_state.image_viewer.is_some()
+        {
+            return;
+        }
+        let Some(session) = self.selection.selected_session.as_ref() else {
+            return;
+        };
+        if session.agent == AgentKind::Shell {
+            return;
+        }
+        let key = ChatOutbox::session_key(self.active_session_host(), session.agent, &session.id);
+        if let Some(id) = self.first_queued_entry_id(&key) {
+            self.force_send_queued_entry(&id, cx);
+            return;
+        }
+        self.send_current_prompt_with_force(true, window, cx);
+    }
+
+    pub(crate) fn force_send_first_for_key(&mut self, key: &str, cx: &mut Context<Self>) {
+        if let Some(id) = self.first_queued_entry_id(key) {
+            self.force_send_queued_entry(&id, cx);
+        }
+    }
+
+    fn first_queued_entry_id(&self, key: &str) -> Option<String> {
+        let shared = self.outbox.shared_chat_outbox.lock().ok();
+        let outbox = shared
+            .as_ref()
+            .map(|s| &s.outbox)
+            .unwrap_or(&self.outbox.chat_outbox);
+        outbox
+            .entries
+            .iter()
+            .find(|entry| entry.session_key == key)
+            .map(|entry| entry.id.clone())
+    }
+
     pub(crate) fn force_send_queued_entry(&mut self, id: &str, cx: &mut Context<Self>) {
         let entry = self
             .outbox

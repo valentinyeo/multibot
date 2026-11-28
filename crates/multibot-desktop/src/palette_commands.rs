@@ -395,6 +395,11 @@ impl MultibotView {
                         };
                         self.start_account_job(job, cx);
                     }
+                    "pal-cmd-force-send" => {
+                        if let Some(window) = window.as_deref_mut() {
+                            self.force_send_next_queued(window, cx);
+                        }
+                    }
                     "pal-cmd-inbox" => {
                         self.sidebar_state.rename = None;
                         self.sidebar_state.new_workspace_draft = None;

@@ -33,6 +33,19 @@ impl MultibotView {
                 global: true,
             },
             PaletteCommandSpec {
+                id: "pal-cmd-force-send".into(),
+                label: "Force Send Queued Message".into(),
+                chord: multibot_keys::by_id("chat.force_send")
+                    .unwrap()
+                    .display
+                    .into(),
+                category: PaletteCategory::Sessions,
+                destructive: false,
+                aliases: vec!["interrupt".into(), "send now".into(), "queue".into()],
+                tab_context: true,
+                global: true,
+            },
+            PaletteCommandSpec {
                 id: "pal-cmd-switch-provider".into(),
                 label: "Session: Switch provider / harness".into(),
                 chord: String::new(),

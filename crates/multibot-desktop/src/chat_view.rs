@@ -396,6 +396,10 @@ impl MultibotView {
                             .flex()
                             .items_center()
                             .gap_1()
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new("Go to replied message")
+                                    .build(window, cx)
+                            })
                             .child(lucide_icon(icons::CORNER_DOWN_LEFT, 14.0))
                             .child(div().min_w_0().truncate().child(pq.preview.clone())),
                     );
@@ -938,6 +942,10 @@ impl MultibotView {
                 .gap_1p5();
             let activity_row = h_flex()
                 .id("chat-live-activity")
+                .tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new("Expand / collapse live steps")
+                        .build(window, cx)
+                })
                 .role(Role::Button)
                 .aria_label("Show current activity")
                 .aria_expanded(expanded)
@@ -1259,6 +1267,10 @@ impl MultibotView {
                         el.child(
                             div()
                                 .id("chat-jump-to-bottom-btn")
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new("Scroll to bottom")
+                                        .build(window, cx)
+                                })
                                 .role(Role::Button)
                                 .test_support()
                                 .absolute()

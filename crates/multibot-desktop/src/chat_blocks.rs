@@ -13,6 +13,10 @@ impl MultibotView {
         let label = format!("{count} tool call{}", if count == 1 { "" } else { "s" });
         h_flex()
             .id(SharedString::from(format!("tool-cluster-{msg_idx}")))
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new("Expand / collapse tool calls")
+                    .build(window, cx)
+            })
             .role(Role::Button)
             .aria_label(label.clone())
             .aria_expanded(expanded)
@@ -208,6 +212,10 @@ impl MultibotView {
                     )))
                     .role(Role::Button)
                     .aria_expanded(is_expanded)
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("Expand / collapse tool details")
+                            .build(window, cx)
+                    })
                     .test_support()
                     .w_full()
                     .px_3()
@@ -823,6 +831,10 @@ impl MultibotView {
                 h_flex().w_full().justify_between().items_center().child(
                     div()
                         .id("chat-todo-pill")
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("Expand / collapse tasks")
+                                .build(window, cx)
+                        })
                         .role(Role::Button)
                         .test_support()
                         .px_3()
@@ -956,6 +968,7 @@ impl MultibotView {
                     .icon(lucide_icon(icons::X, 16.0))
                     .rounded(RADIUS_CHIP)
                     .accessibility_label("Close image viewer")
+                    .tooltip(crate::icons::shortcut_tooltip("Close", "system.escape"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.chat_state.image_viewer = None;
                         cx.notify();

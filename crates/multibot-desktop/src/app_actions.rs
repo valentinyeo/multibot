@@ -5,6 +5,7 @@ actions!(
     [
         // Slice 1 (existing 19 actions)
         OpenPalette,
+        ForceSendQueued,
         OpenWorkspaces,
         OpenInbox,
         ToggleInbox,
@@ -171,6 +172,9 @@ impl MultibotView {
         // =================================================================
         // Slice 1 Actions
         // =================================================================
+        .on_action(cx.listener(|this, _: &ForceSendQueued, window, cx| {
+            this.force_send_next_queued(window, cx);
+        }))
         .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
             if this.table_modal_state.is_open() {
                 this.table_modal_state.close();
