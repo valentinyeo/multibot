@@ -1,4 +1,5 @@
 use super::*;
+use gpui_kit::base::TestTextExt;
 
 impl MultibotView {
     pub(crate) fn composer_options_for(&self, session: &SessionSummary) -> Option<SessionOptions> {

@@ -2,6 +2,7 @@ use crate::{
     app::MultibotView,
     theme::{self, RADIUS_MODAL, RADIUS_ROW},
 };
+use gpui_kit::base::TestTextExt;
 use gpui_kit::{
     AnyElement, Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Role,
     SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window,

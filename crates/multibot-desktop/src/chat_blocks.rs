@@ -1,4 +1,5 @@
 use super::*;
+use gpui_kit::base::TestTextExt;
 use gpui_kit::component::{
     highlighter::HighlightTheme,
     text::{
