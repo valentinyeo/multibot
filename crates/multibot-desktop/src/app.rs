@@ -323,6 +323,7 @@ pub struct MultibotView {
     pub(crate) chat_state: ChatViewState,
     pub(crate) update_ui: UpdateUiState,
     pub(crate) slash_picker_state: SlashPickerState,
+    pub(crate) mention_picker_state: crate::mention_picker::MentionPickerState,
     pub(crate) table_modal_state: TableModalState,
     /// Built-in native GPU terminal pane (`Alt+C`). Owns no PTY while closed.
     pub(crate) terminal: TerminalPaneState,
@@ -593,6 +594,9 @@ impl MultibotView {
             this.restore_embedded_shell_focus(window, cx);
         });
         let _prompt_change_sub = cx.subscribe(&prompt_input, |this, input, event, cx| {
+            if matches!(event, gpui_kit::component::input::InputEvent::Change) {
+                this.sync_mention_picker(cx);
+            }
             if matches!(event, gpui_kit::component::input::InputEvent::Change)
                 && this.main_surface == MainSurface::Chat
                 && !input.read(cx).value().is_empty()
@@ -724,6 +728,7 @@ impl MultibotView {
             chat_state,
             update_ui,
             slash_picker_state: SlashPickerState::default(),
+            mention_picker_state: Default::default(),
             table_modal_state: TableModalState::default(),
             terminal: TerminalPaneState::default(),
             #[cfg(windows)]
@@ -1123,6 +1128,7 @@ impl MultibotView {
     pub(crate) fn has_mounted_chat_overlay(&self) -> bool {
         self.main_surface == MainSurface::Chat
             && (self.slash_picker_state.is_open()
+                || self.mention_picker_state.is_open()
                 || self.chat_state.find_open
                 || self.chat_state.message_action_menu_open
                 || self.chat_state.focused_message_idx.is_some()
@@ -4476,6 +4482,7 @@ impl MultibotView {
         self.messages.clear();
         self.chat_state.close_find();
         self.slash_picker_state.close();
+        self.mention_picker_state.close();
         self.chat_state.reply_quote = None;
         self.chat_state.pending_attachments.clear();
         self.chat_state.focused_message_idx = None;
@@ -4531,6 +4538,7 @@ impl MultibotView {
         self.pending_older_page_before.remove(&session.id);
         self.chat_state.close_find();
         self.slash_picker_state.close();
+        self.mention_picker_state.close();
         self.chat_state.reply_quote = None;
         self.chat_state.pending_attachments.clear();
         self.chat_state.focused_message_idx = None;
@@ -5389,7 +5397,7 @@ impl MultibotView {
             update_card_kind,
             selected_session_id: self.selected_session.as_ref().map(|s| s.id.clone()),
             slash_picker_open: self.main_surface == MainSurface::Chat
-                && self.slash_picker_state.is_open(),
+                && (self.slash_picker_state.is_open() || self.mention_picker_state.is_open()),
             rename_active: self.is_sidebar_rename_mounted() || self.is_inbox_rename_mounted(),
             sidebar_workspace_draft_active: self.is_sidebar_workspace_draft_mounted(),
             reply_quote_active: self.main_surface == MainSurface::Chat
@@ -5491,7 +5499,7 @@ impl MultibotView {
             window.focus(&self.settings_focus_handle, cx);
         } else if self.active_modal == ActiveModal::None
             && self.main_surface == MainSurface::Chat
-            && self.slash_picker_state.is_open()
+            && (self.slash_picker_state.is_open() || self.mention_picker_state.is_open())
         {
             self.prompt_input.update(cx, |state, cx| {
                 state.focus(window, cx);
@@ -5906,6 +5914,8 @@ impl Render for MultibotView {
                 } else if this.chat_state.composer_menu_open {
                     this.chat_state.composer_menu_open = false;
                     this.focus_active_surface_default(window, cx);
+                } else if this.main_surface == MainSurface::Chat && this.mention_picker_state.is_open() {
+                    this.handle_mention_key("escape", window, cx);
                 } else if this.main_surface == MainSurface::Chat
                     && this.slash_picker_state.is_open()
                 {
@@ -6423,6 +6433,7 @@ impl Render for MultibotView {
                     this.chat_state.slash_sync_pending = false;
                     this.slash_picker_state.close();
                     let msgs = this.messages.clone();
+                    this.mention_picker_state.close();
                     this.chat_state.open_find(&msgs, this.show_tool_calls());
                     this.focus_chat_panel(window, cx);
                     cx.notify();

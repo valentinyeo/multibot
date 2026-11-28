@@ -82,6 +82,47 @@ pub fn native_brain_transcript(home: &Path, conversation_id: &str) -> Option<Pat
     })
 }
 
+/// Also returns the future native path, so an event-driven watcher can follow its creation.
+pub fn transcript_target(home: &Path, session_id: &str, source: &Path) -> PathBuf {
+    let metadata = super::MetadataStore::load(home);
+    let recorded = metadata.get(session_id).and_then(|m| m.native_session_id.clone());
+    let conversation = recorded.filter(|id| is_conversation_id(id)).or_else(|| {
+        if !source.starts_with(home.join(".multibot/history")) {
+            return brain_conversation_id(source);
+        }
+        use std::io::{BufRead, BufReader, Read};
+        let mut reader = BufReader::new(fs::File::open(source).ok()?);
+        let mut line = Vec::new();
+        let mut conversation = None;
+        loop {
+            line.clear();
+            let n = reader.by_ref().take(64 * 1024 + 1).read_until(b'\n', &mut line).ok()?;
+            if n == 0 { break; }
+            if line.len() > 64 * 1024 {
+                if line.last() != Some(&b'\n') { reader.skip_until(b'\n').ok()?; }
+                continue;
+            }
+            if let Ok(value) = serde_json::from_slice::<Value>(&line)
+                && value.get("type").and_then(Value::as_str) == Some("multibot_meta")
+                && let Some(id) = value.get("conversation_id").and_then(Value::as_str).filter(|id| is_conversation_id(id))
+            {
+                conversation = Some(id.to_string());
+            }
+        }
+        conversation
+    });
+    let Some(conversation) = conversation else { return source.to_path_buf(); };
+    native_brain_transcript(home, &conversation).unwrap_or_else(|| {
+        home.join(".gemini/antigravity-cli/brain").join(conversation)
+            .join(".system_generated/logs/transcript.jsonl")
+    })
+}
+
+pub fn resolve_transcript(home: &Path, session_id: &str, source: &Path) -> PathBuf {
+    let target = transcript_target(home, session_id, source);
+    if target.is_file() { target } else { source.to_path_buf() }
+}
+
 pub fn antigravity_discovery_roots(home: &Path) -> Vec<PathBuf> {
     let candidates = [
         home.join(".multibot").join("history"),
@@ -606,6 +647,7 @@ impl AgentProvider for AntigravityProvider {
         files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.2.cmp(&a.2)));
         let mut out = Vec::new();
         let mut seen_ids = HashSet::new();
+        let mut seen_transcripts = HashSet::new();
         for (_, path, ts) in files {
             let sid = self
                 .extract_header_meta(&path)
@@ -617,7 +659,8 @@ impl AgentProvider for AntigravityProvider {
                         .unwrap_or("session")
                         .to_string()
                 });
-            if seen_ids.insert(sid) {
+            let authoritative = resolve_transcript(home, &sid, &path);
+            if seen_ids.insert(sid) && seen_transcripts.insert(authoritative) {
                 out.push((path, ts));
             }
             if out.len() >= limit {

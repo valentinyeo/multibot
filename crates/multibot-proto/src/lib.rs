@@ -507,6 +507,11 @@ pub enum ClientRequest {
         #[serde(default)]
         session_id: String,
     },
+    SendCrossSession {
+        from_session_id: String,
+        target_session_id: String,
+        text: String,
+    },
     InterruptSession {
         session_id: String,
         agent: AgentKind,

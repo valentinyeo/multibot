@@ -120,39 +120,26 @@ impl WatchManager {
             let _ = prev.stop_tx.try_send(());
         }
 
-        // New agents may not have created their transcript directory yet. Watch its
-        // nearest existing ancestor so the first write still arrives without polling.
-        let parent = source_path.parent().unwrap_or(&source_path);
-        let watch_dir = parent
-            .ancestors()
-            .find(|path| path.is_dir())
-            .ok_or_else(|| anyhow!("no existing ancestor for {}", source_path.display()))?
-            .to_path_buf();
-
-        // Register inotify watch BEFORE reading and emitting initial History so any write
-        // occurring during or immediately after the initial snapshot is never missed.
-        let target_path = source_path.clone();
+        let requested_path = source_path;
+        let source_path = if agent == AgentKind::Antigravity {
+            crate::providers::antigravity::resolve_transcript(&self.home, &session_id, &requested_path)
+        } else { requested_path.clone() };
+        let targets = session_watch_targets(&self.home, &session_id, &requested_path, agent);
+        let watched_targets = Arc::new(std::sync::Mutex::new(targets.clone()));
+        let callback_targets = Arc::clone(&watched_targets);
         let (fs_tx, mut fs_rx) = mpsc::unbounded_channel::<()>();
         let fs_tx_requeue = fs_tx.clone();
         let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
-
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-            let Ok(event) = res else {
-                return;
-            };
-            if is_ignored_read_event(&event.kind) {
-                return;
-            }
-            let matches_name = event.paths.iter().any(|p| target_path.starts_with(p))
-                || (matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
-                    && event.paths.is_empty());
-
-            if matches_name {
-                let _ = fs_tx.send(());
-            }
+            let Ok(event) = res else { return; };
+            if is_ignored_read_event(&event.kind) { return; }
+            let matches_name = event.paths.iter().any(|p| {
+                callback_targets.lock().unwrap().iter().any(|target| target.starts_with(p))
+            }) || (matches!(event.kind, EventKind::Modify(ModifyKind::Name(_))) && event.paths.is_empty());
+            if matches_name { let _ = fs_tx.send(()); }
         })?;
-
-        watcher.watch(&watch_dir, RecursiveMode::NonRecursive)?;
+        let mut watch_dirs = HashSet::new();
+        sync_session_watches(&mut watcher, &targets, &mut watch_dirs)?;
 
         let history_home = self.home.clone();
         let path_for_read = source_path.clone();
@@ -195,7 +182,7 @@ impl WatchManager {
 
         let task = tokio::spawn(async move {
             let mut watcher = watcher;
-            let mut watch_dir = watch_dir;
+            let mut source_path = source_path;
             let mut consumed_offset = initial_offset;
             let mut last_probe = initial_probe;
 
@@ -222,21 +209,20 @@ impl WatchManager {
                         }
                         while fs_rx.try_recv().is_ok() {}
 
-                        // Follow newly created parents with one shallow watch, never a
-                        // recursive watch of the whole home directory.
-                        if let Some(next_dir) = source_path.parent()
-                            .and_then(|parent| parent.ancestors().find(|path| path.is_dir()))
-                            && next_dir != watch_dir
-                        {
-                            if let Err(err) = watcher.watch(next_dir, RecursiveMode::NonRecursive) {
-                                let _ = out_tx.send(ServerEvent::Error {
-                                    code: "watch_failed".into(),
-                                    message: format!("Failed to watch {}: {err}", source_path.display()),
-                                });
-                                return;
-                            }
-                            let _ = watcher.unwatch(&watch_dir);
-                            watch_dir = next_dir.to_path_buf();
+                        let targets = session_watch_targets(&home, &sid_task, &requested_path, agent);
+                        *watched_targets.lock().unwrap() = targets.clone();
+                        if let Err(err) = sync_session_watches(&mut watcher, &targets, &mut watch_dirs) {
+                            let _ = out_tx.send(ServerEvent::Error { code: "watch_failed".into(), message: err.to_string() });
+                            return;
+                        }
+                        let next_source = if agent == AgentKind::Antigravity {
+                            crate::providers::antigravity::resolve_transcript(&home, &sid_task, &requested_path)
+                        } else { requested_path.clone() };
+                        if next_source != source_path {
+                            source_path = next_source;
+                            // Offsets from the mirror have no meaning in the native file.
+                            consumed_offset = u64::MAX;
+                            last_probe.clear();
                         }
 
                         let home_c = home.clone();
@@ -548,6 +534,25 @@ impl WatchManager {
             let _ = h.await;
         }
     }
+}
+
+fn session_watch_targets(home: &Path, id: &str, source: &Path, agent: AgentKind) -> Vec<PathBuf> {
+    let mut targets = vec![source.to_path_buf()];
+    if agent == AgentKind::Antigravity {
+        let native = crate::providers::antigravity::transcript_target(home, id, source);
+        if native != source { targets.push(native); }
+    }
+    targets
+}
+
+fn sync_session_watches(watcher: &mut RecommendedWatcher, targets: &[PathBuf], current: &mut HashSet<PathBuf>) -> Result<()> {
+    let desired: HashSet<_> = targets.iter().filter_map(|target| {
+        target.parent().and_then(|parent| parent.ancestors().find(|p| p.is_dir())).map(Path::to_path_buf)
+    }).collect();
+    for path in desired.difference(current) { watcher.watch(path, RecursiveMode::NonRecursive)?; }
+    for path in current.difference(&desired) { let _ = watcher.unwatch(path); }
+    *current = desired;
+    Ok(())
 }
 
 fn is_ignored_read_event(kind: &EventKind) -> bool {
@@ -894,6 +899,59 @@ mod tests {
             }
         }
         None
+    }
+
+    #[tokio::test]
+    async fn antigravity_watch_follows_first_native_transcript_without_polling() {
+        use crate::providers::antigravity::{append_history_record, hosted_history_path};
+        use serde_json::json;
+        let home = temp_home("agy-source-switch");
+        let cid = "4d5d5535-249c-4f10-90d9-7ec49c2eeb53";
+        let mirror = hosted_history_path(&home, "new-chat");
+        append_history_record(&mirror, &json!({"type":"multibot_meta", "session_id":"new-chat"})).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let pm = ProcessManager::new(home.clone(), tx.clone());
+        let mut wm = WatchManager::new(home.clone(), tx, pm);
+        wm.watch_session("new-chat".into(), mirror.clone(), AgentKind::Antigravity).await.unwrap();
+        assert!(matches!(rx.recv().await, Some(ServerEvent::History { .. })));
+        append_history_record(&mirror, &json!({"type":"multibot_meta", "session_id":"new-chat", "conversation_id":cid})).unwrap();
+        // A ping through the watcher is not available, so wait for the metadata update.
+        assert!(recv_matching(&mut rx, Duration::from_secs(3), |ev| matches!(ev, ServerEvent::SessionUpdated { .. })).await.is_some());
+        let native = home.join(".gemini/antigravity-cli/brain").join(cid).join(".system_generated/logs/transcript.jsonl");
+        fs::create_dir_all(native.parent().unwrap()).unwrap();
+        append_history_record(&native, &json!({"type":"PLANNER_RESPONSE", "content":"First native reply"})).unwrap();
+        assert!(recv_matching(&mut rx, Duration::from_secs(3), |ev| matches!(ev, ServerEvent::History { session_id, messages, .. } if session_id == "new-chat" && messages.iter().any(|m| m.text == "First native reply"))).await.is_some());
+        append_history_record(&native, &json!({"type":"PLANNER_RESPONSE", "content":"Next native reply"})).unwrap();
+        assert!(recv_matching(&mut rx, Duration::from_secs(3), |ev| matches!(ev, ServerEvent::HistoryAppend { messages, .. } if messages.iter().any(|m| m.text == "Next native reply"))).await.is_some());
+        wm.shutdown().await;
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn antigravity_mirror_recovers_native_replies_and_watches_native_appends() {
+        use crate::providers::antigravity::{append_history_record, hosted_history_path};
+        use serde_json::json;
+        let home = temp_home("agy-authoritative");
+        let cid = "4d5d5535-249c-4f10-90d9-7ec49c2eeb53";
+        let mirror = hosted_history_path(&home, "hosted");
+        append_history_record(&mirror, &json!({"type":"multibot_meta", "session_id":"hosted", "conversation_id":cid})).unwrap();
+        append_history_record(&mirror, &json!({"type":"multibot_history", "row":{"id":"old", "role":"assistant", "text":"Before restart"}})).unwrap();
+        let native = home.join(".gemini/antigravity-cli/brain").join(cid).join(".system_generated/logs/transcript.jsonl");
+        fs::create_dir_all(native.parent().unwrap()).unwrap();
+        append_history_record(&native, &json!({"type":"PLANNER_RESPONSE", "content":"Before restart"})).unwrap();
+        append_history_record(&native, &json!({"type":"PLANNER_RESPONSE", "content":"Saved while daemon stopped"})).unwrap();
+        let page = crate::continuity::read_page(&home, "hosted", AgentKind::Antigravity, &mirror, None, None, None, None).unwrap();
+        assert_eq!(page.messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), vec!["Before restart", "Saved while daemon stopped"]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let pm = ProcessManager::new(home.clone(), tx.clone());
+        let mut wm = WatchManager::new(home.clone(), tx, pm);
+        wm.watch_session("hosted".into(), mirror, AgentKind::Antigravity).await.unwrap();
+        assert!(matches!(rx.recv().await, Some(ServerEvent::History { messages, .. }) if messages.len() == 2));
+        append_history_record(&native, &json!({"type":"PLANNER_RESPONSE", "content":"Native live reply"})).unwrap();
+        let event = recv_matching(&mut rx, Duration::from_secs(3), |ev| matches!(ev, ServerEvent::HistoryAppend { messages, session_id, .. } if session_id == "hosted" && messages.iter().any(|m| m.text == "Native live reply"))).await;
+        assert!(event.is_some(), "must tail native transcript, not mirror");
+        wm.shutdown().await;
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[tokio::test]

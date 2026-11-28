@@ -1478,3 +1478,214 @@ async fn browser_cli_roundtrip_through_connected_daemon() {
     assert!(!home.join(format!(".multibot/browser-control/{pid}.sock")).exists());
     fs::remove_dir_all(home).unwrap();
 }
+
+struct FeatureDaemon {
+    child: tokio::process::Child,
+    input: tokio::process::ChildStdin,
+    output: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+}
+
+impl FeatureDaemon {
+    async fn start(home: &std::path::Path) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_multibotd")).arg("--stdio")
+            .env("HOME", home).env("PATH", format!("{}:/usr/bin:/bin", home.join(".local/bin").display()))
+            .env("TMUX_TMPDIR", home).env_remove("TMUX").env_remove("MULTIPROMPT_STATE_DIR").env_remove("XDG_STATE_HOME")
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).kill_on_drop(true).spawn().unwrap();
+        let input = child.stdin.take().unwrap();
+        let output = BufReader::new(child.stdout.take().unwrap()).lines();
+        let mut daemon = Self { child, input, output };
+        daemon.send(ClientRequest::Ping { nonce: 90 }).await;
+        assert!(matches!(daemon.next().await, ServerEvent::Pong { nonce:90, .. }));
+        daemon
+    }
+    async fn send(&mut self, request: ClientRequest) {
+        self.input.write_all(encode_line(&request).unwrap().as_bytes()).await.unwrap();
+    }
+    async fn next(&mut self) -> ServerEvent {
+        let line = tokio::time::timeout(Duration::from_secs(8), self.output.next_line()).await.unwrap().unwrap().expect("daemon EOF");
+        decode_line(&line).unwrap()
+    }
+    async fn reply(&mut self) -> ServerEvent {
+        loop {
+            let event = self.next().await;
+            if matches!(event, ServerEvent::SessionUpdated { .. } | ServerEvent::PromptStatus { .. })
+                || matches!(&event, ServerEvent::HistoryAppend { messages, latest_offset:None, .. } if messages.is_empty()) { continue; }
+            return event;
+        }
+    }
+    async fn stop(mut self) {
+        drop(self.input);
+        assert!(tokio::time::timeout(Duration::from_secs(8), self.child.wait()).await.unwrap().unwrap().success());
+    }
+}
+
+async fn wait_for_feature_receipt(path: &std::path::Path, expected: &str) {
+    use notify::Watcher;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if let Ok(event) = event && !matches!(event.kind, notify::EventKind::Access(_)) { let _ = tx.send(()); }
+    }).unwrap();
+    watcher.watch(path.parent().unwrap(), notify::RecursiveMode::NonRecursive).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !fs::read_to_string(path).unwrap_or_default().contains(expected) { rx.recv().await.unwrap(); }
+    }).await.expect("fake agent did not persist delivery");
+}
+
+#[tokio::test]
+async fn antigravity_native_history_survives_daemon_restart_and_native_watch() {
+    use serde_json::json;
+    let home = temp_home("agy-native-restart");
+    let cid = "4d5d5535-249c-4f10-90d9-7ec49c2eeb53";
+    let mirror = home.join(".multibot/history/hosted.history.jsonl");
+    let native = home.join(".gemini/antigravity-cli/brain").join(cid).join(".system_generated/logs/transcript.jsonl");
+    fs::create_dir_all(mirror.parent().unwrap()).unwrap();
+    fs::create_dir_all(native.parent().unwrap()).unwrap();
+    fs::write(&mirror, format!("{}\n{}\n", json!({"type":"multibot_meta","session_id":"hosted","conversation_id":cid,"cwd":"/repo"}), json!({"type":"multibot_history","row":{"id":"mirror","role":"assistant","text":"Old reply"}}))).unwrap();
+    fs::write(home.join(".multibot/metadata.json"), json!({"sessions":{"hosted":{"agent":"antigravity","title":"Postbox","source_path":mirror,"native_session_id":cid}}}).to_string()).unwrap();
+    fs::write(&native, "{\"type\":\"PLANNER_RESPONSE\",\"content\":\"Old reply\"}\n").unwrap();
+    let mut daemon = FeatureDaemon::start(&home).await;
+    daemon.send(ClientRequest::ReadHistory { session_id:"hosted".into(), source_path:mirror.to_string_lossy().into(), agent:AgentKind::Antigravity,
+        tail:None, before_offset:None, max_bytes:None, known_probe:None }).await;
+    assert!(matches!(daemon.reply().await, ServerEvent::History { messages, .. } if messages.len() == 1));
+    daemon.child.kill().await.unwrap();
+    drop(daemon);
+    writeln!(OpenOptions::new().append(true).open(&native).unwrap(), "{}", json!({"type":"PLANNER_RESPONSE","content":"Saved during restart"})).unwrap();
+    let mut daemon = FeatureDaemon::start(&home).await;
+    daemon.send(ClientRequest::ListSessions { limit:Some(50), include_archived:None }).await;
+    let ServerEvent::Sessions { sessions } = daemon.reply().await else { panic!("expected sessions"); };
+    let hosted: Vec<_> = sessions.iter().filter(|s| s.agent == AgentKind::Antigravity).collect();
+    assert_eq!(hosted.len(), 1, "native conversation and hosted session must not duplicate");
+    assert_eq!(hosted[0].id, "hosted");
+    assert_eq!(hosted[0].title, "Postbox");
+    assert_eq!(hosted[0].source_path, native.to_string_lossy());
+    assert_eq!(hosted[0].last_assistant_preview.as_deref(), Some("Saved during restart"));
+    daemon.send(ClientRequest::WatchSession { session_id:"hosted".into(), source_path:mirror.to_string_lossy().into(), agent:AgentKind::Antigravity }).await;
+    let ServerEvent::History { messages, .. } = daemon.reply().await else { panic!("expected native snapshot"); };
+    assert_eq!(messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), vec!["Old reply", "Saved during restart"]);
+    writeln!(OpenOptions::new().append(true).open(&native).unwrap(), "{}", json!({"type":"PLANNER_RESPONSE","content":"Live native reply"})).unwrap();
+    assert!(matches!(daemon.reply().await, ServerEvent::HistoryAppend { session_id, messages, .. } if session_id == "hosted" && messages.len() == 1 && messages[0].text == "Live native reply"));
+    daemon.stop().await;
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
+async fn sessions_cli_lists_routes_names_ids_shells_and_stops_agent_ping_pong() {
+    use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
+    let home = temp_home("cross-session");
+    let bins = home.join(".local/bin");
+    fs::create_dir_all(&bins).unwrap();
+    for (name, script) in [
+        ("claude", "#!/bin/sh\nprintf '%s\\n' \"$MULTIBOT_SESSION_ID\" \"$@\" >> \"$HOME/delivered\"\n"),
+        ("tmux", "#!/bin/sh\nif [ \"$1\" = list-sessions ]; then printf 'shell\\t1\\tbash\\t/repo\\t1\\tTerminal\\n'; else printf '%s\\n' \"$@\" >> \"$HOME/shell-delivered\"; fi\n"),
+    ] {
+        let path = bins.join(name); fs::write(&path, script).unwrap(); fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::create_dir_all(home.join(".multibot")).unwrap();
+    let mut metadata = serde_json::Map::new();
+    for (id, title) in [("sender", "Sender"), ("target", "Target"), ("dup-a", "Same"), ("dup-b", "Same")] {
+        let path = home.join(".claude/projects/repo").join(format!("{id}.jsonl"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, format!("{}\n", json!({"type":"user","uuid":"u","sessionId":id,"cwd":"/repo","message":{"content":"Hello"}}))).unwrap();
+        metadata.insert(id.into(), json!({"agent":"claude","title":title,"source_path":path,"cwd":home}));
+    }
+    fs::write(home.join(".multibot/metadata.json"), json!({"sessions":metadata}).to_string()).unwrap();
+    let mut daemon = FeatureDaemon::start(&home).await;
+    let cli = |args: Vec<String>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_multibotd"));
+        command.arg("sessions").args(args).env("HOME", &home).kill_on_drop(true);
+        command
+    };
+    let list = cli(vec!["list".into(), "--json".into()]).output().await.unwrap();
+    assert!(list.status.success(), "{}", String::from_utf8_lossy(&list.stderr));
+    let list: Vec<multibot_proto::SessionSummary> = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(list.len(), 5);
+    assert!(list.iter().any(|s| s.id == "target" && s.title == "Target" && s.cwd.as_ref() == Some(&home.to_string_lossy().to_string())));
+    let sent = cli(vec!["send".into(), "Target".into(), "Hello by name".into(), "--from".into(), "sender".into()]).output().await.unwrap();
+    assert!(sent.status.success(), "{}", String::from_utf8_lossy(&sent.stderr));
+    for (from, target, succeeds) in [("target", "sender", true), ("sender", "target", true), ("target", "sender", true), ("sender", "target", false)] {
+        daemon.send(ClientRequest::SendCrossSession { from_session_id:from.into(), target_session_id:target.into(), text:"Fresh reply text".into() }).await;
+        let event = daemon.reply().await;
+        assert_eq!(matches!(event, ServerEvent::SendAccepted { .. }), succeeds, "{event:?}");
+        if !succeeds { assert!(matches!(event, ServerEvent::Error { code, message } if code == "cross_session_failed" && message.contains("depth"))); }
+    }
+    for name in ["Same", "missing"] {
+        let result = cli(vec!["send".into(), name.into(), "No delivery".into()]).output().await.unwrap();
+        assert!(!result.status.success());
+        if name == "Same" { assert!(String::from_utf8_lossy(&result.stderr).contains("Ambiguous")); }
+    }
+    let result = cli(vec!["send".into(), "shell".into(), "Literal $text; no shell expansion".into()]).output().await.unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let shell = fs::read_to_string(home.join("shell-delivered")).unwrap();
+    assert!(shell.contains("-l\n--\n[Message from CLI]: Literal $text; no shell expansion"));
+    for attempt in 1..=5 {
+        let result = cli(vec!["send".into(), "dup-a".into(), "Repeated external sender".into(), "--from".into(), "terminal".into()]).output().await.unwrap();
+        assert_eq!(result.status.success(), attempt <= 4);
+        if attempt == 5 { assert!(String::from_utf8_lossy(&result.stderr).contains("depth")); }
+    }
+    daemon.send(ClientRequest::SendPrompt { session_id:"sender".into(), agent:AgentKind::Claude, cwd:Some(home.to_string_lossy().into()), text:"New user turn".into(), options:None }).await;
+    assert!(matches!(daemon.reply().await, ServerEvent::SendAccepted { .. }));
+    let sent = cli(vec!["send".into(), "target".into(), "Hello by ID".into(), "--from".into(), "sender".into()]).output().await.unwrap();
+    assert!(sent.status.success(), "{}", String::from_utf8_lossy(&sent.stderr));
+    // An acknowledgement alone is insufficient: wait for the fake agent's durable receipt.
+    daemon.send(ClientRequest::Ping { nonce:91 }).await;
+    assert!(matches!(daemon.reply().await, ServerEvent::Pong { nonce:91, .. }));
+    wait_for_feature_receipt(&home.join("delivered"), "[Message from sender]: Hello by ID").await;
+    let delivered = fs::read_to_string(home.join("delivered")).unwrap();
+    assert!(delivered.contains("[Message from sender]: Hello by name"));
+    assert!(delivered.contains("Multibot cross-session depth 4/4"));
+    assert!(!delivered.contains("No delivery"));
+    if let Some(peak) = read_proc_vm_hwm_kib(daemon.child.id().unwrap()) { assert!(peak < 10 * 1024, "daemon peak {peak} KiB exceeds 10 MiB"); }
+    daemon.stop().await;
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
+async fn sessions_cli_routes_to_the_owning_daemon_and_preserves_cross_daemon_depth() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = temp_home("cross-daemon");
+    let bins = home.join(".local/bin");
+    fs::create_dir_all(&bins).unwrap();
+    let agy = bins.join("agy");
+    fs::write(&agy, r#"#!/bin/sh
+printf '{"event":"init","conversation_id":"%s"}\n' "$MULTIBOT_SESSION_ID"
+while IFS= read -r frame; do
+    printf '%s\n' "$frame" >> "$HOME/receipt-$MULTIBOT_SESSION_ID"
+    case "$frame" in
+        *"Start first"*|*"Start second"*) ;;
+        *) printf '{"event":"result","result":{"status":"SUCCESS"}}\n' ;;
+    esac
+done
+"#).unwrap();
+    fs::set_permissions(agy, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut first = FeatureDaemon::start(&home).await;
+    first.send(ClientRequest::SpawnSession { agent:AgentKind::Antigravity, cwd:home.to_string_lossy().into(), title:Some("First".into()), initial_prompt:Some("Start first".into()), options:None }).await;
+    let ServerEvent::SessionSpawned { session:a } = first.reply().await else { panic!("first spawn"); };
+    wait_for_feature_receipt(&home.join(format!("receipt-{}", a.id)), "Start first").await;
+    let mut second = FeatureDaemon::start(&home).await;
+    second.send(ClientRequest::SpawnSession { agent:AgentKind::Antigravity, cwd:home.to_string_lossy().into(), title:Some("Second".into()), initial_prompt:Some("Start second".into()), options:None }).await;
+    let ServerEvent::SessionSpawned { session:b } = second.reply().await else { panic!("second spawn"); };
+    wait_for_feature_receipt(&home.join(format!("receipt-{}", b.id)), "Start second").await;
+    for session in [&a, &b] {
+        writeln!(OpenOptions::new().append(true).open(&session.source_path).unwrap(), "{{\"type\":\"multibot_turn_end\",\"status\":\"SUCCESS\"}}").unwrap();
+    }
+    let list = Command::new(env!("CARGO_BIN_EXE_multibotd")).args(["sessions", "list", "--json"]).env("HOME", &home).output().await.unwrap();
+    assert!(list.status.success());
+    let list: Vec<multibot_proto::SessionSummary> = serde_json::from_slice(&list.stdout).unwrap();
+    assert!(list.iter().find(|s| s.id == a.id).unwrap().working);
+    assert!(list.iter().find(|s| s.id == b.id).unwrap().working);
+    for (from, target, succeeds) in [(&a.id, &b.id, true), (&b.id, &a.id, true), (&a.id, &b.id, true), (&b.id, &a.id, true), (&a.id, &b.id, false)] {
+        let result = Command::new(env!("CARGO_BIN_EXE_multibotd")).args(["sessions", "send", target, "New cross-daemon information"])
+            .env("HOME", &home).env("MULTIBOT_SESSION_ID", from).kill_on_drop(true).output().await.unwrap();
+        assert_eq!(result.status.success(), succeeds, "{}", String::from_utf8_lossy(&result.stderr));
+        if !succeeds { assert!(String::from_utf8_lossy(&result.stderr).contains("depth")); }
+    }
+    wait_for_feature_receipt(&home.join(format!("receipt-{}", a.id)), "depth 4/4").await;
+    wait_for_feature_receipt(&home.join(format!("receipt-{}", b.id)), "depth 3/4").await;
+    // Each persistent process must receive the message, not a new process in another daemon.
+    assert_eq!(fs::read_to_string(home.join(format!("receipt-{}", a.id))).unwrap().lines().count(), 3);
+    assert_eq!(fs::read_to_string(home.join(format!("receipt-{}", b.id))).unwrap().lines().count(), 3);
+    first.stop().await;
+    second.stop().await;
+    fs::remove_dir_all(home).unwrap();
+}

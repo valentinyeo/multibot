@@ -2289,6 +2289,19 @@ impl MultibotView {
             .record_session_input(&key, now_unix_ms());
         self.persist_workspace_store_if_enabled();
         self.sync_workspace_to_shared(cx);
+        let targets = self.mention_targets();
+        let mut delivered = HashSet::new();
+        for mention in crate::mention_picker::occurrences(&text, &targets) {
+            if text[..mention.range.start].rsplit('\n').next().is_some_and(|line| line.trim_start().starts_with('>')) { continue; }
+            if let Some(target) = mention.target
+                && target.session_id != session.id
+                && self.host_for_session_key(&target.session_key).is_some_and(|(target_host, _)| target_host == host)
+                && delivered.insert(target.session_id.clone())
+                && let Some(tx) = self.tx_for_host(host)
+            {
+                let _ = tx.send(ClientRequest::SendCrossSession { from_session_id: session.id.clone(), target_session_id: target.session_id, text: text.clone() });
+            }
+        }
         self.send_or_queue_prompt_on_host(host, &session, msg_id, text);
         cx.notify();
     }
@@ -2550,7 +2563,7 @@ impl MultibotView {
             }
             multibot_core::voice::DictationPhase::Off => {}
         }
-        let raw = self.prompt_input.read(cx).value().to_string();
+        let raw = self.bound_mention_prompt(cx);
         let trimmed = raw.trim().to_string();
         if trimmed.is_empty() {
             return;
@@ -2970,6 +2983,7 @@ impl MultibotView {
                 cx.notify();
             }
         }
+        self.sync_mention_picker(cx);
     }
 
     fn has_higher_priority_modal(&self) -> bool {
@@ -2998,6 +3012,7 @@ impl MultibotView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if !self.has_higher_priority_modal() && self.handle_mention_key(key, window, cx) { return true; }
         if !self.slash_picker_state.is_open() || self.has_higher_priority_modal() {
             return false;
         }
@@ -3023,6 +3038,7 @@ impl MultibotView {
         if self.has_higher_priority_modal() {
             return false;
         }
+        if self.mention_picker_state.is_open() { return self.handle_mention_key("escape", window, cx); }
         if self.slash_picker_state.is_open() {
             return self.handle_slash_picker_control_key("escape", window, cx);
         }
@@ -3144,7 +3160,7 @@ impl MultibotView {
 
         // 1. Intercept slash/skill picker control keys BEFORE Input, Tab focus cycling,
         //    or global CloseOverlay can consume them.
-        if self.slash_picker_state.is_open() && plain_key {
+        if (self.slash_picker_state.is_open() || self.mention_picker_state.is_open()) && plain_key {
             let key_l = ks.key.to_ascii_lowercase();
             if matches!(
                 key_l.as_str(),
@@ -3337,6 +3353,7 @@ impl MultibotView {
             self.sidebar_state.new_workspace_draft = None;
             self.chat_state.slash_sync_pending = false;
             self.slash_picker_state.close();
+            self.mention_picker_state.close();
             let msgs = self.messages.clone();
             self.chat_state.open_find(&msgs, self.show_tool_calls());
             self.focus_chat_panel(window, cx);
@@ -3700,11 +3717,18 @@ impl MultibotView {
             .filter(|t| t.table.source == TableSource::Box)
             .collect();
 
+        let targets = self.mention_targets();
+        let text = crate::mention_picker::render_mentions(&text, &targets);
+        let weak_mention = cx.entity().downgrade();
         let md_view = TextView::markdown(id.clone(), text)
-            .link(|link, _| crate::external_url::is_http_url(&link.url).then(|| link.clone()))
-            .on_link_click(|url, event, _, cx| {
+            .link(|link, _| (crate::external_url::is_http_url(&link.url) || link.url.starts_with("multibot-session://")).then(|| link.clone()))
+            .on_link_click(move |url, event, _, cx| {
                 cx.stop_propagation();
                 if !event.is_right_click() && !event.is_middle_click() {
+                    if url.starts_with("multibot-session://") {
+                        let _ = weak_mention.update(cx, |this, cx| { this.jump_mention_url(url, cx); });
+                        return;
+                    }
                     if let Err(error) = crate::external_url::open_external_url(url) {
                         eprintln!("Could not open chat link: {error}");
                     }
@@ -4851,7 +4875,7 @@ impl MultibotView {
                                                 .test_support()
                                                 .text_size(px(self.effective_font_size_pt() as f32))
                                                 .text_color(theme::text_primary())
-                                                .child(if crate::external_url::url_ranges(&display_text).is_empty() {
+                                                .child(if crate::mention_picker::occurrences(&display_text, &self.mention_targets()).is_empty() && crate::external_url::url_ranges(&display_text).is_empty() {
                                                     display_text.into_any_element()
                                                 } else {
                                                     self.render_markdown_with_actions(
@@ -4962,7 +4986,7 @@ impl MultibotView {
                             div()
                                 .text_size(px(self.effective_font_size_pt() as f32))
                                 .text_color(theme::text_primary())
-                                .child(if crate::external_url::url_ranges(&display_text).is_empty() {
+                                .child(if crate::mention_picker::occurrences(&display_text, &self.mention_targets()).is_empty() && crate::external_url::url_ranges(&display_text).is_empty() {
                                     display_text.into_any_element()
                                 } else {
                                     self.render_markdown_with_actions(
@@ -5700,6 +5724,7 @@ impl MultibotView {
             ))
             .when(!queued_previews.is_empty() || !queued_entries.is_empty(), |el| el.child(div().w_full().px_5().pt_2().child(queue_bar)))
             .when_some(self.render_slash_picker(cx), |el, picker| el.child(picker))
+            .when_some(self.render_mention_picker(cx), |el, picker| el.child(picker))
             .when(self.chat_state.composer_menu_open, |el| el.child(
                 div().w_full().when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0))).mx_auto().px_5().child(
                     self.render_composer_options(cx)
@@ -8149,6 +8174,106 @@ mod tests {
             ..Default::default()
         });
         assert!(detect_trailing_prose_options(&with_real_reply).is_none());
+    }
+
+    #[gpui_kit::test]
+    fn session_mentions_picker_binds_duplicate_names_and_sends_exact_id(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_chat_window(cx);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                let sender = SessionSummary { id: "sender".into(), title: "Sender".into(), ..Default::default() };
+                v.sessions = vec![sender.clone(),
+                    SessionSummary { id: "dup-a".into(), title: "Same Name".into(), ..Default::default() },
+                    SessionSummary { id: "dup-b".into(), title: "Same Name".into(), ..Default::default() }];
+                v.selected_session = Some(sender);
+                v.daemon_tx = Some(tx);
+                v.prompt_input.update(cx, |input, cx| input.focus(window, cx));
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.press("@", cx);
+            window.render_frame(cx);
+            assert!(window.find("mention-picker").visible());
+            assert_eq!(view.read(cx).mention_picker_state.filtered.len(), 3);
+            window.press("s", cx);
+            window.press("a", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).mention_picker_state.filtered.len(), 2);
+            window.press("down", cx);
+            window.press("tab", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "@Same Name ");
+            assert_eq!(view.read(cx).prompt_input.read(cx).tokens().len(), 1);
+            assert_eq!(view.read(cx).bound_mention_prompt(cx).trim(), "@Same Name{dup-b}");
+            // Undo/redo must preserve the target, not guess from the duplicate display name.
+            window.press("ctrl-z", cx);
+            window.press("ctrl-y", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).bound_mention_prompt(cx).trim(), "@Same Name{dup-b}");
+            window.press("ctrl-enter", cx);
+            window.render_frame(cx);
+            let mut saw_prompt = false;
+            let mut saw_delivery = false;
+            while let Ok(request) = rx.try_recv() {
+                match request {
+                    ClientRequest::SendPrompt { text, .. } => { assert_eq!(text, "@Same Name{dup-b}"); saw_prompt = true; },
+                    ClientRequest::SendCrossSession { target_session_id, .. } => { assert_eq!(target_session_id, "dup-b"); saw_delivery = true; },
+                    _ => {},
+                }
+            }
+            assert!(saw_prompt && saw_delivery);
+            window.press("@", cx);
+            window.render_frame(cx);
+            assert!(view.read(cx).mention_picker_state.is_open());
+            window.press("ctrl-f", cx);
+            window.render_frame(cx);
+            assert!(view.read(cx).chat_state.find_open);
+            assert!(!view.read(cx).mention_picker_state.is_open());
+            window.press("escape", cx);
+            window.press("ctrl-/", cx);
+            window.render_frame(cx);
+            assert!(view.read(cx).slash_picker_state.browse_mode);
+            assert!(!view.read(cx).mention_picker_state.is_open());
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn session_mentions_escape_keeps_text_and_click_jumps_exact_host_session(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_chat_window(cx);
+        cx.update_window(handle, |_, window, cx| {
+            let source = SessionSummary { id: "source".into(), title: "Source".into(), ..Default::default() };
+            let first = SessionSummary { id: "first".into(), title: "Same".into(), ..Default::default() };
+            let second = SessionSummary { id: "second".into(), title: "Same".into(), ..Default::default() };
+            view.update(cx, |v, cx| {
+                v.host_sessions = vec![("host-a".into(), source.clone()), ("host-a".into(), first.clone()), ("host-b".into(), second.clone())];
+                v.selected_session = Some(source.clone());
+                v.selected_session_host = Some("host-a".into());
+                v.prompt_input.update(cx, |input, cx| { input.set_value("@", window, cx); input.focus(window, cx); });
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).prompt_input.read(cx).value().as_ref(), "@");
+            assert!(!view.read(cx).mention_picker_state.is_open());
+            for role in [MessageRole::User, MessageRole::Assistant] {
+                for with_blocks in [false, true] {
+                    view.update(cx, |v, cx| {
+                        v.selected_session = Some(source.clone());
+                        v.selected_session_host = Some("host-a".into());
+                        let text = "@Same{second}";
+                        v.messages = vec![ChatMessage { id: "mention-link".into(), role, text: text.into(),
+                            blocks: if with_blocks { vec![MessageBlock::Text { text: text.into() }] } else { vec![] }, ..Default::default() }];
+                        cx.notify();
+                    });
+                    window.render_frame(cx);
+                    window.click_at("msg-bubble-0", gpui_kit::point(px(24.0), px(20.0)), cx);
+                    assert_eq!(view.read(cx).selected_session.as_ref().unwrap().id, "second", "{role:?}, blocks={with_blocks}");
+                    assert_eq!(view.read(cx).active_session_host(), "host-b");
+                }
+            }
+        }).unwrap();
     }
 
     #[gpui_kit::test]

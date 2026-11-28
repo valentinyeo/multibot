@@ -105,6 +105,11 @@ fn read_segment(
     if depth >= 32 {
         bail!("too many handover segments");
     }
+    let resolved;
+    let source = if agent == AgentKind::Antigravity {
+        resolved = crate::providers::antigravity::resolve_transcript(home, id, source);
+        resolved.as_path()
+    } else { source };
     let handover = load(home, id)?;
     let Some(handover) = handover else {
         return read_history_page(agent, source, before, max_bytes, tail, probe);

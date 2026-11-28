@@ -5,6 +5,7 @@ mod continuity;
 mod process;
 mod providers;
 mod search;
+mod sessions;
 mod server_workspaces;
 mod shell_watch;
 mod watcher;
@@ -28,6 +29,9 @@ fn main() -> Result<()> {
     #[cfg(unix)]
     {
         let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.first().is_some_and(|arg| arg == "sessions") {
+            return sessions::cli(&args[1..]);
+        }
         if args.first().is_some_and(|arg| arg == "browser") {
             return browser_bridge::cli(&args[1..]);
         }
@@ -111,6 +115,9 @@ async fn async_main(
         })?;
 
     let process_mgr = ProcessManager::new(home.clone(), out_tx.clone());
+    let sessions = sessions::Sessions::new(home.clone(), Arc::clone(&process_mgr), disk_tx.clone());
+    #[cfg(unix)]
+    let _session_socket = sessions.listen()?;
     let mut watch_mgr = WatchManager::with_disk_worker(
         home.clone(),
         out_tx.clone(),
@@ -268,25 +275,34 @@ async fn async_main(
                 cwd,
                 text,
                 options,
-            } => match process_mgr
-                .send_prompt(&session_id, agent, cwd.as_deref(), &text, options)
-                .await
-            {
-                Ok(detail) => {
-                    let _ = out_tx.send(ServerEvent::SendAccepted { session_id, detail });
+            } => {
+                sessions.user_turn(&session_id);
+                match process_mgr
+                    .send_prompt(&session_id, agent, cwd.as_deref(), &text, options)
+                    .await
+                {
+                    Ok(detail) => {
+                        let _ = out_tx.send(ServerEvent::SendAccepted { session_id, detail });
+                    }
+                    Err(err) => {
+                        let _ = out_tx.send(ServerEvent::Error {
+                            code: "send_failed".into(),
+                            message: format!("Failed to send prompt: {err}"),
+                        });
+                    }
                 }
-                Err(err) => {
-                    let _ = out_tx.send(ServerEvent::Error {
-                        code: "send_failed".into(),
-                        message: format!("Failed to send prompt: {err}"),
-                    });
-                }
-            },
+            }
             ClientRequest::SwitchShellClient {
                 client_id,
                 session_id,
             } => {
                 process_mgr.switch_shell_client(client_id, session_id).await;
+            }
+            ClientRequest::SendCrossSession { from_session_id, target_session_id, text } => {
+                match sessions.send(&from_session_id, &target_session_id, &text).await {
+                    Ok(detail) => { let _ = out_tx.send(ServerEvent::SendAccepted { session_id: target_session_id, detail }); }
+                    Err(err) => { let _ = out_tx.send(ServerEvent::Error { code: "cross_session_failed".into(), message: err.to_string() }); }
+                }
             }
             ClientRequest::InterruptSession { session_id, agent } => {
                 process_mgr.interrupt_session(session_id, agent).await;
@@ -298,6 +314,7 @@ async fn async_main(
                 text,
                 options,
             } => {
+                sessions.user_turn(&session_id);
                 process_mgr
                     .steer_session(session_id, agent, cwd, text, options)
                     .await;

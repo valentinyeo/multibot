@@ -12,6 +12,9 @@ This file is embedded in Multibot so Changelog works offline.
 - Show a visible Kill/Cancel confirmation for live server shells, with eight seconds to confirm Ctrl+Shift+W and Escape to cancel.
 - Remember full-width mode per session across restarts, restoring the sidebar when opening a normal-width session.
 - Open Ctrl+K → Server shells to attach or permanently end live shells across all connected servers, including detached shells.
+- Recover Antigravity replies after daemon restarts by reading and watching the native conversation transcript instead of a separate message copy.
+- Mention live sessions with the composer’s @ picker, keep duplicate names bound to the selected session, and click mentions to open that exact chat.
+- List and message live sessions with `multibotd sessions list` and `multibotd sessions send`, including same-host mention delivery and bounded reply chains.
 
 - Paste clipboard text reliably into live server shells with Ctrl+V or Ctrl+Shift+V, including multiline text.
 - Scroll live server shells with the mouse wheel even when the app holds keyboard focus; preserve terminal PageUp and PageDown keys.

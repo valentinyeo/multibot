@@ -13,6 +13,7 @@ mod computer_view;
 mod external_url;
 mod icons;
 mod inbox;
+mod mention_picker;
 mod palette;
 mod provider_switch;
 mod settings;

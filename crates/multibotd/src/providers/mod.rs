@@ -434,6 +434,7 @@ pub fn discover_all_sessions_with_ctx(
             if seen_ids.insert((summary.agent, summary.id.clone())) {
                 all.push(summary);
             }
+            continue;
         }
         let title = meta
             .title
@@ -655,6 +656,18 @@ pub fn summarize_session(
     ctx: &DiscoveryContext<'_>,
 ) -> SessionSummary {
     let header = provider.extract_header_meta(path);
+    let resolved;
+    let original_path = path;
+    let path = if provider.kind() == AgentKind::Antigravity
+        && let Some(home) = path.parent().and_then(Path::parent).and_then(Path::parent)
+        && path.starts_with(home.join(".multibot/history"))
+    {
+        resolved = antigravity::resolve_transcript(home, header.session_id_hint.as_deref().unwrap_or(""), path);
+        resolved.as_path()
+    } else { path };
+    let file_mtime_ms = if path != original_path {
+        path.metadata().ok().and_then(|m| m.modified().ok()).map(system_time_ms).unwrap_or(file_mtime_ms)
+    } else { file_mtime_ms };
     let tail = read_tail_slice_for_summary(provider, path);
 
     let stem = path
@@ -671,6 +684,11 @@ pub fn summarize_session(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(stem);
 
+    let id = if provider.kind() == AgentKind::Antigravity {
+        ctx.metadata.sessions.iter().find(|(_, m)| m.agent == Some(AgentKind::Antigravity)
+            && m.native_session_id.as_deref() == Some(id.as_str()))
+            .map(|(sid, _)| sid.clone()).unwrap_or(id)
+    } else { id };
     let meta_entry = ctx.metadata.get(&id);
 
     let cwd = meta_entry

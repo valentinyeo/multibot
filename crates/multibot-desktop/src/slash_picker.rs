@@ -619,6 +619,7 @@ pub fn builtin_commands_for(agent: AgentKind) -> Vec<SlashCommandItem> {
 impl MultibotView {
     /// Opens the full command browser (`Ctrl+/`) anchored above the composer.
     pub(crate) fn open_slash_browser(&mut self, cx: &mut Context<Self>) {
+        self.mention_picker_state.close();
         let agent = self
             .selected_session
             .as_ref()

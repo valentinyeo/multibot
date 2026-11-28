@@ -230,6 +230,18 @@ impl ProcessManager {
         if text.trim().is_empty() {
             return Err(anyhow!("prompt text is empty"));
         }
+        if agent != AgentKind::Antigravity || !self.session_accepts_live_stdin(session_id) {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.active.get(session_id).is_some_and(|p| p.busy) {
+                let queue = state.queues.entry(session_id.to_string()).or_default();
+                if queue.len() >= MAX_QUEUED_PROMPTS_PER_SESSION {
+                    return Err(anyhow!("session prompt queue full (max {MAX_QUEUED_PROMPTS_PER_SESSION})"));
+                }
+                queue.push_back(QueuedPrompt { message_id: format!("q-{}-{}", now_ms(), self.next_seq()), agent,
+                    cwd: cwd.map(String::from), text: text.to_string(), options });
+                return Ok("queued behind active turn".into());
+            }
+        }
         let result = self.dispatch_prompt_internal(session_id, agent, cwd, text, false, options.as_ref());
         if result.is_ok() {
             self.notify_session_working(session_id, true);
@@ -442,7 +454,9 @@ impl ProcessManager {
                     // `agy --conversation <uuid>` appends the turn to its own brain transcript.
                     // Mirroring the row into `~/.multibot/history/` would show it twice, and
                     // the desktop is watching whichever file the session actually lives in.
-                    if history_path.starts_with(self.home.join(".multibot")) {
+                    if history_path.starts_with(self.home.join(".multibot"))
+                        && crate::providers::antigravity::resolve_transcript(&self.home, session_id, &history_path) == history_path
+                    {
                         append_agy_user_row(
                             &history_path,
                             session_id,
@@ -477,6 +491,7 @@ impl ProcessManager {
             AgentKind::Claude => {
                 let args = build_claude_args(session_id, text, is_new_session, options)?;
                 let mut cmd = Command::new(&bin_path);
+                cmd.env("MULTIBOT_SESSION_ID", session_id);
                 cmd.args(&args)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
@@ -511,6 +526,7 @@ impl ProcessManager {
                     args.insert(1, "--json".into());
                 }
                 let mut cmd = Command::new(&bin_path);
+                cmd.env("MULTIBOT_SESSION_ID", session_id);
                 cmd.args(&args)
                     .stdin(Stdio::null())
                     .stdout(if owned { Stdio::piped() } else { Stdio::null() })
@@ -597,6 +613,7 @@ impl ProcessManager {
                     }
                 }
                 let mut cmd = Command::new(&bin_path);
+                cmd.env("MULTIBOT_SESSION_ID", session_id);
                 cmd.args(&args).stdin(Stdio::null()).stderr(Stdio::null());
                 if agent == AgentKind::Cursor {
                     cmd.stdout(Stdio::piped());
@@ -701,6 +718,7 @@ impl ProcessManager {
                 }))? + "\n";
 
                 let mut cmd = Command::new(&bin_path);
+                cmd.env("MULTIBOT_SESSION_ID", session_id);
                 cmd.args(&args)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
@@ -1206,7 +1224,7 @@ impl ProcessManager {
 
         if agent == AgentKind::Shell {
             let result = Command::new("tmux")
-                .args(["new-session", "-d", "-s", &session_id, "-c", &cwd])
+                .args(["new-session", "-d", "-s", &session_id, "-c", &cwd, "-e", &format!("MULTIBOT_SESSION_ID={session_id}")])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -1613,6 +1631,8 @@ impl ProcessManager {
                     .map(PathBuf::from)
                     .and_then(|p| crate::providers::antigravity::brain_conversation_id(&p))
             })
+            .or_else(|| crate::providers::antigravity::brain_conversation_id(
+                &crate::providers::antigravity::transcript_target(&self.home, session_id, &hosted_history_path(&self.home, session_id))))
     }
 
     /// Keep a resumed native chat discoverable after its process exits.
@@ -1643,9 +1663,6 @@ impl ProcessManager {
 
     fn agy_history_sink(&self, session_id: &str, conversation: Option<&str>) -> PathBuf {
         let hosted = hosted_history_path(&self.home, session_id);
-        if hosted.is_file() {
-            return hosted;
-        }
         conversation
             .and_then(|id| native_brain_transcript(&self.home, id))
             .unwrap_or(hosted)
@@ -2083,8 +2100,20 @@ pub fn apply_agy_stream_output(
         entry.updated_at_ms = ts;
         let _ = meta.save(home);
     }
+    let native = crate::providers::antigravity::resolve_transcript(home, session_id, history_path);
+    if native != history_path {
+        let mut meta = MetadataStore::load(home);
+        let entry = meta.sessions.entry(session_id.to_string()).or_default();
+        if entry.source_path.as_deref() != native.to_str() {
+            entry.source_path = Some(native.to_string_lossy().into_owned());
+            let _ = meta.save(home);
+            let _ = append_history_record(history_path, &json!({"type":"multibot_meta", "session_id":session_id,
+                "conversation_id": meta.get(session_id).and_then(|m| m.native_session_id.as_deref())}));
+        }
+    }
     // Native transcripts belong to the CLI. Mirroring stdout there duplicates its replies.
-    if !history_path.starts_with(home.join(".multibot/history")) {
+    if (!matches!(out, AgyStreamOutput::Init { .. }) && native != history_path)
+        || !history_path.starts_with(home.join(".multibot/history")) {
         return matches!(
             out,
             AgyStreamOutput::AssistantMessage(_) | AgyStreamOutput::TurnEnded { .. }
@@ -3826,6 +3855,40 @@ mv '{}.tmp' '{}'
         let _ = fs::remove_dir_all(&home);
     }
 
+    #[tokio::test]
+    async fn send_prompt_queues_behind_busy_chat_and_enforces_queue_limit() {
+        let home = temp_home("cross-session-busy");
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mgr = ProcessManager::new(home.clone(), tx);
+        mgr.state.lock().unwrap().active.insert("busy".into(), ActiveProcess { pid:12345, cwd:None,
+            source_path:home.join("chat.jsonl"), stdin_tx:None, busy:true, interrupted:false });
+        for _ in 0..MAX_QUEUED_PROMPTS_PER_SESSION {
+            assert_eq!(mgr.send_prompt("busy", AgentKind::Claude, None, "Cross-session message", None).await.unwrap(), "queued behind active turn");
+        }
+        assert!(mgr.send_prompt("busy", AgentKind::Claude, None, "Overflow", None).await.unwrap_err().to_string().contains("queue full"));
+        assert_eq!(mgr.state.lock().unwrap().active["busy"].pid, 12345);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn hosted_stream_stops_mirroring_messages_as_soon_as_native_exists() {
+        let home = temp_home("agy-stop-mirror");
+        let conversation = "4d5d5535-249c-4f10-90d9-7ec49c2eeb53";
+        let mirror = hosted_history_path(&home, "hosted");
+        append_agy_user_row(&mirror, "hosted", Some("/repo"), "Start", 1).unwrap();
+        apply_agy_stream_output(&home, "hosted", &mirror, AgyStreamOutput::Init { conversation_id:Some(conversation.into()), model:Some("gemini".into()) }, 2);
+        let native = home.join(".gemini/antigravity-cli/brain").join(conversation).join(".system_generated/logs/transcript.jsonl");
+        fs::create_dir_all(native.parent().unwrap()).unwrap();
+        fs::write(&native, "{\"type\":\"PLANNER_RESPONSE\",\"content\":\"Native reply\"}\n").unwrap();
+        let mut acc = AgyStreamAccumulator::new();
+        for event in [json!({"event":"step_update","step_update":{"step_type":"agent_response","step_index":1,"state":"DONE","text_delta":"Native reply"}}), json!({"event":"result","result":{"status":"SUCCESS"}})] {
+            for output in acc.feed_value(&event, None, None) { apply_agy_stream_output(&home, "hosted", &mirror, output, 3); }
+        }
+        assert!(!fs::read_to_string(&mirror).unwrap().contains("Native reply"));
+        assert_eq!(MetadataStore::load(&home).get("hosted").unwrap().source_path.as_deref(), native.to_str());
+        fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn native_stream_events_never_duplicate_cli_transcript_rows() {
         let home = temp_home("agy-native-no-duplicates");
@@ -3863,7 +3926,7 @@ mv '{}.tmp' '{}'
         fs::write(&hosted, "").unwrap();
         assert_eq!(
             mgr.agy_history_sink("hosted-session", Some(conversation)),
-            hosted
+            path
         );
         fs::remove_dir_all(home).unwrap();
     }
