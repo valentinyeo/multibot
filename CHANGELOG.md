@@ -7,6 +7,8 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 
+- Use the classic robot icon for the Windows app, title bar, taskbar, installer, and shortcuts.
+- Start a new server shell from Ctrl+K with Session: New Shell session, choosing a directory when the workspace has several.
 - Paste Windows clipboard text into focused server shells with Ctrl+V or Ctrl+Shift+V instead of asking remote tools to read a clipboard.
 - Open new chats without missing-history errors, including Antigravity before its first prompt.
 - Dissolve a server shell with two Ctrl+Shift+W presses within three seconds to close its terminal and stop its remote tmux session.

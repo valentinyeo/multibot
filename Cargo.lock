@@ -4582,6 +4582,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "chrono",
+ "embed-resource",
  "gpui-kit",
  "multibot-core",
  "multibot-gpu",

@@ -336,6 +336,21 @@ impl MultibotView {
                 global: true,
             },
             PaletteCommandSpec {
+                id: "pal-cmd-spawn-shell".into(),
+                label: "Session: New Shell session".into(),
+                chord: String::new(),
+                category: PaletteCategory::Sessions,
+                destructive: false,
+                aliases: vec![
+                    "new shell".into(),
+                    "spawn shell".into(),
+                    "tmux".into(),
+                    "terminal".into(),
+                ],
+                tab_context: false,
+                global: true,
+            },
+            PaletteCommandSpec {
                 id: "pal-cmd-unarchive-session".into(),
                 label: "Reactivate".into(),
                 chord: "Ctrl+Shift+T".into(),
@@ -1588,11 +1603,13 @@ impl MultibotView {
                     "pal-cmd-spawn-claude"
                     | "pal-cmd-spawn-codex"
                     | "pal-cmd-spawn-antigravity"
-                    | "pal-cmd-spawn-pi" => {
+                    | "pal-cmd-spawn-pi"
+                    | "pal-cmd-spawn-shell" => {
                         let agent = match id.as_str() {
                             "pal-cmd-spawn-claude" => AgentKind::Claude,
                             "pal-cmd-spawn-codex" => AgentKind::Codex,
                             "pal-cmd-spawn-antigravity" => AgentKind::Antigravity,
+                            "pal-cmd-spawn-shell" => AgentKind::Shell,
                             _ => AgentKind::Pi,
                         };
                         self.start_agent_session(agent, window, cx);
@@ -2712,6 +2729,64 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn new_shell_session_from_palette_spawns_and_opens_live_shell(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, _| {
+                v.daemon_tx = Some(tx);
+                let existing = SessionSummary {
+                    id: "existing-chat".into(),
+                    agent: AgentKind::Claude,
+                    cwd: Some("/repo".into()),
+                    ..Default::default()
+                };
+                v.sessions = vec![existing.clone()];
+                v.selected_session = Some(existing);
+            });
+            for query in ["new shell", "spawn shell", "tmux", "terminal"] {
+                window.render_frame(cx);
+                window.press("ctrl-k", cx);
+                view.update(cx, |v, cx| {
+                    v.palette_input.update(cx, |input, cx| input.set_value(query, window, cx));
+                    assert!(v.build_palette_rows(query, now_unix_ms()).iter().any(|row| {
+                        matches!(row, PaletteRow::Command { id, label, .. }
+                            if id == "pal-cmd-spawn-shell" && label == "Session: New Shell session")
+                    }));
+                });
+                window.render_frame(cx);
+                assert!(window.find("pal-cmd-spawn-shell").visible());
+                if query != "terminal" {
+                    window.press("escape", cx);
+                }
+            }
+            window.click("pal-cmd-spawn-shell", cx);
+            window.render_frame(cx);
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::SpawnSession {
+                agent: AgentKind::Shell, cwd, title: None, initial_prompt: None, options: None,
+            }) if cwd == "/repo"));
+            assert!(rx.try_recv().is_err());
+            assert_eq!(view.read(cx).active_modal, ActiveModal::None);
+            view.update(cx, |v, cx| {
+                let shell = SessionSummary {
+                    id: "term-new-shell".into(),
+                    title: "Shell".into(),
+                    agent: AgentKind::Shell,
+                    cwd: Some("/repo".into()),
+                    ..Default::default()
+                };
+                v.handle_daemon_server_event(multibot_proto::ServerEvent::SessionSpawned {
+                    session: shell.clone(),
+                }, cx);
+                assert_eq!(v.selected_session.as_ref().unwrap().id, shell.id);
+                assert_eq!(v.selected_session.as_ref().unwrap().agent, AgentKind::Shell);
+            });
+            window.render_frame(cx);
+            assert!(window.find("server-shell-panel").visible());
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
     fn new_agent_sessions_pick_directory_before_spawning(cx: &mut TestAppContext) {
         let (handle, view) = open_view(cx);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2731,6 +2806,7 @@ mod tests {
                 ("antigravity", AgentKind::Antigravity),
                 ("pi", AgentKind::Pi),
                 ("codex", AgentKind::Codex),
+                ("shell", AgentKind::Shell),
             ] {
                 window.render_frame(cx);
                 window.press("ctrl-k", cx);
@@ -2779,6 +2855,7 @@ mod tests {
                     ("antigravity", AgentKind::Antigravity),
                     ("pi", AgentKind::Pi),
                     ("codex", AgentKind::Codex),
+                    ("shell", AgentKind::Shell),
                 ] {
                     window.render_frame(cx);
                     window.press("ctrl-k", cx);

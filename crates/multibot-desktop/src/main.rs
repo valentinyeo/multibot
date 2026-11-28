@@ -178,6 +178,35 @@ fn window_title_includes_current_build_version() {
     );
 }
 
+#[test]
+fn app_icon_is_valid_ico_with_multiple_sizes() {
+    let icon = include_bytes!("../assets/multibot.ico");
+    assert_eq!(&icon[..4], &[0, 0, 1, 0]);
+    let count = u16::from_le_bytes([icon[4], icon[5]]) as usize;
+    assert!(count > 1);
+    let entries = &icon[6..6 + count * 16];
+    let mut sizes = std::collections::BTreeSet::new();
+    for entry in entries.chunks_exact(16) {
+        let width = if entry[0] == 0 {
+            256
+        } else {
+            u16::from(entry[0])
+        };
+        let height = if entry[1] == 0 {
+            256
+        } else {
+            u16::from(entry[1])
+        };
+        sizes.insert((width, height));
+        let length = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as usize;
+        let offset = u32::from_le_bytes(entry[12..16].try_into().unwrap()) as usize;
+        assert!(length > 0 && offset >= 6 + count * 16 && offset + length <= icon.len());
+    }
+    assert!(sizes.len() > 1);
+    assert!(sizes.contains(&(16, 16)));
+    assert!(sizes.contains(&(256, 256)));
+}
+
 fn main() {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     if raw_args.iter().any(|a| a == "--version" || a == "-V") {

@@ -22,6 +22,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\multibot.exe
+SetupIconFile=..\crates\multibot-desktop\assets\multibot.ico
 OutputDir=..\release
 OutputBaseFilename=Multibot-Setup-x64
 ; Binaries are already built; avoid recompressing them on the release critical path.
@@ -39,8 +40,8 @@ Source: "{#SourceDir}\multibot.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\multibotd-linux-x86_64"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\Multibot"; Filename: "{app}\multibot.exe"; WorkingDir: "{app}"; AppUserModelID: "Multibot.Desktop"
-Name: "{autodesktop}\Multibot"; Filename: "{app}\multibot.exe"; WorkingDir: "{app}"; AppUserModelID: "Multibot.Desktop"; Tasks: desktopicon
+Name: "{autoprograms}\Multibot"; Filename: "{app}\multibot.exe"; WorkingDir: "{app}"; IconFilename: "{app}\multibot.exe"; IconIndex: 0; AppUserModelID: "Multibot.Desktop"
+Name: "{autodesktop}\Multibot"; Filename: "{app}\multibot.exe"; WorkingDir: "{app}"; IconFilename: "{app}\multibot.exe"; IconIndex: 0; AppUserModelID: "Multibot.Desktop"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\multibot.exe"; Description: "Launch Multibot"; Flags: nowait postinstall skipifsilent
