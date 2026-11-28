@@ -311,7 +311,8 @@ pub(crate) fn resolve_verticon(
 }
 
 fn mix(base: u32, tint: u32) -> u32 {
-    let channel = |shift| (((base >> shift) & 255) * 4 + ((tint >> shift) & 255)) / 5;
+    let channel =
+        |shift: u32| (((base >> shift) & 255u32) * 4u32 + ((tint >> shift) & 255u32)) / 5u32;
     (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
