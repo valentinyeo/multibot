@@ -21,7 +21,17 @@ if grep -rnE 'NvOptimusEnablement|AmdPowerXpress' crates/ patches/; then
 fi
 
 echo "==> Running full workspace tests (unit + headless GPUI Kit UI journeys)..."
-cargo test --workspace
+if command -v cargo-nextest >/dev/null 2>&1; then
+    nextest_args=()
+    if [[ -z "${NEXTEST_TEST_THREADS:-}" && -n "${RUST_TEST_THREADS:-}" ]]; then
+        nextest_args+=(--test-threads "${RUST_TEST_THREADS}")
+    fi
+    cargo nextest run --workspace --status-level fail --final-status-level slow "${nextest_args[@]}"
+    # Nextest does not run doctests.
+    cargo test --workspace --doc
+else
+    cargo test --workspace
+fi
 
 echo "==> Building release multibotd & verifying --version and --stdio protocol..."
 cargo build --release -p multibotd
