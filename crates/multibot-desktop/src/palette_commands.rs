@@ -431,6 +431,11 @@ impl MultibotView {
                         self.toggle_terminal_pane(cx);
                         return;
                     }
+                    "pal-browser-google-signin" => {
+                        if let Some(win) = window {
+                            self.start_browser_google_signin(win, cx);
+                        }
+                    }
                     "pal-cmd-browser-toggle" => {
                         if let Some(win) = window {
                             self.toggle_browser_pane(win, cx);

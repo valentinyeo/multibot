@@ -577,6 +577,16 @@ impl MultibotView {
             },
             // Docked browser pane
             PaletteCommandSpec {
+                id: "pal-browser-google-signin".into(),
+                label: "Browser: Sign in to Google".into(),
+                chord: "".into(),
+                category: PaletteCategory::Browser,
+                destructive: false,
+                aliases: vec!["chrome sync".into(), "google account".into()],
+                tab_context: false,
+                global: true,
+            },
+            PaletteCommandSpec {
                 id: "pal-cmd-browser-toggle".into(),
                 label: "Toggle Browser Pane".into(),
                 chord: "Alt+A".into(),

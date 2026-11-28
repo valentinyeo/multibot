@@ -6,6 +6,7 @@ use std::{
 };
 
 pub const DEFAULT_URL: &str = "about:blank";
+pub const GOOGLE_SIGNIN_URL: &str = "https://accounts.google.com";
 
 #[derive(Debug, Default)]
 pub struct BrowserTab {
@@ -50,6 +51,14 @@ impl BrowserPaneState {
             tab.hidden_since_ms = None;
         }
         tab.open
+    }
+
+    pub fn close_all(&mut self) {
+        for tab in self.tabs.values_mut() {
+            tab.open = false;
+            tab.hidden_since_ms = None;
+        }
+        self.visible = None;
     }
 
     pub fn set_url(&mut self, session: &str, url: String) {
@@ -199,6 +208,23 @@ pub fn client_to_screen_rect(
     }
 }
 
+pub fn signin_launch_args(profile: &Path) -> Vec<OsString> {
+    let mut profile_arg = OsString::from("--user-data-dir=");
+    profile_arg.push(profile);
+    vec![
+        profile_arg,
+        "--disable-gpu".into(),
+        "--disable-gpu-compositing".into(),
+        "--disable-accelerated-video-decode".into(),
+        "--disable-background-mode".into(),
+        "--no-first-run".into(),
+        "--no-default-browser-check".into(),
+        "--hide-crash-restore-bubble".into(),
+        "--new-window".into(),
+        GOOGLE_SIGNIN_URL.into(),
+    ]
+}
+
 pub fn launch_args(profile: &Path, url: &str) -> Vec<OsString> {
     launch_args_with_bounds(profile, url, None)
 }
@@ -278,6 +304,63 @@ impl BrowserPaneRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signin_uses_shared_profile_and_keeps_gpu_disabled() {
+        let profile = shared_profile(&browser_profile_root(Path::new("roaming path")));
+        let args = signin_launch_args(&profile);
+        let mut profile_arg = OsString::from("--user-data-dir=");
+        profile_arg.push(&profile);
+        assert!(args.contains(&profile_arg));
+        for arg in [
+            "--disable-gpu",
+            "--disable-gpu-compositing",
+            "--disable-accelerated-video-decode",
+            "--disable-background-mode",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--hide-crash-restore-bubble",
+            "--new-window",
+            GOOGLE_SIGNIN_URL,
+        ] {
+            assert!(args.contains(&OsString::from(arg)), "missing {arg}");
+        }
+        assert_eq!(args.last(), Some(&OsString::from(GOOGLE_SIGNIN_URL)));
+    }
+
+    #[test]
+    fn signin_has_no_debugging_automation_or_sync_disabling_flags() {
+        for arg in signin_launch_args(Path::new("profile")) {
+            let arg = arg.to_string_lossy();
+            for forbidden in [
+                "--remote-debugging",
+                "--enable-automation",
+                "--disable-sync",
+                "--load-extension",
+            ] {
+                assert!(!arg.starts_with(forbidden), "forbidden sign-in flag: {arg}");
+            }
+        }
+    }
+
+    #[test]
+    fn closing_all_tabs_preserves_urls_and_allows_immediate_reopen() {
+        let mut state = BrowserPaneState::default();
+        state.toggle("a");
+        state.toggle("b");
+        state.set_url("a", "https://example.com".into());
+        state.select_visible(Some("a"), 0);
+        state.select_visible(Some("b"), 10);
+        state.close_all();
+        assert!(!state.is_open("a"));
+        assert!(!state.is_open("b"));
+        assert_eq!(state.next_hibernation_ms(), None);
+        assert_eq!(
+            state.tab("a").unwrap().url.as_deref(),
+            Some("https://example.com")
+        );
+        assert!(state.toggle("a"));
+    }
 
     #[test]
     fn shared_profile_is_always_inside_multibot() {
