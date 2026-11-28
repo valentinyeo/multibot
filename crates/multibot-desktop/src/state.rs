@@ -1,6 +1,6 @@
 use gpui_kit::{App, Global, Task};
 use multibot_core::outbox::ChatOutbox;
-use multibot_core::workspaces::{PaletteStats, WorkspaceStore, now_unix_ms};
+use multibot_core::workspaces::{PaletteStats, WorkspaceStore, canonical_session_key, now_unix_ms};
 use multibot_core::{DaemonTarget, FootprintSnapshot, MultibotSettings};
 use multibot_proto::{ClientRequest, ServerEvent, SessionSummary};
 use multibot_updater::{CheckOutcome, ReleaseInfo, StagedUpdate, UpdateState};
@@ -364,6 +364,32 @@ impl SharedAppStore {
         if !cx.has_global::<Self>() {
             cx.set_global(Self::new_persisted_with_args(settings, preserved_cli_args));
         }
+    }
+
+    pub(crate) fn apply_harness_switch(
+        &mut self,
+        host: &str,
+        previous: &SessionSummary,
+        session: &SessionSummary,
+    ) {
+        let old = canonical_session_key(host, previous.agent, &previous.id);
+        let new = canonical_session_key(host, session.agent, &session.id);
+        self.workspace_store.replace_session_key(&old, &new);
+        if let Some(connection) = self.host_connections.get_mut(host) {
+            connection
+                .sessions
+                .retain(|s| s.id != previous.id && s.id != session.id);
+            connection.sessions.insert(0, session.clone());
+            self.rebuild_merged_sessions();
+        } else {
+            self.sessions
+                .retain(|s| s.id != previous.id && s.id != session.id);
+            self.sessions.insert(0, session.clone());
+        }
+        if self.persist_to_disk {
+            let _ = self.workspace_store.save();
+        }
+        self.bump_revision();
     }
 
     pub(crate) fn rebuild_merged_sessions(&mut self) {

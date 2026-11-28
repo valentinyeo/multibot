@@ -1095,6 +1095,11 @@ impl MultibotView {
             self.last_synced_revision = rev;
         }
 
+        if self.chat_state.pending_harness_switch.is_some()
+            && self.active_session_tx().is_none_or(|tx| tx.is_closed())
+        {
+            self.chat_state.pending_harness_switch = None;
+        }
         if changed {
             self.cleanup_unmounted_surface_state();
             cx.notify();
@@ -2626,6 +2631,10 @@ impl MultibotView {
                         }
                         store.bump_revision();
                     }
+                    ServerEvent::HarnessSwitched { previous, session } => {
+                        cx.global_mut::<SharedAppStore>()
+                            .apply_harness_switch(host_label, previous, session);
+                    }
                     ServerEvent::SessionSpawned { session } => {
                         let store = cx.global_mut::<SharedAppStore>();
                         if let Some(existing) = store
@@ -3035,6 +3044,15 @@ impl MultibotView {
                             let _ = store.workspace_store.save();
                         }
                         store.bump_revision();
+                    }
+                    ServerEvent::HarnessSwitched { previous, session } => {
+                        let host = cx
+                            .global::<SharedAppStore>()
+                            .connected_host
+                            .clone()
+                            .unwrap_or_else(|| "local".into());
+                        cx.global_mut::<SharedAppStore>()
+                            .apply_harness_switch(&host, previous, session);
                     }
                     ServerEvent::SessionSpawned { session } => {
                         let store = cx.global_mut::<SharedAppStore>();
@@ -3517,6 +3535,15 @@ impl MultibotView {
                     self.sync_sessions_to_shared(cx);
                     self.sync_workspace_to_shared(cx);
                 }
+                ServerEvent::Harnesses { choices } => {
+                    self.chat_state
+                        .harness_choices
+                        .insert(self.active_session_host().into(), choices);
+                }
+                ServerEvent::HarnessSwitched { previous, session } => {
+                    let host = self.active_session_host().to_string();
+                    self.apply_harness_switch(&host, previous, session, cx);
+                }
                 ServerEvent::SessionSpawned { session } => {
                     if let Some(existing) = self
                         .sessions
@@ -3705,6 +3732,9 @@ impl MultibotView {
                         && let Some((msg_id, text)) = self.last_dispatched_prompt.take()
                     {
                         self.record_send_failure(msg_id, text, message.clone(), cx);
+                    }
+                    if code == "switch_harness_failed" {
+                        self.chat_state.pending_harness_switch = None;
                     }
                     self.notice = Some(format!("[{code}] {message}"));
                 }
@@ -4190,6 +4220,17 @@ impl MultibotView {
                     }
                 }
             }
+            ServerEvent::Harnesses { choices } => {
+                self.chat_state
+                    .harness_choices
+                    .insert(host_label.into(), choices);
+                changed =
+                    self.active_modal == ActiveModal::Palette && self.palette_state.provider_picker;
+            }
+            ServerEvent::HarnessSwitched { previous, session } => {
+                self.apply_harness_switch(host_label, previous, session, cx);
+                changed = true;
+            }
             ServerEvent::SessionSpawned { session } => {
                 if (self.pending_spawn_open
                     && self
@@ -4353,6 +4394,9 @@ impl MultibotView {
                 {
                     self.record_send_failure(msg_id, text, message.clone(), cx);
                 }
+                if code == "switch_harness_failed" {
+                    self.chat_state.pending_harness_switch = None;
+                }
                 self.notice = Some(format!("[{code}] {message}"));
                 changed = true;
             }
@@ -4368,6 +4412,7 @@ impl MultibotView {
     }
 
     pub(crate) fn clear_active_session_view(&mut self) {
+        self.chat_state.pending_harness_switch = None;
         self.voice.cancel();
         self.selected_session = None;
         self.selected_session_host = None;

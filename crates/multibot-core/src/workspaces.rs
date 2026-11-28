@@ -755,6 +755,43 @@ pub fn frequent_order_key(visits: &[i64], last_input_ms: Option<i64>, now_ms: i6
 // =============================================================================
 
 impl WorkspaceStore {
+    pub fn replace_session_key(&mut self, old: &str, new: &str) {
+        if old == new {
+            return;
+        }
+        if let Some(value) = self.session_meta.remove(old) {
+            self.session_meta.insert(new.into(), value);
+        }
+        if let Some(value) = self.session_titles.remove(old) {
+            self.session_titles.insert(new.into(), value);
+        }
+        if let Some(value) = self.unread_boundaries.remove(old) {
+            self.unread_boundaries.insert(new.into(), value);
+        }
+        if let Some(value) = self.waiting_sessions.remove(old) {
+            self.waiting_sessions.insert(new.into(), value);
+        }
+        if let Some(value) = self.reactions.remove(old) {
+            self.reactions.insert(new.into(), value);
+        }
+        if self.favorites.remove(old) {
+            self.favorites.insert(new.into());
+        }
+        if self.inbox_excluded.remove(old) {
+            self.inbox_excluded.insert(new.into());
+        }
+        for entry in &mut self.recent_views {
+            if entry.session_key == old {
+                entry.session_key = new.into();
+            }
+        }
+        for entry in &mut self.waiting_undo_stack {
+            if entry.session_key == old {
+                entry.session_key = new.into();
+            }
+        }
+    }
+
     pub fn new() -> Self {
         let mut store = Self::default();
         store.ensure_default_workspace();

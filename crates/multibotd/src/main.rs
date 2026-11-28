@@ -1,6 +1,7 @@
 #[cfg(unix)]
 mod browser_bridge;
 mod commands;
+mod continuity;
 mod process;
 mod providers;
 mod search;
@@ -13,7 +14,7 @@ use multibot_proto::{ClientRequest, PROTOCOL_VERSION, ServerEvent, build_version
 use process::ProcessManager;
 use providers::{
     ArchiveStore, DiscoveryContext, LiveActivity, MetadataStore, discover_live_sessions_with_ctx,
-    now_ms, read_history_page,
+    now_ms,
 };
 use search::{SearchError, search_history};
 use sha2::{Digest, Sha256};
@@ -204,9 +205,12 @@ async fn async_main(
                     continue;
                 }
                 let tx = out_tx.clone();
+                let history_home = home.clone();
                 let _ = disk_tx.send(Box::new(move || {
                     let path = PathBuf::from(&source_path);
-                    match read_history_page(
+                    match continuity::read_page(
+                        &history_home,
+                        &session_id,
                         agent,
                         &path,
                         before_offset,
@@ -297,6 +301,23 @@ async fn async_main(
                 message_id,
             } => {
                 process_mgr.cancel_queued_prompt(session_id, message_id);
+            }
+            ClientRequest::ListHarnesses => {
+                let _ = out_tx.send(ServerEvent::Harnesses {
+                    choices: continuity::harnesses(&home),
+                });
+            }
+            ClientRequest::SwitchHarness {
+                session,
+                target,
+                context,
+            } => {
+                if let Err(err) = process_mgr.switch_harness(session, target, context) {
+                    let _ = out_tx.send(ServerEvent::Error {
+                        code: "switch_harness_failed".into(),
+                        message: err.to_string(),
+                    });
+                }
             }
             ClientRequest::SpawnSession {
                 agent,

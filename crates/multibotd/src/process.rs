@@ -154,6 +154,163 @@ impl ProcessManager {
         is_new_session: bool,
         options: Option<&SessionOptions>,
     ) -> Result<String> {
+        let mut handover = crate::continuity::load(&self.home, session_id)?;
+        let first_turn = handover.as_ref().is_some_and(|h| !h.started);
+        let enriched = if let Some(h) = handover.as_ref().filter(|h| !h.started) {
+            crate::continuity::prompt(&h.context, text)?
+        } else {
+            text.to_string()
+        };
+        let fallback = SessionOptions {
+            model: handover.as_ref().and_then(|h| h.target.model.clone()),
+            ..Default::default()
+        };
+        let result = self.dispatch_prompt_native(
+            session_id,
+            agent,
+            cwd,
+            &enriched,
+            is_new_session || first_turn,
+            options.or(Some(&fallback)),
+        )?;
+        if first_turn {
+            if let Some(h) = handover.as_mut() {
+                h.started = true;
+                crate::continuity::save(&self.home, session_id, h)?;
+            }
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn switch_harness(
+        self: &Arc<Self>,
+        previous: SessionSummary,
+        target: multibot_proto::HarnessChoice,
+        context: multibot_proto::HandoverContext,
+    ) -> Result<()> {
+        if previous.agent == AgentKind::Shell || target.agent == AgentKind::Shell {
+            return Err(anyhow!("Shell sessions cannot switch harness"));
+        }
+        if previous.working
+            || self.is_session_busy(&previous.id)
+            || self
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .queues
+                .get(&previous.id)
+                .is_some_and(|q| !q.is_empty())
+        {
+            return Err(anyhow!(
+                "Wait for the current turn and queued prompts before switching"
+            ));
+        }
+        let cwd = previous
+            .cwd
+            .as_deref()
+            .ok_or_else(|| anyhow!("Chat has no working directory"))?;
+        validate_cwd(cwd).map_err(|e| anyhow!(e))?;
+        if context.turns.len() > 24
+            || context
+                .turns
+                .iter()
+                .map(|t| t.text.chars().count())
+                .sum::<usize>()
+                > 16_000
+        {
+            return Err(anyhow!("handover context exceeds limit"));
+        }
+        validate_options(
+            target.agent,
+            Some(&SessionOptions {
+                model: target.model.clone(),
+                ..Default::default()
+            }),
+        )?;
+        let previous_page = crate::continuity::read_page(
+            &self.home,
+            &previous.id,
+            previous.agent,
+            Path::new(&previous.source_path),
+            None,
+            Some(1),
+            Some(1),
+            None,
+        )?;
+        let id = mint_uuid_v4(self.next_seq(), cwd);
+        let source_path = if target.agent == AgentKind::Codex {
+            self.home
+                .join(".multibot/codex")
+                .join(format!("{id}.jsonl"))
+        } else {
+            self.resolve_session_source_path(&id, target.agent, Some(cwd))
+        };
+        if let Some(parent) = source_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let session = SessionSummary {
+            id: id.clone(),
+            agent: target.agent,
+            source_path: source_path.to_string_lossy().into_owned(),
+            working: false,
+            model: target.model.clone(),
+            effort: None,
+            context_tokens: None,
+            context_limit: None,
+            ..previous.clone()
+        };
+        let handover = crate::continuity::Handover {
+            previous: previous.clone(),
+            previous_end: previous_page.file_size,
+            target,
+            context,
+            started: false,
+        };
+        crate::continuity::save(&self.home, &id, &handover)?;
+        let mut metadata = MetadataStore::load(&self.home);
+        metadata.sessions.insert(
+            id.clone(),
+            SessionMetaEntry {
+                title: Some(session.title.clone()),
+                cwd: session.cwd.clone(),
+                agent: Some(session.agent),
+                source_path: Some(session.source_path.clone()),
+                native_session_id: None,
+                workspace: session.workspace.clone(),
+                updated_at_ms: now_ms(),
+            },
+        );
+        metadata.save(&self.home)?;
+        let mut archive = ArchiveStore::load(&self.home);
+        archive.archived.insert(
+            previous.id.clone(),
+            ArchivedEntry {
+                kill_process: false,
+                archived_at_ms: now_ms(),
+                agent: Some(previous.agent),
+                source_path: Some(previous.source_path.clone()),
+            },
+        );
+        if let Err(err) = archive.save(&self.home) {
+            metadata.sessions.remove(&id);
+            metadata.save(&self.home)?;
+            return Err(err);
+        }
+        let _ = self
+            .out_tx
+            .send(ServerEvent::HarnessSwitched { previous, session });
+        Ok(())
+    }
+
+    fn dispatch_prompt_native(
+        self: &Arc<Self>,
+        session_id: &str,
+        agent: AgentKind,
+        cwd: Option<&str>,
+        text: &str,
+        is_new_session: bool,
+        options: Option<&SessionOptions>,
+    ) -> Result<String> {
         validate_options(agent, options)?;
         // Fast path: persistent hosted `agy` process already running with open stdin.
         if agent == AgentKind::Antigravity {
@@ -241,21 +398,69 @@ impl ProcessManager {
                 Ok(format!("dispatched claude (pid {pid})"))
             }
             AgentKind::Codex => {
-                let args = build_codex_args(session_id, text, is_new_session, options)?;
+                let source_path = self.resolve_session_source_path(session_id, agent, cwd);
+                let owned = source_path.starts_with(self.home.join(".multibot"));
+                let metadata = MetadataStore::load(&self.home);
+                let native = metadata
+                    .get(session_id)
+                    .and_then(|m| m.native_session_id.as_deref())
+                    .unwrap_or(session_id);
+                let mut args = build_codex_args(native, text, is_new_session, options)?;
+                if owned {
+                    args.insert(1, "--json".into());
+                }
                 let mut cmd = Command::new(&bin_path);
                 cmd.args(&args)
                     .stdin(Stdio::null())
-                    .stdout(Stdio::null())
+                    .stdout(if owned { Stdio::piped() } else { Stdio::null() })
                     .stderr(Stdio::null());
                 if let Some(dir) = cwd
                     && !dir.trim().is_empty()
                 {
                     cmd.current_dir(dir);
                 }
-                let child = spawn_with_retry(&mut cmd)
+                let mut child = spawn_with_retry(&mut cmd)
                     .with_context(|| format!("spawning {}", bin_path.display()))?;
                 let pid = child.id().unwrap_or(0);
                 let source_path = self.resolve_session_source_path(session_id, agent, cwd);
+                if owned {
+                    if is_new_session {
+                        append_history_record(
+                            &source_path,
+                            &json!({"type":"session_meta", "payload":{"id":session_id, "cwd":cwd}}),
+                        )?;
+                    }
+                    append_history_record(
+                        &source_path,
+                        &json!({"type":"response_item", "payload":{"type":"message", "role":"user", "content":[{"type":"input_text", "text":text}]}}),
+                    )?;
+                    let stdout = child.stdout.take().expect("piped Codex stdout");
+                    let mgr = Arc::clone(self);
+                    let sid = session_id.to_string();
+                    let sink = source_path.clone();
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .active
+                        .insert(
+                            sid.clone(),
+                            ActiveProcess {
+                                pid,
+                                cwd: cwd.map(String::from),
+                                source_path,
+                                stdin_tx: None,
+                                busy: true,
+                                interrupted: false,
+                            },
+                        );
+                    tokio::spawn(async move {
+                        read_harness_output(stdout, &mgr.home, &sid, &sink, true, AgentKind::Codex)
+                            .await;
+                        let _ = child.wait().await;
+                        mgr.on_process_exit(&sid, pid);
+                    });
+                    return Ok(format!("dispatched codex (pid {pid})"));
+                }
                 self.register_one_shot_child(
                     session_id.to_string(),
                     cwd.map(String::from),
@@ -277,7 +482,7 @@ impl ProcessManager {
                 let native_id = metadata
                     .get(session_id)
                     .and_then(|m| m.native_session_id.as_deref());
-                let args = build_pi_cursor_args(
+                let mut args = build_pi_cursor_args(
                     agent,
                     session_id,
                     &source_path,
@@ -285,6 +490,11 @@ impl ProcessManager {
                     text,
                     is_new_session,
                 )?;
+                if agent == AgentKind::Pi {
+                    if let Some(model) = options.and_then(|o| o.model.as_ref()) {
+                        args.splice(0..0, ["--model".into(), model.clone()]);
+                    }
+                }
                 let mut cmd = Command::new(&bin_path);
                 cmd.args(&args).stdin(Stdio::null()).stderr(Stdio::null());
                 if agent == AgentKind::Cursor {
@@ -345,7 +555,15 @@ impl ProcessManager {
                             },
                         );
                     tokio::spawn(async move {
-                        read_cursor_output(stdout, &mgr.home, &sid, &sink, owned).await;
+                        read_harness_output(
+                            stdout,
+                            &mgr.home,
+                            &sid,
+                            &sink,
+                            owned,
+                            AgentKind::Cursor,
+                        )
+                        .await;
                         let _ = child.wait().await;
                         mgr.on_process_exit(&sid, pid);
                     });
@@ -945,6 +1163,7 @@ impl ProcessManager {
                 agent: Some(agent),
                 source_path: Some(source_path.to_string_lossy().to_string()),
                 native_session_id: None,
+                workspace: None,
                 updated_at_ms: ts,
             },
         );
@@ -1292,6 +1511,7 @@ impl ProcessManager {
                 agent: Some(AgentKind::Antigravity),
                 source_path: Some(source_path.to_string_lossy().to_string()),
                 native_session_id: Some(conversation.to_string()),
+                workspace: None,
                 updated_at_ms: now_ms(),
             },
         );
@@ -1365,11 +1585,16 @@ impl ProcessManager {
                             .join(format!("{session_id}.jsonl"))
                     })
             }
-            AgentKind::Codex => self
-                .home
-                .join(".codex")
-                .join("sessions")
-                .join(format!("rollout-{session_id}.jsonl")),
+            AgentKind::Codex => MetadataStore::load(&self.home)
+                .get(session_id)
+                .and_then(|m| m.source_path.as_ref())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    self.home
+                        .join(".codex")
+                        .join("sessions")
+                        .join(format!("rollout-{session_id}.jsonl"))
+                }),
         }
     }
 }
@@ -1414,12 +1639,13 @@ fn build_pi_cursor_args(
     Ok(args)
 }
 
-async fn read_cursor_output(
+async fn read_harness_output(
     stdout: tokio::process::ChildStdout,
     home: &Path,
     session_id: &str,
     sink: &Path,
     owned: bool,
+    agent: AgentKind,
 ) {
     let mut reader = BufReader::new(stdout);
     let mut line = Vec::new();
@@ -1450,6 +1676,27 @@ async fn read_cursor_output(
             let raw = String::from_utf8_lossy(&line);
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&strip_base64_cow(&raw)) {
                 let kind = value.get("type").and_then(serde_json::Value::as_str);
+                if agent == AgentKind::Codex {
+                    if let Some(native) = value.get("thread_id").and_then(serde_json::Value::as_str)
+                    {
+                        let mut meta = MetadataStore::load(home);
+                        if let Some(entry) = meta.sessions.get_mut(session_id) {
+                            entry.native_session_id = Some(native.to_string());
+                            let _ = meta.save(home);
+                        }
+                    }
+                    if kind == Some("item.completed") {
+                        if let Some(item) = value.get("item").filter(|i| {
+                            i.get("type").and_then(|v| v.as_str()) == Some("agent_message")
+                        }) {
+                            let _ = append_history_record(
+                                sink,
+                                &json!({"type":"response_item", "payload":{"type":"message", "role":"assistant", "id":item.get("id"), "content":[{"type":"output_text", "text":item.get("text")} ]}}),
+                            );
+                        }
+                    }
+                }
+
                 if kind == Some("system")
                     && value.get("subtype").and_then(serde_json::Value::as_str) == Some("init")
                     && let Some(native) =
@@ -1570,10 +1817,9 @@ fn validate_options(agent: AgentKind, options: Option<&SessionOptions>) -> Resul
     let Some(options) = options.filter(|o| !o.is_default()) else {
         return Ok(());
     };
-    if matches!(
-        agent,
-        AgentKind::Antigravity | AgentKind::Pi | AgentKind::Cursor
-    ) {
+    if matches!(agent, AgentKind::Antigravity | AgentKind::Cursor)
+        || (agent == AgentKind::Pi && (options.effort.is_some() || options.permission.is_some()))
+    {
         return Err(anyhow!(
             "{} does not support composer overrides; use agent defaults",
             agent.label()
@@ -1878,6 +2124,269 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn switch_harness_delivers_handover_to_target_only_on_first_prompt() {
+        use multibot_proto::{HandoverContext, HandoverTurn, HarnessChoice, MessageRole};
+        use notify::Watcher;
+        use std::os::unix::fs::PermissionsExt;
+        for target in HarnessChoice::defaults() {
+            let home = temp_home("switch-first-prompt");
+            let original = home.join("original.jsonl");
+            fs::write(&original, "").unwrap();
+            let previous = SessionSummary {
+                id: "original".into(),
+                agent: AgentKind::Claude,
+                title: "Keep this chat".into(),
+                cwd: Some(home.to_string_lossy().into()),
+                source_path: original.to_string_lossy().into(),
+                ..Default::default()
+            };
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let mgr = ProcessManager::new(home.clone(), tx);
+            mgr.switch_harness(
+                previous,
+                target.clone(),
+                HandoverContext {
+                    turns: vec![HandoverTurn {
+                        role: MessageRole::User,
+                        text: "Keep the GPU rule".into(),
+                    }],
+                },
+            )
+            .unwrap();
+            let ServerEvent::HarnessSwitched { session, .. } = rx.try_recv().unwrap() else {
+                unreachable!()
+            };
+            for turn in 1..=2 {
+                let captured = home.join(format!("arguments-{turn}"));
+                let script = home.join(format!("fake-agent-{turn}"));
+                fs::write(&script, format!(r#"#!/bin/sh
+{{ printf '%s\n' "$@"; if [ "$1" = --input-format ]; then IFS= read -r input; printf '%s\n' "$input"; fi; }} > '{}.tmp'
+mv '{}.tmp' '{}'
+"#, captured.display(), captured.display(), captured.display())).unwrap();
+                if target.agent == AgentKind::Antigravity && turn == 1 {
+                    let second = home.join("arguments-2");
+                    fs::write(
+                        &script,
+                        format!(
+                            r#"#!/bin/sh
+IFS= read -r input
+printf '%s\n' "$input" > '{}.tmp'
+mv '{}.tmp' '{}'
+IFS= read -r input
+printf '%s\n' "$input" > '{}.tmp'
+mv '{}.tmp' '{}'
+"#,
+                            captured.display(),
+                            captured.display(),
+                            captured.display(),
+                            second.display(),
+                            second.display(),
+                            second.display()
+                        ),
+                    )
+                    .unwrap();
+                }
+                fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+                mgr.set_test_bin_override(Some(script));
+                let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+                let mut watcher =
+                    notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                        if let Ok(event) = event {
+                            let _ = event_tx.send(event);
+                        }
+                    })
+                    .unwrap();
+                watcher
+                    .watch(&home, notify::RecursiveMode::NonRecursive)
+                    .unwrap();
+                mgr.dispatch_prompt_internal(
+                    &session.id,
+                    session.agent,
+                    session.cwd.as_deref(),
+                    "Continue now",
+                    false,
+                    None,
+                )
+                .unwrap();
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while let Some(event) = event_rx.recv().await {
+                        if event.paths.contains(&captured) {
+                            return;
+                        }
+                    }
+                    panic!("agent output watcher closed");
+                })
+                .await
+                .unwrap();
+                let args = fs::read_to_string(&captured).unwrap();
+                assert!(args.contains("Continue now"), "{target:?}: {args}");
+                assert_eq!(
+                    args.contains("Keep the GPU rule"),
+                    turn == 1,
+                    "{target:?}: {args}"
+                );
+                assert!(
+                    crate::continuity::load(&home, &session.id)
+                        .unwrap()
+                        .unwrap()
+                        .started
+                );
+            }
+            fs::remove_dir_all(home).unwrap();
+        }
+    }
+
+    #[test]
+    fn switch_harness_preserves_metadata_history_and_rejects_busy_sessions() {
+        use multibot_proto::{ChatMessage, HandoverContext, HarnessChoice};
+        for target in HarnessChoice::defaults() {
+            let home = temp_home("switch-harness");
+            let source = home.join("original.jsonl");
+            fs::write(&source, concat!(
+                "{\"type\":\"user\",\"uuid\":\"u1\",\"message\":{\"content\":\"Keep the GPU rule\"}}\n",
+                "{\"type\":\"assistant\",\"uuid\":\"a1\",\"message\":{\"content\":\"Understood\"}}\n"
+            )).unwrap();
+            let original = fs::read(&source).unwrap();
+            let previous = SessionSummary {
+                id: "original".into(),
+                agent: AgentKind::Claude,
+                title: "Release planning".into(),
+                cwd: Some(home.to_string_lossy().into()),
+                source_path: source.to_string_lossy().into(),
+                workspace: Some("Build".into()),
+                ..Default::default()
+            };
+            let context = HandoverContext::from_messages(&[ChatMessage {
+                text: "Keep the GPU rule".into(),
+                ..Default::default()
+            }]);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let mgr = ProcessManager::new(home.clone(), tx);
+            let mut busy = previous.clone();
+            busy.working = true;
+            assert!(
+                mgr.switch_harness(busy, target.clone(), context.clone())
+                    .is_err()
+            );
+            assert!(!ArchiveStore::load(&home).is_archived(&previous.id));
+            mgr.switch_harness(previous.clone(), target.clone(), context.clone())
+                .unwrap();
+            let ServerEvent::HarnessSwitched {
+                previous: old,
+                session,
+            } = rx.try_recv().unwrap()
+            else {
+                panic!("missing switch acknowledgement")
+            };
+            assert_eq!(old, previous);
+            assert_eq!(session.title, previous.title);
+            assert_eq!(session.cwd, previous.cwd);
+            assert_eq!(session.workspace, previous.workspace);
+            assert_eq!(session.agent, target.agent);
+            assert_ne!(session.id, previous.id);
+            let saved = crate::continuity::load(&home, &session.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.context, context);
+            assert!(!saved.started);
+            assert_eq!(
+                MetadataStore::load(&home)
+                    .get(&session.id)
+                    .unwrap()
+                    .workspace,
+                previous.workspace
+            );
+            let page = crate::continuity::read_page(
+                &home,
+                &session.id,
+                session.agent,
+                Path::new(&session.source_path),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                page.messages
+                    .iter()
+                    .map(|m| m.text.as_str())
+                    .collect::<Vec<_>>(),
+                ["Keep the GPU rule", "Understood"]
+            );
+            assert_eq!(page.file_size, original.len() as u64);
+            assert!(ArchiveStore::load(&home).is_archived(&previous.id));
+            assert_eq!(fs::read(&source).unwrap(), original);
+            mgr.set_test_bin_override(Some(home.join("missing-agent")));
+            assert!(
+                mgr.dispatch_prompt_internal(
+                    &session.id,
+                    session.agent,
+                    session.cwd.as_deref(),
+                    "Continue",
+                    false,
+                    None
+                )
+                .is_err()
+            );
+            assert!(
+                !crate::continuity::load(&home, &session.id)
+                    .unwrap()
+                    .unwrap()
+                    .started
+            );
+            fs::remove_dir_all(home).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_harness_codex_records_native_id_and_visible_reply() {
+        let home = temp_home("switch-codex-output");
+        let sink = home.join(".multibot/codex/session.jsonl");
+        let mut metadata = MetadataStore::default();
+        metadata.sessions.insert(
+            "session".into(),
+            SessionMetaEntry {
+                agent: Some(AgentKind::Codex),
+                source_path: Some(sink.to_string_lossy().into()),
+                ..Default::default()
+            },
+        );
+        metadata.save(&home).unwrap();
+        append_history_record(
+            &sink,
+            &json!({"type":"session_meta", "payload":{"id":"session", "cwd":home}}),
+        )
+        .unwrap();
+        let mut child = Command::new("sh").arg("-c").arg(concat!(
+            "printf '%s\n' '{\"type\":\"thread.started\",\"thread_id\":\"native-thread\"}'; ",
+            "printf '%s\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"id\":\"reply\",\"text\":\"Continuing the same chat\"}}'"
+        )).stdout(Stdio::piped()).spawn().unwrap();
+        read_harness_output(
+            child.stdout.take().unwrap(),
+            &home,
+            "session",
+            &sink,
+            true,
+            AgentKind::Codex,
+        )
+        .await;
+        assert!(child.wait().await.unwrap().success());
+        assert_eq!(
+            MetadataStore::load(&home)
+                .get("session")
+                .unwrap()
+                .native_session_id
+                .as_deref(),
+            Some("native-thread")
+        );
+        let page = read_history_page(AgentKind::Codex, &sink, None, None, None, None).unwrap();
+        assert_eq!(page.messages[0].text, "Continuing the same chat");
+        fs::remove_dir_all(home).unwrap();
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn spawn_retries_executable_busy_until_writer_closes() {
@@ -1987,7 +2496,27 @@ mod tests {
             )
             .is_err()
         );
-        for agent in [AgentKind::Pi, AgentKind::Cursor] {
+        assert!(
+            validate_options(
+                AgentKind::Pi,
+                Some(&SessionOptions {
+                    model: Some("openai/gpt-5.4".into()),
+                    ..Default::default()
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_options(
+                AgentKind::Pi,
+                Some(&SessionOptions {
+                    effort: Some(EffortLevel::High),
+                    ..Default::default()
+                })
+            )
+            .is_err()
+        );
+        for agent in [AgentKind::Cursor] {
             assert!(
                 validate_options(
                     agent,
@@ -2021,7 +2550,15 @@ mod tests {
             "head -c 300000 /dev/zero | tr '\\000' X; printf '\\n'; ",
             "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":\"done\"}}'"
         )).stdout(Stdio::piped()).spawn().unwrap();
-        read_cursor_output(child.stdout.take().unwrap(), &home, "session", &sink, true).await;
+        read_harness_output(
+            child.stdout.take().unwrap(),
+            &home,
+            "session",
+            &sink,
+            true,
+            AgentKind::Cursor,
+        )
+        .await;
         assert!(child.wait().await.unwrap().success());
         assert_eq!(
             MetadataStore::load(&home)

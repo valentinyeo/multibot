@@ -188,6 +188,7 @@ pub(crate) struct ParsedQuotedMessage {
 pub(crate) enum MessageMenuAction {
     Reply,
     Copy,
+    Quote,
     React(ReactionEmoji),
     CancelWaiting,
 }
@@ -241,6 +242,8 @@ pub(crate) struct ChatViewState {
     pub font_size_pt: u16,
     pub slash_sync_pending: bool,
     pub composer_menu_open: bool,
+    pub harness_choices: HashMap<String, Vec<multibot_proto::HarnessChoice>>,
+    pub pending_harness_switch: Option<String>,
     pub composer_options: HashMap<String, SessionOptions>,
     pub draft_options: SessionOptions,
     pub pending_spawn_options: Option<SessionOptions>,
@@ -283,6 +286,8 @@ impl Default for ChatViewState {
             font_size_pt: DEFAULT_CHAT_FONT_SIZE_PT,
             slash_sync_pending: false,
             composer_menu_open: false,
+            harness_choices: HashMap::new(),
+            pending_harness_switch: None,
             composer_options: HashMap::new(),
             draft_options: SessionOptions::default(),
             pending_spawn_options: None,
@@ -391,12 +396,15 @@ impl ChatViewState {
         self.find_matches.get(self.find_current).copied()
     }
 
-    pub(crate) fn menu_actions_for(is_tool_only: bool, is_waiting: bool) -> Vec<MessageMenuAction> {
-        let mut actions = Vec::new();
-        if !is_tool_only {
-            actions.push(MessageMenuAction::Reply);
-        }
-        actions.push(MessageMenuAction::Copy);
+    pub(crate) fn menu_actions_for(
+        _is_tool_only: bool,
+        is_waiting: bool,
+    ) -> Vec<MessageMenuAction> {
+        let mut actions = vec![
+            MessageMenuAction::Copy,
+            MessageMenuAction::Reply,
+            MessageMenuAction::Quote,
+        ];
         actions.push(MessageMenuAction::React(ReactionEmoji::Like));
         actions.push(MessageMenuAction::React(ReactionEmoji::Dislike));
         actions.push(MessageMenuAction::React(ReactionEmoji::Heart));
@@ -514,7 +522,9 @@ impl ChatViewState {
                 }
             }
             _ => {
-                if self.focused_message_idx.is_some() && key.chars().count() == 1 {
+                if self.focused_message_idx.is_some()
+                    && (key.chars().count() == 1 || key == "space")
+                {
                     self.focused_message_idx = None;
                     self.message_action_menu_open = false;
                     self.message_action_index = 0;
@@ -542,7 +552,20 @@ pub(crate) fn message_visible_text(msg: &ChatMessage) -> String {
         }
     }
     if parts.is_empty() {
-        msg.text.clone()
+        msg.blocks
+            .iter()
+            .filter_map(|block| match block {
+                MessageBlock::ToolUse {
+                    name,
+                    summary,
+                    detail,
+                    ..
+                } => Some(format!("{name}\n{summary}\n{detail}")),
+                MessageBlock::Image { alt, .. } => Some(alt.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     } else {
         parts.join("\n")
     }
@@ -2313,7 +2336,7 @@ impl MultibotView {
         })
     }
 
-    fn active_composer_options(&self) -> SessionOptions {
+    pub(crate) fn active_composer_options(&self) -> SessionOptions {
         self.selected_session
             .as_ref()
             .and_then(|s| self.composer_options_for(s))
@@ -2357,6 +2380,20 @@ impl MultibotView {
             .bg(theme::bg_surface())
             .border_1()
             .border_color(theme::border_subtle())
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::text_secondary())
+                    .child("Provider / Harness"),
+            )
+            .child(
+                Button::new("composer-provider")
+                    .small()
+                    .label(agent.label())
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_provider_picker(window, cx)),
+                    ),
+            )
             .child(
                 div()
                     .text_xs()
@@ -2490,6 +2527,16 @@ impl MultibotView {
     }
 
     pub(crate) fn send_current_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .chat_state
+            .pending_harness_switch
+            .as_ref()
+            .is_some_and(|id| self.selected_session.as_ref().is_some_and(|s| &s.id == id))
+        {
+            self.notice = Some("Wait for the provider / harness switch to finish.".into());
+            cx.notify();
+            return;
+        }
         self.follow_chat_from_composer(cx);
         match self.voice.phase {
             multibot_core::voice::DictationPhase::Listening => {
@@ -2998,6 +3045,8 @@ impl MultibotView {
             self.chat_state.newest_chord.reset();
             self.chat_state.slash_sync_pending = false;
             self.chat_state.focused_message_idx = None;
+            self.prompt_input
+                .update(cx, |input, cx| input.focus(window, cx));
             cx.notify();
             return true;
         }
@@ -3122,6 +3171,17 @@ impl MultibotView {
         // 2b. Intercept Find bar typing/navigation in capture phase BEFORE prompt_input can
         //     consume printable characters even if focus remained inside composer.
         if self.chat_state.find_open && self.handle_chat_find_key_down(ev, window, cx) {
+            return;
+        }
+
+        if plain_key
+            && !self.chat_state.find_open
+            && !self.slash_picker_state.is_open()
+            && (self.chat_state.focused_message_idx.is_some() || ks.key.eq_ignore_ascii_case("up"))
+            && self.handle_empty_composer_nav_key_action(&ks.key, window, cx)
+        {
+            cx.stop_propagation();
+            window.prevent_default();
             return;
         }
 
@@ -3373,6 +3433,8 @@ impl MultibotView {
             if composer_val.is_empty() {
                 self.chat_state.slash_sync_pending = false;
                 self.jump_to_newest(cx);
+                self.prompt_input
+                    .update(cx, |input, cx| input.focus(window, cx));
                 cx.stop_propagation();
                 return;
             }
@@ -3382,7 +3444,7 @@ impl MultibotView {
         if !ks.modifiers.control
             && !ks.modifiers.alt
             && !ks.modifiers.shift
-            && self.handle_empty_composer_nav_key_action(&ks.key, cx)
+            && self.handle_empty_composer_nav_key_action(&ks.key, window, cx)
         {
             cx.stop_propagation();
         }
@@ -3402,10 +3464,12 @@ impl MultibotView {
     fn handle_empty_composer_nav_key_action(
         &mut self,
         key: &str,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let composer_val = self.prompt_input.read(cx).value().to_string();
-        let composer_empty = composer_val.is_empty();
+        let input = self.prompt_input.read(cx);
+        let composer_empty = input.value().is_empty()
+            || (input.focus_handle(cx).is_focused(window) && input.selected_range() == (0..0));
         let visible = project_visible_messages_with_overrides(
             &self.messages,
             &self.chat_state.local_reactions,
@@ -3448,14 +3512,24 @@ impl MultibotView {
             MessageNavOutcome::Ignored => false,
             MessageNavOutcome::FocusMoved(Some(vis_idx)) => {
                 self.chat_state.scroll_handle.scroll_to_item(vis_idx);
+                self.focus_chat_panel(window, cx);
+                cx.notify();
+                true
+            }
+            MessageNavOutcome::ReturnedToComposer => {
+                self.prompt_input.update(cx, |input, cx| {
+                    input.focus(window, cx);
+                    if key.chars().count() == 1 || key == "space" {
+                        input.replace(if key == "space" { " " } else { key }, window, cx);
+                    }
+                });
                 cx.notify();
                 true
             }
             MessageNavOutcome::FocusMoved(None)
             | MessageNavOutcome::MenuOpened(_)
             | MessageNavOutcome::MenuSelectionMoved(_)
-            | MessageNavOutcome::DismissedQuote
-            | MessageNavOutcome::ReturnedToComposer => {
+            | MessageNavOutcome::DismissedQuote => {
                 cx.notify();
                 true
             }
@@ -3475,10 +3549,34 @@ impl MultibotView {
                     match action {
                         MessageMenuAction::Reply => {
                             self.set_reply_quote(msg_id, msg_text, cx);
+                            self.chat_state.focused_message_idx = None;
+                            self.prompt_input
+                                .update(cx, |input, cx| input.focus(window, cx));
                         }
                         MessageMenuAction::Copy => {
                             cx.write_to_clipboard(ClipboardItem::new_string(msg_text));
                             self.notice = Some("Copied message.".into());
+                            cx.notify();
+                        }
+                        MessageMenuAction::Quote => {
+                            let quote = msg_text
+                                .lines()
+                                .map(|line| format!("> {line}"))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            self.prompt_input.update(cx, |input, cx| {
+                                let draft = input.value().to_string();
+                                let next = if draft.is_empty() {
+                                    format!("{quote}\n\n")
+                                } else {
+                                    format!("{draft}\n\n{quote}\n\n")
+                                };
+                                let end = next.len();
+                                input.set_value(next, window, cx);
+                                input.set_selected_range(end..end, cx);
+                                input.focus(window, cx);
+                            });
+                            self.chat_state.focused_message_idx = None;
                             cx.notify();
                         }
                         MessageMenuAction::React(emoji) => {
@@ -3497,6 +3595,92 @@ impl MultibotView {
                 true
             }
         }
+    }
+
+    fn render_message_action_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.chat_state.message_action_menu_open {
+            return None;
+        }
+        let mut menu = v_flex()
+            .id("message-action-menu")
+            .test_support()
+            .w(px(320.0))
+            .p_2()
+            .gap_1()
+            .rounded(theme::RADIUS_MODAL)
+            .bg(theme::bg_surface())
+            .border_1()
+            .border_color(theme::border_subtle());
+        let visible = project_visible_messages_with_overrides(
+            &self.messages,
+            &self.chat_state.local_reactions,
+            &self.chat_state.local_reaction_removals,
+            self.show_tool_calls(),
+        );
+        let message = self
+            .chat_state
+            .focused_message_idx
+            .and_then(|i| visible.get(i))?;
+        let tool_only = message.message.text.trim().is_empty()
+            && !message.message.blocks.is_empty()
+            && message
+                .message
+                .blocks
+                .iter()
+                .all(|b| matches!(b, MessageBlock::ToolUse { .. }));
+        let waiting = self
+            .chat_state
+            .failed_sends
+            .contains_key(&message.message.id);
+        for (index, action) in ChatViewState::menu_actions_for(tool_only, waiting)
+            .into_iter()
+            .enumerate()
+        {
+            let label = match action {
+                MessageMenuAction::Copy => "Copy",
+                MessageMenuAction::Reply => "Reply",
+                MessageMenuAction::Quote => "Quote",
+                MessageMenuAction::React(ReactionEmoji::Like) => "Like",
+                MessageMenuAction::React(ReactionEmoji::Dislike) => "Dislike",
+                MessageMenuAction::React(ReactionEmoji::Heart) => "Heart",
+                MessageMenuAction::CancelWaiting => "Cancel waiting message",
+            };
+            menu = menu.child(
+                div()
+                    .id(SharedString::from(format!("message-action-{index}")))
+                    .test_support()
+                    .px_3()
+                    .py_2()
+                    .rounded(RADIUS_ROW)
+                    .cursor_pointer()
+                    .bg(if self.chat_state.message_action_index == index {
+                        theme::bg_active_row()
+                    } else {
+                        theme::bg_surface()
+                    })
+                    .hover(|s| s.bg(theme::bg_hover()))
+                    .child(label)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.chat_state.message_action_index = index;
+                            this.handle_empty_composer_nav_key_action("enter", window, cx);
+                        }),
+                    ),
+            );
+        }
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .child(menu)
+                .into_any_element(),
+        )
     }
 
     fn render_markdown_with_actions(
@@ -5086,7 +5270,7 @@ impl MultibotView {
                 if !action.secondary
                     && !action.shift
                     && this.chat_state.focused_message_idx.is_some()
-                    && this.handle_empty_composer_nav_key_action("enter", cx)
+                    && this.handle_empty_composer_nav_key_action("enter", window, cx)
                 {
                     this.chat_state.slash_sync_pending = false;
                     cx.stop_propagation();
@@ -5111,7 +5295,7 @@ impl MultibotView {
                     cx.stop_propagation();
                     return;
                 }
-                if this.handle_empty_composer_nav_key_action("up", cx) {
+                if this.handle_empty_composer_nav_key_action("up", window, cx) {
                     this.chat_state.slash_sync_pending = false;
                     cx.stop_propagation();
                 }
@@ -5129,7 +5313,7 @@ impl MultibotView {
                     cx.stop_propagation();
                     return;
                 }
-                if this.handle_empty_composer_nav_key_action("down", cx) {
+                if this.handle_empty_composer_nav_key_action("down", window, cx) {
                     this.chat_state.slash_sync_pending = false;
                     cx.stop_propagation();
                 }
@@ -5187,7 +5371,7 @@ impl MultibotView {
                     cx.stop_propagation();
                     return;
                 }
-                if this.handle_empty_composer_nav_key_action("delete", cx) {
+                if this.handle_empty_composer_nav_key_action("delete", window, cx) {
                     this.chat_state.slash_sync_pending = false;
                     cx.stop_propagation();
                     return;
@@ -5297,6 +5481,7 @@ impl MultibotView {
                     .min_h_0()
                     .overflow_hidden()
                     .child(msg_col)
+                    .when_some(self.render_message_action_menu(cx), |el, menu| el.child(menu))
                     .when(
                         !self.messages.is_empty()
                             && (self.chat_state.scroll.scrolled_up
@@ -5853,7 +6038,7 @@ mod tests {
             st.handle_empty_composer_nav_key("enter", true, 3, false, false),
             MessageNavOutcome::MenuOpened(2)
         );
-        // For tool-only message, Reply is excluded so first action is Copy
+        // Copy is the first action for every element, including tools.
         assert_eq!(
             st.handle_empty_composer_nav_key("enter", true, 3, true, false),
             MessageNavOutcome::ExecuteAction {
@@ -9223,6 +9408,279 @@ mod tests {
             assert!(
                 window.try_find("msg-md-1-0").is_none(),
                 "quoted user reply with MessageBlock::Text must not render raw markdown blockquote duplicate"
+            );
+        })
+        .unwrap();
+    }
+
+    fn exercise_provider_switch(cx: &mut TestAppContext, composer: bool) {
+        use multibot_proto::{HandoverContext, HarnessChoice};
+        let mut choices = HarnessChoice::defaults();
+        choices.push(HarnessChoice {
+            agent: AgentKind::Pi,
+            model: Some("custom/fast".into()),
+            label: "Pi · custom · fast".into(),
+        });
+        for (index, target) in choices.iter().cloned().enumerate() {
+            let (handle, view) = open_test_chat_window(cx);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            cx.update_window(handle, |_, window, cx| {
+                let previous = SessionSummary {
+                    id: format!("old-{index}"),
+                    agent: if target.agent == AgentKind::Claude {
+                        AgentKind::Codex
+                    } else {
+                        AgentKind::Claude
+                    },
+                    title: "Release planning".into(),
+                    cwd: Some("/repo/multibot".into()),
+                    workspace: Some("Build".into()),
+                    ..Default::default()
+                };
+                let history = vec![ChatMessage {
+                    id: "old-message".into(),
+                    text: "Keep the GPU invariant.".into(),
+                    ..Default::default()
+                }];
+                let workspace_id = view.update(cx, |v, cx| {
+                    v.daemon_tx = Some(tx.clone());
+                    v.chat_state
+                        .harness_choices
+                        .insert("local".into(), choices.clone());
+                    v.sessions = vec![previous.clone()];
+                    v.selected_session = Some(previous.clone());
+                    v.messages = history.clone();
+                    let ws = v
+                        .sidebar_state
+                        .workspace_store
+                        .create_workspace("Build", None)
+                        .unwrap();
+                    let key = v.session_key_for(&previous);
+                    v.sidebar_state
+                        .workspace_store
+                        .assign_session_workspace(&key, &ws.id);
+                    v.sidebar_state.workspace_store.favorites.insert(key);
+                    v.sync_sessions_to_shared(cx);
+                    v.sync_workspace_to_shared(cx);
+                    v.prompt_input.update(cx, |input, cx| {
+                        input.set_value("my draft", window, cx);
+                        input.focus(window, cx);
+                    });
+                    cx.notify();
+                    ws.id
+                });
+                window.render_frame(cx);
+                if composer {
+                    window.click("attach-file-btn", cx);
+                    window.render_frame(cx);
+                    assert!(window.find("composer-provider").visible());
+                    window.click("composer-provider", cx);
+                } else {
+                    window.press("ctrl-k", cx);
+                    window.render_frame(cx);
+                    window.input("switch provider", cx);
+                    window.render_frame(cx);
+                    window.press("enter", cx);
+                }
+                window.render_frame(cx);
+                assert!(view.read(cx).palette_state.provider_picker);
+                for i in 0..choices.len() {
+                    assert!(window.find(format!("pal-provider-{i}")).visible());
+                }
+                for _ in 0..index {
+                    window.press("down", cx);
+                }
+                window.press("enter", cx);
+                let mut switch = None;
+                while let Ok(request) = rx.try_recv() {
+                    if let ClientRequest::SwitchHarness {
+                        session,
+                        target: chosen,
+                        context,
+                    } = request
+                    {
+                        assert_eq!(chosen, target);
+                        assert_eq!(session.title, previous.title);
+                        assert_eq!(session.cwd, previous.cwd);
+                        assert_eq!(session.workspace, previous.workspace);
+                        assert_eq!(context, HandoverContext::from_messages(&history));
+                        switch = Some(session);
+                    }
+                }
+                assert!(switch.is_some());
+                let next = SessionSummary {
+                    id: format!("new-{index}"),
+                    agent: target.agent,
+                    model: target.model.clone(),
+                    ..previous.clone()
+                };
+                view.update(cx, |v, cx| {
+                    v.handle_daemon_server_event(
+                        multibot_proto::ServerEvent::HarnessSwitched {
+                            previous: previous.clone(),
+                            session: next.clone(),
+                        },
+                        cx,
+                    )
+                });
+                window.render_frame(cx);
+                let v = view.read(cx);
+                assert_eq!(v.selected_session.as_ref(), Some(&next));
+                assert_eq!(v.messages, history);
+                assert_eq!(v.prompt_input.read(cx).value().as_ref(), "my draft");
+                let key = v.session_key_for(&next);
+                assert_eq!(
+                    v.sidebar_state.workspace_store.effective_workspace_id(&key),
+                    workspace_id
+                );
+                assert!(v.sidebar_state.workspace_store.favorites.contains(&key));
+                assert!(!v.sessions.iter().any(|s| s.id == previous.id));
+                view.update(cx, |v, cx| v.send_current_prompt(window, cx));
+                let mut sent = false;
+                while let Ok(request) = rx.try_recv() {
+                    if let ClientRequest::SendPrompt {
+                        session_id,
+                        text,
+                        options,
+                        ..
+                    } = request
+                    {
+                        assert_eq!(session_id, next.id);
+                        assert_eq!(text, "my draft");
+                        assert_eq!(options.and_then(|o| o.model), target.model);
+                        sent = true;
+                    }
+                }
+                assert!(sent);
+            })
+            .unwrap();
+        }
+    }
+
+    #[gpui_kit::test]
+    fn provider_switch_palette_preserves_chat_and_workspace(cx: &mut TestAppContext) {
+        exercise_provider_switch(cx, false);
+    }
+
+    #[gpui_kit::test]
+    fn provider_switch_composer_preserves_chat_and_workspace(cx: &mut TestAppContext) {
+        exercise_provider_switch(cx, true);
+    }
+
+    #[gpui_kit::test]
+    fn message_navigation_scroll_menu_copy_reply_quote_and_focus(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_chat_window(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.messages = (0..30)
+                    .map(|i| ChatMessage {
+                        id: format!("nav-{i}"),
+                        role: if i % 2 == 0 {
+                            MessageRole::User
+                        } else {
+                            MessageRole::Assistant
+                        },
+                        text: format!("Element {i}\nSecond line"),
+                        ..Default::default()
+                    })
+                    .collect();
+                v.prompt_input.update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                    input.focus(window, cx);
+                });
+                cx.notify();
+            });
+            window.render_frame(cx);
+            for index in (0..30).rev() {
+                window.press("up", cx);
+                window.render_frame(cx);
+                assert_eq!(view.read(cx).chat_state.focused_message_idx, Some(index));
+                assert!(window.find(format!("msg-bubble-{index}")).visible());
+            }
+            window.press("up", cx);
+            assert_eq!(view.read(cx).chat_state.focused_message_idx, Some(0));
+            for index in 1..30 {
+                window.press("down", cx);
+                window.render_frame(cx);
+                assert_eq!(view.read(cx).chat_state.focused_message_idx, Some(index));
+            }
+            window.press("down", cx);
+            window.render_frame(cx);
+            assert!(
+                view.read(cx)
+                    .prompt_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+            assert_eq!(view.read(cx).chat_state.focused_message_idx, None);
+            window.press("up", cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert!(window.find("message-action-menu").visible());
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().unwrap(),
+                "Element 29\nSecond line"
+            );
+            assert!(!view.read(cx).chat_state.message_action_menu_open);
+            assert_eq!(view.read(cx).chat_state.focused_message_idx, Some(29));
+            window.press("enter", cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx)
+                    .chat_state
+                    .reply_quote
+                    .as_ref()
+                    .unwrap()
+                    .message_id,
+                "nav-29"
+            );
+            assert!(
+                view.read(cx)
+                    .prompt_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+            view.update(cx, |v, _| v.chat_state.reply_quote = None);
+            window.press("up", cx);
+            window.press("enter", cx);
+            window.press("down", cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            let input = view.read(cx).prompt_input.read(cx);
+            assert_eq!(input.value().as_ref(), "> Element 29\n> Second line\n\n");
+            assert_eq!(input.cursor(), input.value().len());
+            assert!(input.focus_handle(cx).is_focused(window));
+            view.update(cx, |v, cx| {
+                v.prompt_input.update(cx, |input, cx| {
+                    input.set_value("draft", window, cx);
+                    input.set_selected_range(0..0, cx);
+                });
+            });
+            window.press("up", cx);
+            window.press("enter", cx);
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(!view.read(cx).chat_state.message_action_menu_open);
+            assert_eq!(view.read(cx).chat_state.focused_message_idx, Some(29));
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(
+                view.read(cx)
+                    .prompt_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+            assert_eq!(
+                view.read(cx).prompt_input.read(cx).value().as_ref(),
+                "draft"
             );
         })
         .unwrap();

@@ -14,6 +14,8 @@ This file is embedded in Multibot so Changelog works offline.
 - Hide tool calls completely by default; use Ctrl+K → Chat: Show tool calls to reveal compact, expandable details.
 - Send chat messages with Ctrl+Enter; Enter and Shift+Enter add lines, while Enter still selects slash commands and opens a focused message’s menu.
 - Let VPS agents control their session’s docked Chrome or Edge pane through `multibotd browser`, without an extension, Native Messaging, or registry changes.
+- Navigate chat messages with Up and Down; press Enter for Copy, Reply, and Quote, or Esc to return to typing.
+- Switch a chat between Claude, Codex, Antigravity, Pi, and Cursor from Ctrl+K or the composer + menu, keeping its name, workspace, directory, and conversation; configured Pi models are included.
 
 - Keep new chats error-free before their transcript folders exist, while still reporting real read failures.
 - Stop archive and restore confirmations from lingering above unrelated live chats.

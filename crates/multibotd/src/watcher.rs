@@ -1,8 +1,8 @@
 use crate::process::ProcessManager;
 use crate::providers::{
     ArchiveStore, DEFAULT_HISTORY_MAX_BYTES, DeltaRead, DiscoveryContext, LiveActivity,
-    MetadataStore, compute_semantic_working, now_ms, read_history_delta, read_history_page,
-    sha256_hex, summarize_session_by_agent, system_time_ms,
+    MetadataStore, compute_semantic_working, now_ms, read_history_delta,
+    summarize_session_by_agent, system_time_ms,
 };
 use anyhow::{Result, anyhow};
 use multibot_proto::{AgentKind, ServerEvent};
@@ -154,50 +154,38 @@ impl WatchManager {
 
         watcher.watch(&watch_dir, RecursiveMode::NonRecursive)?;
 
-        let (initial_offset, initial_probe) = if source_path.is_file() {
-            let path_for_read = source_path.clone();
-            let page = run_on_disk(self.disk_tx.as_ref(), move || {
-                read_history_page(
-                    agent,
-                    &path_for_read,
-                    None,
-                    Some(DEFAULT_HISTORY_MAX_BYTES),
-                    Some(200),
-                    None,
-                )
-            })
-            .await
-            .ok_or_else(|| anyhow!("disk worker closed"))??;
-            let offset = page.latest_offset;
-            let probe = page.probe_sha256.clone();
-            let _ = self.out_tx.send(ServerEvent::History {
-                session_id: session_id.clone(),
-                messages: page.messages,
-                oldest_offset: Some(page.oldest_offset),
-                latest_offset: Some(page.latest_offset),
-                has_more: page.has_more,
-                file_size: Some(page.file_size),
-                file_mtime_ms: Some(page.file_mtime_ms),
-                probe_sha256: Some(page.probe_sha256),
-                todos: page.todos,
-            });
-            (offset, probe)
-        } else {
-            // Newly spawned session whose `.jsonl` has not been created yet.
-            let empty_probe = sha256_hex(&[]);
-            let _ = self.out_tx.send(ServerEvent::History {
-                session_id: session_id.clone(),
-                messages: Vec::new(),
-                oldest_offset: Some(0),
-                latest_offset: Some(0),
-                has_more: false,
-                file_size: Some(0),
-                file_mtime_ms: Some(now_ms()),
-                probe_sha256: Some(empty_probe.clone()),
-                todos: Vec::new(),
-            });
-            (0, empty_probe)
-        };
+        let history_home = self.home.clone();
+        let path_for_read = source_path.clone();
+        let read_id = session_id.clone();
+        let page = run_on_disk(self.disk_tx.as_ref(), move || {
+            crate::continuity::read_page(
+                &history_home,
+                &read_id,
+                agent,
+                &path_for_read,
+                None,
+                Some(DEFAULT_HISTORY_MAX_BYTES),
+                Some(200),
+                None,
+            )
+        })
+        .await
+        .ok_or_else(|| anyhow!("disk worker closed"))??;
+        let initial_offset = page
+            .latest_offset
+            .saturating_sub(crate::continuity::base(&self.home, &session_id));
+        let initial_probe = page.probe_sha256.clone();
+        let _ = self.out_tx.send(ServerEvent::History {
+            session_id: session_id.clone(),
+            messages: page.messages,
+            oldest_offset: Some(page.oldest_offset),
+            latest_offset: Some(page.latest_offset),
+            has_more: page.has_more,
+            file_size: Some(page.file_size),
+            file_mtime_ms: Some(page.file_mtime_ms),
+            probe_sha256: Some(page.probe_sha256),
+            todos: page.todos,
+        });
 
         let home = self.home.clone();
         let out_tx = self.out_tx.clone();
@@ -603,7 +591,9 @@ fn process_file_update(
         match delta {
             DeltaRead::Unchanged { .. } => break,
             DeltaRead::ResetRequired { .. } => {
-                if let Ok(page) = read_history_page(
+                if let Ok(page) = crate::continuity::read_page(
+                    home,
+                    session_id,
                     agent,
                     path,
                     None,
@@ -611,7 +601,9 @@ fn process_file_update(
                     None,
                     None,
                 ) {
-                    *consumed_offset = page.latest_offset;
+                    *consumed_offset = page
+                        .latest_offset
+                        .saturating_sub(crate::continuity::base(home, session_id));
                     *last_probe = page.probe_sha256.clone();
                     let _ = out_tx.send(ServerEvent::History {
                         session_id: session_id.to_string(),
@@ -629,7 +621,7 @@ fn process_file_update(
                 return false;
             }
             DeltaRead::Appended {
-                messages,
+                mut messages,
                 latest_offset,
                 probe_sha256,
                 todos,
@@ -652,11 +644,21 @@ fn process_file_update(
                     mtime_ms,
                     now_ms(),
                 );
+                let handover = crate::continuity::load(home, session_id).ok().flatten();
+                let base = handover.as_ref().map_or(0, |h| h.previous_end);
+                if handover.is_some() {
+                    crate::continuity::strip_context(&mut messages);
+                }
+                for message in &mut messages {
+                    if let Some((start, end)) = message.source_byte_range {
+                        message.source_byte_range = Some((start + base, end + base));
+                    }
+                }
                 if !messages.is_empty() || !todos.is_empty() {
                     let _ = out_tx.send(ServerEvent::HistoryAppend {
                         session_id: session_id.to_string(),
                         messages,
-                        latest_offset: Some(latest_offset),
+                        latest_offset: Some(latest_offset + base),
                         working: Some(working),
                         todos,
                         probe_sha256: Some(probe_sha256),
@@ -892,6 +894,79 @@ mod tests {
             }
         }
         None
+    }
+
+    #[tokio::test]
+    async fn switched_chat_watcher_preserves_history_and_translates_live_offsets() {
+        use multibot_proto::{HandoverContext, HarnessChoice, SessionSummary};
+        let home = temp_home("switch-watch");
+        let original = home.join("original.jsonl");
+        fs::write(
+            &original,
+            "{\"type\":\"assistant\",\"uuid\":\"old\",\"message\":{\"content\":\"Old reply\"}}\n",
+        )
+        .unwrap();
+        let base = original.metadata().unwrap().len();
+        crate::continuity::save(
+            &home,
+            "new",
+            &crate::continuity::Handover {
+                previous: SessionSummary {
+                    id: "original".into(),
+                    agent: AgentKind::Claude,
+                    source_path: original.to_string_lossy().into(),
+                    ..Default::default()
+                },
+                previous_end: base,
+                target: HarnessChoice::defaults()[4].clone(),
+                context: HandoverContext { turns: vec![] },
+                started: true,
+            },
+        )
+        .unwrap();
+        let current = home.join("new.jsonl");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let pm = ProcessManager::new(home.clone(), tx.clone());
+        let mut wm = WatchManager::new(home.clone(), tx, pm);
+        wm.watch_session("new".into(), current.clone(), AgentKind::Cursor)
+            .await
+            .unwrap();
+        let initial = recv_matching(&mut rx, Duration::from_secs(2), |e| {
+            matches!(e, ServerEvent::History { .. })
+        })
+        .await
+        .unwrap();
+        let ServerEvent::History {
+            messages,
+            latest_offset,
+            ..
+        } = initial
+        else {
+            unreachable!()
+        };
+        assert_eq!(messages[0].text, "Old reply");
+        assert_eq!(latest_offset, Some(base));
+        fs::write(&current, "{\"type\":\"assistant\",\"uuid\":\"new-reply\",\"message\":{\"content\":\"New reply\"}}\n").unwrap();
+        let event = recv_matching(&mut rx, Duration::from_secs(2), |e| {
+            matches!(e, ServerEvent::HistoryAppend { .. })
+        })
+        .await
+        .unwrap();
+        let ServerEvent::HistoryAppend {
+            messages,
+            latest_offset,
+            ..
+        } = event
+        else {
+            unreachable!()
+        };
+        assert_eq!(messages[0].text, "New reply");
+        assert_eq!(
+            latest_offset,
+            Some(base + current.metadata().unwrap().len())
+        );
+        wm.unwatch_session(Some("new".into()));
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[tokio::test]

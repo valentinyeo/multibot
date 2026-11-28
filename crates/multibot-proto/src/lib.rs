@@ -107,6 +107,84 @@ impl AgentKind {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessChoice {
+    pub agent: AgentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub label: String,
+}
+
+impl HarnessChoice {
+    pub fn defaults() -> Vec<Self> {
+        [
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::Antigravity,
+            AgentKind::Pi,
+            AgentKind::Cursor,
+        ]
+        .into_iter()
+        .map(|agent| Self {
+            agent,
+            model: None,
+            label: agent.label().into(),
+        })
+        .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoverTurn {
+    pub role: MessageRole,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoverContext {
+    pub turns: Vec<HandoverTurn>,
+}
+
+impl HandoverContext {
+    pub fn from_messages(messages: &[ChatMessage]) -> Self {
+        let mut remaining = 16_000;
+        let mut turns = Vec::new();
+        for message in messages
+            .iter()
+            .rev()
+            .filter(|m| matches!(m.role, MessageRole::User | MessageRole::Assistant))
+            .take(24)
+        {
+            let text = if message.text.is_empty() {
+                message
+                    .blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        MessageBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                message.text.clone()
+            };
+            let text: String = text.chars().take(remaining.min(4000)).collect();
+            remaining -= text.chars().count();
+            if !text.is_empty() {
+                turns.push(HandoverTurn {
+                    role: message.role,
+                    text,
+                });
+            }
+            if remaining == 0 {
+                break;
+            }
+        }
+        turns.reverse();
+        Self { turns }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
@@ -422,6 +500,12 @@ pub enum ClientRequest {
         session_id: String,
         message_id: String,
     },
+    ListHarnesses,
+    SwitchHarness {
+        session: SessionSummary,
+        target: HarnessChoice,
+        context: HandoverContext,
+    },
     SpawnSession {
         agent: AgentKind,
         cwd: String,
@@ -516,6 +600,13 @@ pub enum ServerEvent {
         detail: String,
     },
     SessionUpdated {
+        session: SessionSummary,
+    },
+    Harnesses {
+        choices: Vec<HarnessChoice>,
+    },
+    HarnessSwitched {
+        previous: SessionSummary,
         session: SessionSummary,
     },
     SessionSpawned {
@@ -1152,5 +1243,54 @@ mod browser_tests {
             let request = ClientRequest::BrowserResult { request_id: 42, binding_id:"instance".into(), response };
             assert_eq!(decode_line::<ClientRequest>(&serde_json::to_string(&request).unwrap()).unwrap(), request);
         }
+    }
+}
+
+#[cfg(test)]
+mod handover_tests {
+    use super::*;
+    #[test]
+    fn switch_wire_preserves_identity_and_bounds_recent_context() {
+        let messages: Vec<_> = (0..100)
+            .map(|i| ChatMessage {
+                text: format!("{i} {}", "é".repeat(5000)),
+                role: MessageRole::User,
+                ..Default::default()
+            })
+            .collect();
+        let context = HandoverContext::from_messages(&messages);
+        assert!(context.turns.len() <= 24);
+        assert!(
+            context
+                .turns
+                .iter()
+                .map(|t| t.text.chars().count())
+                .sum::<usize>()
+                <= 16_000
+        );
+        assert!(context.turns.last().unwrap().text.starts_with("99 "));
+        let session = SessionSummary {
+            id: "stable".into(),
+            title: "My chat".into(),
+            cwd: Some("/repo".into()),
+            workspace: Some("Work".into()),
+            ..Default::default()
+        };
+        let request = ClientRequest::SwitchHarness {
+            session: session.clone(),
+            target: HarnessChoice::defaults()[1].clone(),
+            context,
+        };
+        assert_eq!(
+            decode_line::<ClientRequest>(&encode_line(&request).unwrap()).unwrap(),
+            request
+        );
+        let ClientRequest::SwitchHarness {
+            session: actual, ..
+        } = request
+        else {
+            unreachable!()
+        };
+        assert_eq!(actual, session);
     }
 }

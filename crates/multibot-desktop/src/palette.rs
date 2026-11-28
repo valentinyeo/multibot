@@ -45,6 +45,7 @@ pub(crate) struct PaletteState {
     pub hibernate_wake_on_reply: bool,
     pub directory_picker: Option<SessionDirectoryPicker>,
     pub dissolve_workspace_id: Option<String>,
+    pub provider_picker: bool,
     pub selected_index: usize,
     pub mode: PaletteMode,
     pub input_sub: Option<Subscription>,
@@ -60,6 +61,7 @@ impl MultibotView {
         #[cfg(windows)]
         self.hide_browser_pane();
         self.active_modal = ActiveModal::Palette;
+        self.palette_state.provider_picker = false;
         self.palette_state.mode = PaletteMode::Global;
         self.palette_state.reminder_target = None;
         self.palette_state.directory_picker = None;
@@ -117,6 +119,7 @@ impl MultibotView {
         #[cfg(windows)]
         self.hide_browser_pane();
         self.active_modal = ActiveModal::Palette;
+        self.palette_state.provider_picker = false;
         self.palette_state.reminder_target = None;
         self.palette_state.directory_picker = None;
         self.palette_state.dissolve_workspace_id = None;
@@ -214,6 +217,27 @@ impl MultibotView {
                     "messages".into(),
                     "open cross-workspace inbox".into(),
                 ],
+                tab_context: false,
+                global: true,
+            },
+            PaletteCommandSpec {
+                id: "pal-cmd-switch-provider".into(),
+                label: "Session: Switch provider / harness".into(),
+                chord: String::new(),
+                category: PaletteCategory::Sessions,
+                destructive: false,
+                aliases: [
+                    "switch provider",
+                    "switch harness",
+                    "claude",
+                    "codex",
+                    "antigravity",
+                    "pi",
+                    "cursor",
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect(),
                 tab_context: false,
                 global: true,
             },
@@ -873,6 +897,7 @@ impl MultibotView {
             return;
         }
         self.active_modal = ActiveModal::Palette;
+        self.palette_state.provider_picker = false;
         self.palette_state.directory_picker = Some(SessionDirectoryPicker { agent, directories });
         self.palette_state.selected_index = 0;
         self.palette_state.scroll_handle.scroll_to_item(0);
@@ -886,6 +911,9 @@ impl MultibotView {
     }
 
     pub(crate) fn build_palette_rows(&self, query: &str, now_ms: i64) -> Vec<PaletteRow> {
+        if self.palette_state.provider_picker {
+            return self.provider_picker_rows(query);
+        }
         if self.palette_state.dissolve_workspace_id.is_some() {
             return vec![PaletteRow::Command {
                 id: "workspace.dissolve.confirm".into(),
@@ -1020,6 +1048,22 @@ impl MultibotView {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        if self.palette_state.provider_picker {
+            if let PaletteRow::Command { id, .. } = row {
+                if let Some(index) = id
+                    .strip_prefix("pal-provider-")
+                    .and_then(|i| i.parse::<usize>().ok())
+                {
+                    let choices = self.provider_choices();
+                    if let Some(choice) = choices.get(index) {
+                        self.request_harness_switch(choice.clone(), cx);
+                    }
+                }
+            }
+            self.palette_state.provider_picker = false;
+            self.active_modal = ActiveModal::None;
+            return;
+        }
         if let Some(id) = self.palette_state.dissolve_workspace_id.take() {
             self.active_modal = ActiveModal::None;
             if matches!(row, PaletteRow::Command { ref id, .. } if id == "workspace.dissolve.confirm") {
@@ -1146,6 +1190,12 @@ impl MultibotView {
                 self.palette_state.stats.record_command_use(&id, now_ms);
                 self.persist_palette_stats_if_enabled();
 
+                if id == "pal-cmd-switch-provider" {
+                    if let Some(window) = window {
+                        self.open_provider_picker(window, cx);
+                    }
+                    return;
+                }
                 if self.execute_update_palette_command(&id, cx) {
                     cx.notify();
                     return;
@@ -1702,7 +1752,11 @@ impl MultibotView {
 
     fn palette_try_exit_submenu(&mut self, cx: &mut Context<Self>) -> bool {
         let query = self.palette_input.read(cx).value().to_string();
-        if query.is_empty() && self.palette_state.mode != PaletteMode::Global {
+        if query.is_empty()
+            && (self.palette_state.provider_picker
+                || self.palette_state.mode != PaletteMode::Global)
+        {
+            self.palette_state.provider_picker = false;
             self.palette_state.mode = PaletteMode::Global;
             self.palette_state.reminder_target = None;
             self.palette_state.directory_picker = None;
@@ -2091,6 +2145,11 @@ impl MultibotView {
             None => context_banner,
         };
 
+        let context_banner = if self.palette_state.provider_picker {
+            Some("Switch provider / harness · Up/Down then Enter".into())
+        } else {
+            context_banner
+        };
         let context_banner = if let Some(picker) = &self.palette_state.directory_picker {
             Some(format!(
                 "New {} session · Choose a directory · Up/Down then Enter",

@@ -157,6 +157,8 @@ pub struct SessionMetaEntry {
     pub source_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
     #[serde(default)]
     pub updated_at_ms: i64,
 }
@@ -445,6 +447,7 @@ pub fn discover_all_sessions_with_ctx(
             title,
             cwd: meta.cwd.clone(),
             source_path: source_path.clone(),
+            workspace: meta.workspace.clone(),
             updated_at_ms: meta.updated_at_ms,
             working: ctx.active_session_ids.contains(sid),
             archived: ctx.is_archived(sid, path),
@@ -730,7 +733,9 @@ pub fn summarize_session(
         effort: tail.effort.or(header.effort),
         context_tokens: tail.context_tokens,
         context_limit: tail.context_limit,
-        workspace: ctx.server_workspaces.workspace_for(&id).map(str::to_string),
+        workspace: meta_entry
+            .and_then(|m| m.workspace.clone())
+            .or_else(|| ctx.server_workspaces.workspace_for(&id).map(str::to_string)),
     }
 }
 
@@ -3717,6 +3722,7 @@ mod tests {
                             .to_string(),
                     ),
                     native_session_id: None,
+                    workspace: None,
                     updated_at_ms: 1,
                 },
             );
@@ -3956,6 +3962,7 @@ mod tests {
                         .to_string(),
                 ),
                 native_session_id: None,
+                workspace: None,
                 updated_at_ms: now_ms(),
             },
         );
@@ -4052,6 +4059,7 @@ mod tests {
                 agent: Some(AgentKind::Claude),
                 source_path: Some("/tmp/s1.jsonl".into()),
                 native_session_id: None,
+                workspace: None,
                 updated_at_ms: 1234,
             },
         );

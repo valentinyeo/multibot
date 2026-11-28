@@ -14,6 +14,7 @@ mod external_url;
 mod icons;
 mod inbox;
 mod palette;
+mod provider_switch;
 mod settings;
 mod shell_host;
 mod sidebar;
