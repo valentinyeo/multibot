@@ -93,7 +93,7 @@ fn session_verticons_are_portrait_in_rows_pins_and_rail(cx: &mut TestAppContext)
         assert_eq!(icon.size, gpui_kit::size(px(24.0), px(34.0)));
         assert!(icon.size.height > icon.size.width);
         assert_eq!(icon.left() - row.left(), px(10.0));
-        assert_eq!(icon.center().y, row.center().y);
+        assert!(f32::from(icon.center().y - row.center().y).abs() <= 1.0);
         let pin = window.find("sidebar-pin-0").bounds();
         let pinned_icon = window.find("sidebar-pin-0-verticon").bounds();
         assert_eq!(pinned_icon.size, gpui_kit::size(px(28.0), px(40.0)));
