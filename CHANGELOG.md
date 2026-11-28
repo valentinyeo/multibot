@@ -17,6 +17,7 @@ This file is embedded in Multibot so Changelog works offline.
 - Deduplicate Antigravity sessions that share one native conversation so chats appear once in the sidebar (MBRU-110).
 - Fetch and unfurl remote screenshot and image links inline in chat (MBRU-111).
 - Condense live working status into one interactive bottom-left row with 5px animated dots, rotating plain-English activity, expandable current-turn steps, full Antigravity hidden activity under Show tool calls, and monochrome dark grey composer buttons (MBRU-116).
+- Align the Command Palette search text, breadcrumb, section headers, and row labels on one leading edge (MBRU-114).
 - Keep the sidebar visible in full-width chats and resize live shell grids correctly when their pane changes size (MBRU-98, MBRU-99).
 - Keep metadata-only chats idle, open empty chats without a welcome card, and hide Claude subagent transcripts from the sidebar (MBRU-100, MBRU-102).
 - Remove the Inbox dot, unify circular controls, and float the version pill and controls over full-height sidebar and chat views (MBRU-101, MBRU-103).
