@@ -68,6 +68,8 @@ impl MultibotView {
         self.sidebar_state.rename = None;
         self.history.active_switch_token = None;
         self.history.messages.clear();
+        self.history.auto_backfill_pages = 0;
+        self.history.pending_older_page_before.clear();
         self.chat_state.close_find();
         self.slash_picker_state.close();
         self.mention_picker_state.close();
@@ -113,9 +115,10 @@ impl MultibotView {
             .is_some_and(|h| h != host)
         {
             self.history.pending_switch_tokens.clear();
-            self.history.pending_older_page_before.clear();
             self.chat_state.session_todos.clear();
         }
+        self.history.auto_backfill_pages = 0;
+        self.history.pending_older_page_before.clear();
         self.chat_state.scroll.open_visit(UnreadVisit::Read);
         self.chat_state.scroll_handle = gpui_kit::ScrollHandle::default();
         self.chat_state.prepend_scroll_anchor = None;
@@ -127,7 +130,6 @@ impl MultibotView {
         self.chat_state.composer_menu_open = false;
         // Reset per-session transient Chat View overlays, active inline rename & stale pagination
         self.sidebar_state.rename = None;
-        self.history.pending_older_page_before.remove(&session.id);
         self.chat_state.close_find();
         self.slash_picker_state.close();
         self.mention_picker_state.close();

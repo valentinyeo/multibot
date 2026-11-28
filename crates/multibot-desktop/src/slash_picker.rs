@@ -809,8 +809,10 @@ impl MultibotView {
 
         Some(
             div()
+                .id("slash-picker")
+                .test_support()
                 .w_full()
-                .max_w(px(760.0))
+                .when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0)))
                 .mx_auto()
                 .px_5()
                 .pb_1()
