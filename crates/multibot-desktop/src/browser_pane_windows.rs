@@ -126,7 +126,7 @@ impl Browser {
             .map(PathBuf::from)
             .collect::<Vec<_>>();
         let program = discover_browser(&roots, Path::is_file)
-            .context("Install Microsoft Edge or Google Chrome to use the browser pane")?;
+            .context("Install Google Chrome or Microsoft Edge to use the browser pane")?;
         let profile = session_profile(&isolated_root()?, session);
         real_directory(&profile)?;
         // Chromium otherwise forwards a second launch into the first window's process.

@@ -461,7 +461,7 @@ fn full_width_roundtrip_restores_btop_in_a_fresh_view(cx: &mut TestAppContext) {
         });
         window.render_frame(cx);
         window.press("ctrl-shift-f", cx);
-        assert_eq!(view.read(cx).sidebar_state.mode, SidebarMode::Hidden);
+        assert_eq!(view.read(cx).sidebar_state.mode, SidebarMode::Collapsed);
         view.read(cx)
             .sidebar_state
             .workspace_store
@@ -483,7 +483,7 @@ fn full_width_roundtrip_restores_btop_in_a_fresh_view(cx: &mut TestAppContext) {
     cx.update_window(fresh_handle, |_, window, cx| {
         fresh.update(cx, |v, cx| v.select_session(btop.clone(), cx));
         window.render_frame(cx);
-        assert_eq!(fresh.read(cx).sidebar_state.mode, SidebarMode::Hidden);
+        assert_eq!(fresh.read(cx).sidebar_state.mode, SidebarMode::Collapsed);
         assert!(fresh.read(cx).settings.shell_fullscreen);
         fresh.update(cx, |v, cx| v.select_session(normal, cx));
         assert_eq!(fresh.read(cx).sidebar_state.mode, SidebarMode::Collapsed);
@@ -491,6 +491,60 @@ fn full_width_roundtrip_restores_btop_in_a_fresh_view(cx: &mut TestAppContext) {
     })
     .unwrap();
     std::fs::remove_file(path).unwrap();
+}
+
+#[gpui_kit::test]
+fn full_width_session_keeps_sidebar_and_sidebar_shortcut_is_independent(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_view_with_entity(cx);
+    let btop = make_session("btop", AgentKind::Shell, "BTOP", false);
+    let normal = make_session("normal-width", AgentKind::Claude, "Normal", false);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.connection.sessions = vec![btop.clone(), normal.clone()];
+            v.set_sidebar_mode_synced(SidebarMode::Open, cx);
+            let key = v.session_key_for(&btop);
+            v.sidebar_state
+                .workspace_store
+                .session_meta
+                .entry(key)
+                .or_default()
+                .full_width = true;
+            v.select_session(normal.clone(), cx);
+            v.select_session(btop.clone(), cx);
+        });
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).sidebar_state.mode, SidebarMode::Open);
+        assert!(view.read(cx).settings.shell_fullscreen);
+        cx.global_mut::<SharedAppStore>().settings.chat_font_size_pt = 18;
+        view.update(cx, |v, cx| v.sync_from_shared_store(cx));
+        assert_eq!(view.read(cx).sidebar_state.mode, SidebarMode::Open);
+        assert!(view.read(cx).settings.shell_fullscreen);
+        for mode in [
+            SidebarMode::Collapsed,
+            SidebarMode::Hidden,
+            SidebarMode::Open,
+        ] {
+            window.press("ctrl-shift-b", cx);
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).sidebar_state.mode, mode);
+            assert_eq!(view.read(cx).settings.sidebar_mode, mode);
+            assert!(view.read(cx).settings.shell_fullscreen);
+        }
+        window.press("ctrl-shift-f", cx);
+        window.render_frame(cx);
+        assert!(!view.read(cx).settings.shell_fullscreen);
+        assert_eq!(view.read(cx).sidebar_state.mode, SidebarMode::Open);
+        view.update(cx, |v, cx| {
+            v.set_sidebar_mode_synced(SidebarMode::Hidden, cx)
+        });
+        window.press("ctrl-shift-f", cx);
+        assert!(view.read(cx).settings.shell_fullscreen);
+        assert_eq!(view.read(cx).sidebar_state.mode, SidebarMode::Hidden);
+        view.update(cx, |v, cx| v.select_session(normal, cx));
+        assert!(!view.read(cx).settings.shell_fullscreen);
+        assert_eq!(view.read(cx).sidebar_state.mode, SidebarMode::Hidden);
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]

@@ -17,6 +17,22 @@ use std::collections::HashMap;
 pub const SHELL_HEADER_HEIGHT: f32 = 44.0;
 
 #[cfg(any(windows, test))]
+fn compute_console_grid(
+    client_w: i32,
+    client_h: i32,
+    cell_w: i32,
+    cell_h: i32,
+) -> Option<(i16, i16)> {
+    if client_w <= 0 || client_h <= 0 || cell_w <= 0 || cell_h <= 0 {
+        return None;
+    }
+    Some((
+        (client_w / cell_w).clamp(20, 32766) as i16,
+        (client_h / cell_h).clamp(4, 32766) as i16,
+    ))
+}
+
+#[cfg(any(windows, test))]
 fn console_url_at_cell(cells: &[u16], cols: usize, row: usize, col: usize) -> Option<String> {
     if cols == 0 || col >= cols || row.checked_mul(cols)?.checked_add(col)? >= cells.len() {
         return None;
@@ -118,8 +134,8 @@ impl ShellLaunchSpec {
                 "trap 'rm -f -- \"$HOME/.multibot/clients/{client_id}.tty\"' EXIT; trap 'exit 129' HUP INT TERM; \
                  (mkdir -p \"$HOME/.multibot/clients\" && \
                  tty > \"$HOME/.multibot/clients/{client_id}.tty\" && \
-                 exec tmux attach-session -t '={}')",
-                session_name.replace('\'', "'\\''")
+                 exec tmux set-option -w -t '={target}:' window-size latest \\; attach-session -t '={target}')",
+                target = session_name.replace('\'', "'\\''")
             ),
         ]);
         Ok(Self {
@@ -938,6 +954,31 @@ mod tests {
     use gpui_kit::AppContext;
 
     #[test]
+    fn console_grid_tracks_client_pixels_and_font_size() {
+        assert_eq!(compute_console_grid(1896, 960, 8, 16), Some((237, 60)));
+        assert_eq!(compute_console_grid(743, 800, 8, 16), Some((92, 50)));
+        assert_eq!(compute_console_grid(759, 799, 8, 16), Some((94, 49)));
+        assert_eq!(compute_console_grid(1, 1, 8, 16), Some((20, 4)));
+        assert_eq!(
+            compute_console_grid(i32::MAX, i32::MAX, 1, 1),
+            Some((32766, 32766))
+        );
+        for dimensions in [
+            (0, 800, 8, 16),
+            (760, 0, 8, 16),
+            (-1, 800, 8, 16),
+            (760, -1, 8, 16),
+            (760, 800, 0, 16),
+            (760, 800, 8, 0),
+            (760, 800, -8, 16),
+            (760, 800, 8, -16),
+        ] {
+            let (w, h, cw, ch) = dimensions;
+            assert_eq!(compute_console_grid(w, h, cw, ch), None);
+        }
+    }
+
+    #[test]
     fn one_client_per_host_switches_and_retains_until_last_shell_closes() {
         let mut host = ShellHost::default();
         host.entries.insert(
@@ -1268,7 +1309,7 @@ mod tests {
             "trap 'rm -f -- \"$HOME/.multibot/clients/mb-client_1.tty\"' EXIT; trap 'exit 129' HUP INT TERM; \
              (mkdir -p \"$HOME/.multibot/clients\" && \
              tty > \"$HOME/.multibot/clients/mb-client_1.tty\" && \
-             exec tmux attach-session -t '=term-'\\''$(echo nope)'\\''')"
+             exec tmux set-option -w -t '=term-'\\''$(echo nope)'\\'':' window-size latest \\; attach-session -t '=term-'\\''$(echo nope)'\\''')"
         );
         assert!(
             spec.args
@@ -1343,7 +1384,9 @@ mod tests {
         assert_eq!(output.status.code(), Some(7));
         assert_eq!(
             std::fs::read_to_string(home.join("args")).unwrap(),
-            format!("attach-session\n-t\n={session}\n")
+            format!(
+                "set-option\n-w\n-t\n={session}:\nwindow-size\nlatest\n;\nattach-session\n-t\n={session}\n"
+            )
         );
         let registration = home.join(".multibot/clients/test-client.tty");
         assert!(!registration.exists());
