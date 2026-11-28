@@ -558,7 +558,7 @@ impl MultibotView {
             .px_5()
             .pt_3()
             .pb_2()
-            .items_center()
+            .items_start()
             .justify_between()
             .child(div().w(px(80.0)).flex_shrink_0())
             .child(
@@ -571,6 +571,7 @@ impl MultibotView {
                         div()
                             .id("header-rename-input")
                             .test_support()
+                            .h(px(32.0))
                             .px_4()
                             .py_1p5()
                             .rounded(RADIUS_CHIP)
@@ -584,6 +585,7 @@ impl MultibotView {
                         div()
                             .id("header-title-pill")
                             .test_support()
+                            .h(px(32.0))
                             .cursor_pointer()
                             .hover(|s| s.bg(theme::bg_hover()))
                             .tooltip(|window, cx| {

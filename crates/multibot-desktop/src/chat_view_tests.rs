@@ -4927,6 +4927,27 @@ fn empty_chat_has_uniform_floating_chrome_without_welcome_or_inbox_dot(cx: &mut 
         );
         let title = window.find("header-title-pill").bounds();
         assert!((f32::from(title.center().x - panel.center().x)).abs() <= 1.0);
+        for id in ["workspace-switcher", "toggle-inbox", "chat-menu"] {
+            let bounds = window.find(id).bounds();
+            assert!(
+                (f32::from(bounds.center().y - title.center().y)).abs() <= 1.0,
+                "{id}"
+            );
+        }
+        let composer = window.find("chat-composer-pill").bounds();
+        let attach = window.find("attach-file-btn").bounds();
+        let send = window.find("send-prompt").bounds();
+        assert_eq!(
+            attach.left() - composer.left(),
+            composer.right() - send.right()
+        );
+        for id in ["attach-file-btn", "composer-voice", "send-prompt"] {
+            assert_eq!(
+                window.find(id).bounds().center().y,
+                composer.center().y,
+                "{id}"
+            );
+        }
         for id in ["chat-top-overlay", "chat-composer-overlay"] {
             let bounds = window.find(id).bounds().scale(window.scale_factor());
             assert!(
@@ -4951,8 +4972,194 @@ fn empty_chat_has_uniform_floating_chrome_without_welcome_or_inbox_dot(cx: &mut 
             window.find("stop-agent").bounds().size,
             gpui_kit::size(px(32.0), px(32.0))
         );
+        view.update(cx, |v, cx| {
+            v.inputs.prompt_input.update(cx, |input, cx| {
+                input.set_value("First line\nSecond line\nThird line", window, cx);
+            });
+            cx.notify();
+        });
+        window.render_frame(cx);
+        let composer = window.find("chat-composer-pill").bounds();
+        for id in [
+            "attach-file-btn",
+            "composer-voice",
+            "stop-agent",
+            "send-prompt",
+        ] {
+            assert_eq!(
+                window.find(id).bounds().center().y,
+                composer.center().y,
+                "{id}"
+            );
+        }
     })
     .unwrap();
+}
+
+#[gpui_kit::test]
+fn chat_companion_overlays_match_the_column_width(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    for (width, fullscreen) in [(1080.0, false), (1440.0, false), (1440.0, true)] {
+        cx.simulate_window_resize(handle, gpui_kit::size(px(width), px(900.0)));
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.settings.shell_fullscreen = fullscreen;
+                v.set_sidebar_mode_synced(multibot_core::SidebarMode::Hidden, cx);
+                let session = SessionSummary {
+                    id: "gridlines-overlays".into(),
+                    title: "Chat overlays".into(),
+                    agent: AgentKind::Claude,
+                    ..Default::default()
+                };
+                v.connection.sessions = vec![session.clone()];
+                v.selection.selected_session = Some(session);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let composer = window.find("chat-composer-pill").bounds();
+            let column_width = if fullscreen {
+                window.find("chat-panel-root").bounds().size.width
+            } else {
+                assert_eq!(composer.size.width, px(960.0));
+                px(960.0)
+            };
+            for (chord, id) in [
+                ("/", "slash-picker"),
+                ("@", "mention-picker"),
+                ("ctrl-f", "chat-find-bar-container"),
+            ] {
+                view.update(cx, |v, cx| {
+                    v.inputs.prompt_input.update(cx, |input, cx| {
+                        input.set_value("", window, cx);
+                        input.focus(window, cx);
+                    });
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                window.press(chord, cx);
+                window.render_frame(cx);
+                let overlay = window.find(id);
+                assert!(overlay.visible(), "{id}");
+                let bounds = overlay.bounds();
+                assert_eq!(bounds.size.width, column_width, "{id}");
+                assert_eq!(bounds.center().x, composer.center().x, "{id}");
+                if fullscreen {
+                    assert!(bounds.size.width > px(960.0), "{id}");
+                } else {
+                    assert_eq!(bounds.left(), composer.left(), "{id}");
+                    assert_eq!(bounds.right(), composer.right(), "{id}");
+                }
+                window.press("escape", cx);
+                window.render_frame(cx);
+            }
+            view.update(cx, |v, cx| {
+                v.selection.selected_session.as_mut().unwrap().agent = AgentKind::Shell;
+                v.chat_state.find_open = true;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let shell = window.find("server-shell-panel").bounds();
+            let find = window.find("chat-find-bar-container").bounds();
+            assert_eq!(find.size.width, shell.size.width);
+            assert_eq!(find.center().x, shell.center().x);
+            if !fullscreen {
+                assert_eq!(find.size.width, px(760.0));
+            }
+            view.update(cx, |v, cx| {
+                v.chat_state.find_open = false;
+                cx.notify();
+            });
+        })
+        .unwrap();
+    }
+}
+
+#[gpui_kit::test]
+fn chat_column_and_bubbles_keep_their_approved_widths(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    for (width, fullscreen) in [
+        (1440.0, false),
+        (1440.0, true),
+        (679.0, false),
+        (559.0, false),
+        (390.0, false),
+        (390.0, true),
+    ] {
+        cx.simulate_window_resize(handle, gpui_kit::size(px(width), px(900.0)));
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.settings.shell_fullscreen = fullscreen;
+                v.set_sidebar_mode_synced(multibot_core::SidebarMode::Hidden, cx);
+                let session = SessionSummary {
+                    id: "gridlines-widths".into(),
+                    title: "Chat widths".into(),
+                    agent: AgentKind::Claude,
+                    ..Default::default()
+                };
+                v.chat_state.queued_prompts.insert(
+                    v.session_key_for(&session),
+                    vec![("queued".into(), "Queued message".into())],
+                );
+                v.selection.selected_session = Some(session);
+                v.history.messages = [
+                    (MessageRole::User, "Hi".to_string()),
+                    (MessageRole::Assistant, "Hello".to_string()),
+                    (
+                        MessageRole::User,
+                        "Long message that should wrap. ".repeat(20),
+                    ),
+                    (
+                        MessageRole::Assistant,
+                        "- List item that should wrap. ".repeat(20),
+                    ),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(i, (role, text))| ChatMessage {
+                    id: format!("width-{i}"),
+                    role,
+                    text,
+                    ..Default::default()
+                })
+                .collect();
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let composer = window.find("chat-composer-pill").bounds();
+            let queue = window.find("queued-messages-bar").bounds();
+            assert_eq!(composer.size.width, queue.size.width);
+            assert_eq!(composer.center().x, queue.center().x);
+            if fullscreen && width > 960.0 {
+                assert!(composer.size.width > px(960.0));
+            } else if width > 960.0 {
+                assert_eq!(composer.size.width, px(960.0));
+            } else {
+                assert!(composer.size.width < px(width));
+            }
+            for (i, cap) in [(0, 560.0), (1, 680.0), (2, 560.0), (3, 680.0)] {
+                let bubble = window.find(format!("msg-bubble-{i}")).bounds();
+                assert!(bubble.size.width <= px(cap));
+                assert!(
+                    bubble.size.width <= composer.size.width + px(8.0),
+                    "bubble {i} must fit the column at width {width}: {bubble:?}, composer: {composer:?}"
+                );
+                if i < 2 {
+                    assert!(
+                        bubble.size.width < px(200.0),
+                        "short bubble must hug its text: {bubble:?}"
+                    );
+                }
+                if !fullscreen && width > 960.0 {
+                    if i % 2 == 0 {
+                        assert_eq!(bubble.right(), composer.right());
+                    } else {
+                        assert_eq!(bubble.left(), composer.left());
+                    }
+                }
+            }
+        })
+        .unwrap();
+    }
 }
 
 #[gpui_kit::test]

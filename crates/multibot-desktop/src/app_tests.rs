@@ -408,6 +408,9 @@ fn queued_message_edit_remove_and_force_send_are_clickable(cx: &mut TestAppConte
             ("queue-remove-0", "Remove queued message"),
         ] {
             assert_eq!(window.find(id).label(), Some(label));
+            let bounds = window.find(id).bounds();
+            assert_eq!(bounds.size.width, px(24.0));
+            assert_eq!(bounds.size.height, px(24.0));
             let id = gpui_kit::ElementId::from(id);
             assert!(!gpui_kit::base::test_support::texts(window)
                 .iter().any(|text| text.path().contains(&id)));
@@ -697,7 +700,13 @@ fn daily_driver_session_switch_paths_focus_composer(cx: &mut TestAppContext) {
                     .is_focused(window),
                 "{path}"
             );
-            let before = view.read(cx).inputs.prompt_input.read(cx).value().to_string();
+            let before = view
+                .read(cx)
+                .inputs
+                .prompt_input
+                .read(cx)
+                .value()
+                .to_string();
             window.input("ready", cx);
             assert_eq!(
                 view.read(cx).inputs.prompt_input.read(cx).value(),
@@ -7690,81 +7699,100 @@ fn test_round4_gfm_markdown_pipe_table_expand_click_focuses_modal_and_scrolls(
     cx: &mut TestAppContext,
 ) {
     let (handle, view) = open_test_view_with_entity(cx);
-    cx.update_window(handle, |_, window, cx| {
-        let mut md_lines = vec![
-            "| Metric | Value | Notes |".to_string(),
-            "| :-- | :-- | :-- |".to_string(),
-        ];
-        for i in 1..=25 {
-            md_lines.push(format!("| Row {i:02} | {i}00ms | Detail line {i:02} |"));
-        }
-        let table_md = md_lines.join("\n");
-        let expected_hash = crate::chat_view::fnv1a_64(table_md.as_bytes());
-        let expand_btn_id = format!("expand-md-table-0-{expected_hash:016x}");
+    for (width, structured) in [(1280.0, false), (390.0, false), (390.0, true)] {
+        cx.simulate_window_resize(handle, gpui_kit::size(px(width), px(900.0)));
+        cx.update_window(handle, |_, window, cx| {
+            let mut md_lines = vec![
+                "| Metric | Value | Notes |".to_string(),
+                "| :-- | :-- | :-- |".to_string(),
+            ];
+            for i in 1..=25 {
+                md_lines.push(format!("| Row {i:02} | {i}00ms | Detail line {i:02} |"));
+            }
+            let table_md = md_lines.join("\n");
+            let expected_hash = crate::chat_view::fnv1a_64(table_md.as_bytes());
+            let expand_btn_id = format!("expand-md-table-0-{expected_hash:016x}");
 
-        let sess = make_session("s-gfm-table", AgentKind::Claude, "GFM Table", false);
-        view.update(cx, |v, cx| {
-            v.connection.sessions = vec![sess.clone()];
-            v.selection.selected_session = Some(sess);
-            v.history.messages = vec![ChatMessage {
-                id: "m-table".into(),
-                role: MessageRole::Assistant,
-                text: table_md.clone(),
-                timestamp_ms: Some(1_700_000_005_000),
-                blocks: Vec::new(),
-                todos: Vec::new(),
-                source_byte_range: None,
-                quoted_message_id: None,
-            }];
-            window.focus(&v.focus.root_focus_handle, cx);
-            cx.notify();
-        });
-        window.render_frame(cx);
-        // Scroll chat-scroll to bottom so the below-table `Expand` action row is in view
-        view.update(cx, |v, cx| {
-            v.chat_state.scroll_handle.scroll_to_bottom();
-            cx.notify();
-        });
-        window.render_frame(cx);
+            let sess = make_session("s-gfm-table", AgentKind::Claude, "GFM Table", false);
+            view.update(cx, |v, cx| {
+                if width < 680.0 {
+                    v.set_sidebar_mode_synced(multibot_core::SidebarMode::Hidden, cx);
+                }
+                v.connection.sessions = vec![sess.clone()];
+                v.selection.selected_session = Some(sess);
+                v.history.messages = vec![ChatMessage {
+                    id: "m-table".into(),
+                    role: MessageRole::Assistant,
+                    text: table_md.clone(),
+                    timestamp_ms: Some(1_700_000_005_000),
+                    blocks: if structured {
+                        vec![MessageBlock::Text {
+                            text: table_md.clone(),
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    todos: Vec::new(),
+                    source_byte_range: None,
+                    quoted_message_id: None,
+                }];
+                window.focus(&v.focus.root_focus_handle, cx);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            // Scroll chat-scroll to bottom so the below-table `Expand` action row is in view
+            view.update(cx, |v, cx| {
+                v.chat_state.scroll_handle.scroll_to_bottom();
+                cx.notify();
+            });
+            window.render_frame(cx);
 
-        assert!(
-            window.try_find(expand_btn_id.clone()).is_some(),
-            "GFM pipe table must render Expand button `{expand_btn_id}`"
-        );
+            assert!(
+                window.try_find(expand_btn_id.clone()).is_some(),
+                "GFM pipe table must render Expand button `{expand_btn_id}`"
+            );
 
-        // Click the GFM pipe table's Expand button
-        window.click(expand_btn_id, cx);
-        window.render_frame(cx);
+            let bubble = window.find("msg-bubble-0").bounds();
+            let expand = window.find(expand_btn_id.clone());
+            assert!(bubble.size.width <= px(680.0));
+            assert!(expand.visible(), "Expand must remain visible at width {width}");
+            assert!(expand.bounds().left() >= bubble.left());
+            assert!(expand.bounds().right() <= bubble.right());
 
-        assert!(
-            view.read(cx).table_modal_state.is_open(),
-            "Clicking GFM pipe table Expand button must open table_modal_state"
-        );
-        assert!(
-            view.read(cx)
-                .table_modal_state
-                .focus_handle
-                .as_ref()
-                .is_some_and(|fh| fh.is_focused(window)),
-            "Clicking GFM pipe table Expand button must focus table_modal_state.focus_handle"
-        );
+            // Click the GFM pipe table's Expand button
+            window.click(expand_btn_id, cx);
+            window.render_frame(cx);
 
-        // Verify keyboard scrolling works immediately without extra clicks
-        let y_before = view.read(cx).table_modal_state.scroll.y;
-        window.press("down", cx);
-        window.render_frame(cx);
-        assert!(
-            view.read(cx).table_modal_state.scroll.y > y_before,
-            "Pressing Down after clicking GFM pipe table Expand must scroll table_modal_state.scroll.y (before={y_before}, after={})",
-            view.read(cx).table_modal_state.scroll.y
-        );
+            assert!(
+                view.read(cx).table_modal_state.is_open(),
+                "Clicking GFM pipe table Expand button must open table_modal_state"
+            );
+            assert!(
+                view.read(cx)
+                    .table_modal_state
+                    .focus_handle
+                    .as_ref()
+                    .is_some_and(|fh| fh.is_focused(window)),
+                "Clicking GFM pipe table Expand button must focus table_modal_state.focus_handle"
+            );
 
-        // Escape closes Table Modal cleanly
-        window.press("escape", cx);
-        window.render_frame(cx);
-        assert!(!view.read(cx).table_modal_state.is_open());
-    })
-    .unwrap();
+            // Verify keyboard scrolling works immediately without extra clicks
+            let y_before = view.read(cx).table_modal_state.scroll.y;
+            window.press("down", cx);
+            window.render_frame(cx);
+            assert!(
+                view.read(cx).table_modal_state.scroll.y > y_before,
+                "Pressing Down after clicking GFM pipe table Expand must scroll table_modal_state.scroll.y (before={y_before}, after={})",
+                view.read(cx).table_modal_state.scroll.y
+            );
+
+            // Escape closes Table Modal cleanly
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(!view.read(cx).table_modal_state.is_open());
+        })
+        .unwrap();
+    }
 }
 
 #[gpui_kit::test]
