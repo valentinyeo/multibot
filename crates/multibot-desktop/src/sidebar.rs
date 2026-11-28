@@ -715,7 +715,13 @@ impl MultibotView {
                                     h_flex()
                                         .items_center()
                                         .gap_1()
-                                        .child(self.render_session_badge(row, 34.0))
+                                        .child(
+                                            self.render_session_verticon(row, 28.0, 40.0)
+                                                .id(SharedString::from(format!(
+                                                    "sidebar-pin-{idx}-verticon"
+                                                )))
+                                                .test_support(),
+                                        )
                                         .when_some(badge, |el, n| {
                                             el.child(
                                                 div()

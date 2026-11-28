@@ -25,6 +25,7 @@ mod table_modal;
 mod terminal_pane;
 mod theme;
 mod update_ui;
+mod verticons;
 mod voice;
 
 use app::{
