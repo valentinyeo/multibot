@@ -4999,7 +4999,14 @@ fn empty_chat_has_uniform_floating_chrome_without_welcome_or_inbox_dot(cx: &mut 
 #[gpui_kit::test]
 fn chat_column_and_bubbles_keep_their_approved_widths(cx: &mut TestAppContext) {
     let (handle, view) = open_test_chat_window(cx);
-    for (width, fullscreen) in [(1440.0, false), (1440.0, true), (390.0, false)] {
+    for (width, fullscreen) in [
+        (1440.0, false),
+        (1440.0, true),
+        (679.0, false),
+        (559.0, false),
+        (390.0, false),
+        (390.0, true),
+    ] {
         cx.simulate_window_resize(handle, gpui_kit::size(px(width), px(900.0)));
         cx.update_window(handle, |_, window, cx| {
             view.update(cx, |v, cx| {
@@ -5044,7 +5051,7 @@ fn chat_column_and_bubbles_keep_their_approved_widths(cx: &mut TestAppContext) {
             let queue = window.find("queued-messages-bar").bounds();
             assert_eq!(composer.size.width, queue.size.width);
             assert_eq!(composer.center().x, queue.center().x);
-            if fullscreen {
+            if fullscreen && width > 960.0 {
                 assert!(composer.size.width > px(960.0));
             } else if width > 960.0 {
                 assert_eq!(composer.size.width, px(960.0));
@@ -5054,7 +5061,10 @@ fn chat_column_and_bubbles_keep_their_approved_widths(cx: &mut TestAppContext) {
             for (i, cap) in [(0, 560.0), (1, 680.0), (2, 560.0), (3, 680.0)] {
                 let bubble = window.find(format!("msg-bubble-{i}")).bounds();
                 assert!(bubble.size.width <= px(cap));
-                assert!(bubble.size.width <= composer.size.width + px(8.0));
+                assert!(
+                    bubble.size.width <= composer.size.width + px(8.0),
+                    "bubble {i} must fit the column at width {width}: {bubble:?}, composer: {composer:?}"
+                );
                 if i < 2 {
                     assert!(
                         bubble.size.width < px(200.0),

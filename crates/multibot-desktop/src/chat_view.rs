@@ -353,7 +353,7 @@ impl MultibotView {
                 let msg_visible_text = message_visible_text(msg);
                 let msg_text_up = msg_visible_text.clone();
 
-                let mut body_col = v_flex().w_auto().min_w_0().gap_2();
+                let mut body_col = v_flex().w_full().min_w_0().gap_2();
 
                 // Compact 1-line clickable quote header when message quotes an earlier turn.
                 let parsed_quote = parse_quoted_message(&msg_visible_text);
@@ -626,7 +626,7 @@ impl MultibotView {
                         .test_support()
                         .w_auto()
                         .min_w_0()
-                        .max_w(px(560.0))
+                        .max_w_full()
                         .px_4()
                         .py_2p5()
                         .rounded(RADIUS_BUBBLE)
@@ -688,7 +688,7 @@ impl MultibotView {
                         .test_support()
                         .w_auto()
                         .min_w_0()
-                        .max_w(px(680.0))
+                        .max_w_full()
                         .self_start()
                         .px_4()
                         .py_3()
@@ -799,11 +799,14 @@ impl MultibotView {
                             .child(div().flex_1().h(px(1.0)).bg(theme::accent_blue())),
                     );
                 }
-                if is_user {
-                    msg_wrapper = msg_wrapper.child(h_flex().w_full().justify_end().child(bubble));
-                } else {
-                    msg_wrapper = msg_wrapper.child(bubble);
-                }
+                msg_wrapper = msg_wrapper.child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .max_w(px(if is_user { 560.0 } else { 680.0 }))
+                        .when(is_user, |el| el.self_end().justify_end())
+                        .child(bubble),
+                );
 
                 // Compact emoji reaction badges folded onto this target message.
                 if !vis.reactions.is_empty() {

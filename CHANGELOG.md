@@ -6,7 +6,7 @@ ships, move those bullets under its published version; keep older entries here.
 This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
-- Align Main Chat controls and sidebar edges, widen the reading column, and fit short message bubbles to their text (MBRU-112).
+- Align Main Chat controls and sidebar edges, widen the reading column, fit short message bubbles to their text, and keep long messages and table controls inside narrow windows (MBRU-112).
 - Send chat messages with Enter, add line breaks with Shift+Enter, and force send queued messages with Ctrl+Enter (MBRU-137).
 - Add Ctrl+Shift+Enter to force send queued messages and show keyboard shortcuts in mouse-over tooltips on icon buttons (MBRU-136).
 - Detect live subworkers in Antigravity sessions using the conversation flag and sibling processes (MBRU-135).
