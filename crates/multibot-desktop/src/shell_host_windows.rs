@@ -307,7 +307,7 @@ impl NativeHost {
                         text_input_focused: false,
                         confirming_kill: false,
                     },
-                )
+                );
             });
             Ok(host)
         }
