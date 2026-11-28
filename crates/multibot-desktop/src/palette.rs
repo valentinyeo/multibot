@@ -2,6 +2,10 @@
 mod catalog;
 #[path = "palette_commands.rs"]
 mod commands;
+#[path = "hibernate_time.rs"]
+mod hibernate_time;
+
+use hibernate_time::{HIBERNATE_PRESETS, parse_hibernate_query};
 #[path = "shortcuts_modal.rs"]
 mod shortcuts_modal;
 
@@ -72,6 +76,7 @@ pub(crate) struct PaletteState {
     pub shell_kill_target: Option<String>,
     pub stats: PaletteStats,
     pub reminder_target: Option<ReminderTarget>,
+    pub reminder_query_clock: Option<(String, i64)>,
     pub hibernate_wake_on_reply: bool,
     pub directory_picker: Option<SessionDirectoryPicker>,
     pub dissolve_workspace_id: Option<String>,
@@ -104,6 +109,7 @@ impl MultibotView {
         self.palette_state.scroll_handle.scroll_to_item(0);
         self.ensure_palette_input_subscription(window, cx);
         self.inputs.palette_input.update(cx, |state, cx| {
+            state.set_placeholder("Search sessions and commands...", window, cx);
             state.set_value("", window, cx);
             state.focus(window, cx);
         });
@@ -165,6 +171,7 @@ impl MultibotView {
         self.palette_state.scroll_handle.scroll_to_item(0);
         self.ensure_palette_input_subscription(window, cx);
         self.inputs.palette_input.update(cx, |state, cx| {
+            state.set_placeholder("Search sessions and commands...", window, cx);
             state.set_value("", window, cx);
             state.focus(window, cx);
         });
@@ -199,7 +206,11 @@ impl MultibotView {
         };
         self.open_palette(window, cx);
         self.palette_state.hibernate_wake_on_reply = false;
+        self.palette_state.reminder_query_clock = None;
         self.palette_state.reminder_target = Some(target);
+        self.inputs.palette_input.update(cx, |state, cx| {
+            state.set_placeholder("Try: 8 am, 3 days, aug 7", window, cx);
+        });
         self.palette_state.directory_picker = None;
         self.palette_state.dissolve_workspace_id = None;
     }
@@ -217,6 +228,12 @@ impl MultibotView {
                 }
                 match event {
                     InputEvent::Change => {
+                        if this.palette_state.reminder_target.is_some() {
+                            this.palette_state.reminder_query_clock = Some((
+                                this.inputs.palette_input.read(cx).value().to_string(),
+                                now_unix_ms(),
+                            ));
+                        }
                         this.palette_state.selected_index = 0;
                         this.palette_state.scroll_handle.scroll_to_item(0);
                         cx.notify();
@@ -362,25 +379,66 @@ impl MultibotView {
                 ReminderTarget::Session(_) => "Move to Inbox",
                 ReminderTarget::Workspace(_) => "Unsnooze",
             };
-            return [
-                "In 15 minutes",
-                "In 1 hour",
-                "In 3 hours",
-                "Tomorrow 9am",
-                clear,
-            ]
-            .into_iter()
-            .enumerate()
-            .map(|(idx, label)| PaletteRow::Command {
-                id: format!("pal-reminder-{idx}"),
-                label: label.into(),
-                chord: String::new(),
+            let Some(now) = chrono::DateTime::from_timestamp_millis(now_ms)
+                .map(|now| now.with_timezone(&chrono::Local))
+            else {
+                return Vec::new();
+            };
+            let command = |id: String, label: String, chord: String| PaletteRow::Command {
+                id,
+                label,
+                chord,
                 category: PaletteCategory::Sessions,
                 destructive: false,
                 match_rank: 0,
                 frecency: 0,
-            })
-            .collect();
+            };
+            let presets: Vec<_> = HIBERNATE_PRESETS
+                .iter()
+                .filter_map(|(id, label)| {
+                    let resolved = parse_hibernate_query(label, now)?;
+                    Some(command((*id).into(), (*label).into(), resolved.preview))
+                })
+                .chain(std::iter::once(command(
+                    "pal-reminder-4".into(),
+                    clear.into(),
+                    String::new(),
+                )))
+                .collect();
+            // Anchor relative input to its edit, so Enter confirms the displayed timestamp.
+            let query_now = self
+                .palette_state
+                .reminder_query_clock
+                .as_ref()
+                .filter(|(text, _)| text == query)
+                .and_then(|(_, timestamp)| chrono::DateTime::from_timestamp_millis(*timestamp))
+                .map(|time| time.with_timezone(&chrono::Local))
+                .unwrap_or(now);
+            let query = query.trim().to_lowercase();
+            if query.is_empty() {
+                return presets;
+            }
+            let mut rows = Vec::new();
+            if let Some(m) = parse_hibernate_query(&query, query_now) {
+                rows.push(command(
+                    format!("pal-reminder-custom:{}", m.timestamp_ms),
+                    m.label,
+                    m.preview,
+                ));
+            }
+            rows.extend(
+                presets
+                    .iter()
+                    .filter(|row| {
+                        let PaletteRow::Command { label, id, .. } = row else {
+                            return false;
+                        };
+                        label.to_lowercase().contains(&query)
+                            || (id == "pal-reminder-4" && query == "unsnooze")
+                    })
+                    .cloned(),
+            );
+            return if rows.is_empty() { presets } else { rows };
         }
         let inputs = self.session_inputs();
         let commands = self.build_palette_command_catalog(now_ms);

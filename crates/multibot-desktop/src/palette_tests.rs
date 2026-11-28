@@ -224,6 +224,141 @@ fn workspace_delete_is_safe_and_empty_dissolve_needs_no_confirmation(cx: &mut Te
 }
 
 #[gpui_kit::test]
+fn hibernate_autocomplete_enter_uses_resolved_timestamp_without_note(cx: &mut TestAppContext) {
+    use multibot_core::workspaces::SessionLifecycle;
+    let (handle, view) = open_view(cx);
+    let key = cx
+        .update_window(handle, |_, window, cx| {
+            let key = view.update(cx, |v, cx| {
+                let session = SessionSummary {
+                    id: "hibernate-autocomplete".into(),
+                    agent: AgentKind::Claude,
+                    ..Default::default()
+                };
+                let key = v.session_key_for(&session);
+                v.connection.sessions = vec![session.clone()];
+                v.selection.selected_session = Some(session);
+                v.sync_sessions_to_shared(cx);
+                key
+            });
+            window.render_frame(cx);
+            window.press("alt-h", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("palette-search").placeholder(),
+                Some("Try: 8 am, 3 days, aug 7")
+            );
+            window.press("down", cx);
+            assert_eq!(view.read(cx).palette_state.selected_index, 1);
+            window.input("15m", cx);
+            key
+        })
+        .unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.inputs.palette_input.read(cx).value().as_ref(), "15m");
+            assert_eq!(v.palette_state.selected_index, 0);
+            let now = now_unix_ms();
+            let first = v.build_palette_rows("15m", now);
+            let later = v.build_palette_rows("15m", now + 60_000);
+            let PaletteRow::Command { id: first, .. } = &first[0] else {
+                panic!("Expected duration")
+            };
+            let PaletteRow::Command { id: later, .. } = &later[0] else {
+                panic!("Expected duration")
+            };
+            assert_eq!(
+                first, later,
+                "Enter must keep the displayed duration timestamp"
+            );
+        });
+        window.press("down", cx);
+        window.press("ctrl-a", cx);
+        window.input("2 days", cx);
+    })
+    .unwrap();
+    let timestamp = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let timestamp = view.read_with(cx, |v, _| {
+                assert_eq!(v.palette_state.selected_index, 0);
+                assert!(!v.palette_state.hibernate_wake_on_reply);
+                let rows = v.build_palette_rows("2 days", now_unix_ms());
+                let PaletteRow::Command {
+                    id, label, chord, ..
+                } = &rows[0]
+                else {
+                    panic!("Expected a resolved time as the first row");
+                };
+                assert_eq!(label, "in 2 days");
+                assert!(!chord.is_empty());
+                assert!(window.find(id.clone()).visible());
+                id.strip_prefix("pal-reminder-custom:")
+                    .unwrap()
+                    .parse::<i64>()
+                    .unwrap()
+            });
+            window.press("enter", cx);
+            timestamp
+        })
+        .unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.active_modal, ActiveModal::None);
+            let store = &v.sidebar_state.workspace_store;
+            let meta = &store.session_meta[&key];
+            assert_eq!(meta.remind_at_ms, Some(timestamp));
+            assert_eq!(meta.reminder_note, None);
+            assert!(!meta.hibernate_wake_on_reply);
+            assert_eq!(
+                store.session_lifecycle(&key, &v.connection.sessions[0], now_unix_ms()),
+                SessionLifecycle::Hibernated
+            );
+        });
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn hibernate_presets_preview_filter_fallback_and_next_week(cx: &mut TestAppContext) {
+    let (handle, view) = open_view(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.open_reminder_picker(ReminderTarget::Session("test-session".into()), window, cx);
+            let now = now_unix_ms();
+            let presets = v.build_palette_rows("", now);
+            assert_eq!(presets.len(), 6);
+            for row in &presets[..5] {
+                assert!(matches!(row, PaletteRow::Command { chord, .. } if !chord.is_empty()));
+            }
+            for query in ["inbox", "unsnooze"] {
+                let rows = v.build_palette_rows(query, now);
+                assert!(matches!(&rows[..], [PaletteRow::Command { id, .. }] if id == "pal-reminder-4"));
+            }
+            assert_eq!(v.build_palette_rows("Follow up with Alex", now).len(), 6);
+            let rows = v.build_palette_rows("tom", now);
+            assert!(matches!(&rows[0], PaletteRow::Command { id, .. } if id.starts_with("pal-reminder-custom:")));
+            assert!(matches!(&rows[1], PaletteRow::Command { id, .. } if id == "pal-reminder-3"));
+        });
+        window.press("escape", cx);
+        let (workspace, timestamp) = view.update(cx, |v, cx| {
+            let workspace = v.sidebar_state.workspace_store.create_workspace("Snooze test", None).unwrap().id;
+            v.open_reminder_picker(ReminderTarget::Workspace(workspace.clone()), window, cx);
+            let timestamp = parse_hibernate_query("next week", chrono::Local::now()).unwrap().timestamp_ms;
+            (workspace, timestamp)
+        });
+        window.render_frame(cx);
+        window.click("pal-reminder-5", cx);
+        window.render_frame(cx);
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.sidebar_state.workspace_store.workspace_by_id(&workspace).unwrap().snoozed_until_ms, Some(timestamp));
+        });
+    }).unwrap();
+}
+
+#[gpui_kit::test]
 fn hibernate_displays_alt_h_and_accepts_ctrl_h_fallback(cx: &mut TestAppContext) {
     let (handle, view) = open_view(cx);
     cx.update_window(handle, |_, window, cx| {

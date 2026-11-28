@@ -200,33 +200,39 @@ impl MultibotView {
             let PaletteRow::Command { id, .. } = row else {
                 return;
             };
-            let at = match id.as_str() {
-                "pal-reminder-0" => Some(now_ms.saturating_add(15 * 60 * 1000)),
-                "pal-reminder-1" => Some(now_ms.saturating_add(60 * 60 * 1000)),
-                "pal-reminder-2" => Some(now_ms.saturating_add(3 * 60 * 60 * 1000)),
-                "pal-reminder-3" => {
-                    use chrono::{Local, TimeZone};
-                    let tomorrow = Local::now()
-                        .date_naive()
-                        .succ_opt()
-                        .and_then(|day| day.and_hms_opt(9, 0, 0))
-                        .and_then(|time| Local.from_local_datetime(&time).earliest());
-                    let Some(tomorrow) = tomorrow else {
-                        self.notice =
-                            Some("Tomorrow 9am is unavailable; choose a duration instead".into());
-                        self.palette_state.reminder_target = Some(target);
-                        self.palette_state.directory_picker = None;
-                        cx.notify();
-                        return;
-                    };
-                    Some(tomorrow.timestamp_millis())
-                }
-                "pal-reminder-4" => None,
-                _ => return,
+            let at = if let Some(timestamp) = id.strip_prefix("pal-reminder-custom:") {
+                let Ok(timestamp) = timestamp.parse::<i64>() else {
+                    self.palette_state.reminder_target = Some(target);
+                    return;
+                };
+                Some(timestamp)
+            } else if id == "pal-reminder-4" {
+                None
+            } else {
+                let resolved = HIBERNATE_PRESETS
+                    .iter()
+                    .find(|(preset_id, _)| *preset_id == id)
+                    .and_then(|(_, query)| {
+                        let now = chrono::DateTime::from_timestamp_millis(now_ms)?
+                            .with_timezone(&chrono::Local);
+                        parse_hibernate_query(query, now)
+                    });
+                let Some(resolved) = resolved else {
+                    self.notice = Some("That time is unavailable; choose another time".into());
+                    self.palette_state.reminder_target = Some(target);
+                    cx.notify();
+                    return;
+                };
+                Some(resolved.timestamp_ms)
             };
             match target {
                 ReminderTarget::Session(key) => {
-                    let note = self.inputs.palette_input.read(cx).value().to_string();
+                    let query = self.inputs.palette_input.read(cx).value().to_string();
+                    let note = if id.starts_with("pal-reminder-custom:") {
+                        None
+                    } else {
+                        Some(query.as_str())
+                    };
                     if let Some(session) = self.find_session_by_key(&key) {
                         if session.archived {
                             self.reactivate_session_key(&key, cx);
@@ -235,7 +241,7 @@ impl MultibotView {
                             &key,
                             &session,
                             at,
-                            Some(&note),
+                            note,
                             self.palette_state.hibernate_wake_on_reply,
                         );
                     }
