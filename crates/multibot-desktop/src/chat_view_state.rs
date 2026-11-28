@@ -275,7 +275,6 @@ impl ChatViewState {
     }
 
     /// Reconciles optimistic local reaction overrides once daemon echoes arrive.
-    #[allow(dead_code)]
     pub(crate) fn reconcile_local_reactions(&mut self, messages: &[ChatMessage]) {
         let server_masks = compute_server_reaction_masks(messages);
         self.local_reactions.retain(|msg_id, emojis| {

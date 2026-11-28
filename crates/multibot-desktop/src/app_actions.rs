@@ -1,5 +1,89 @@
 use super::*;
 
+actions!(
+    multibot,
+    [
+        // Slice 1 (existing 19 actions)
+        OpenPalette,
+        OpenWorkspaces,
+        OpenInbox,
+        ToggleInbox,
+        ToggleSettings,
+        ToggleSidebar,
+        ToggleFullscreen,
+        NewWindow,
+        OpenShortcuts,
+        CloseOverlay,
+        VoiceDictation,
+        NextSession,
+        PrevSession,
+        JumpSession1,
+        JumpSession2,
+        JumpSession3,
+        JumpSession4,
+        JumpSession5,
+        JumpSession6,
+        JumpSession7,
+        JumpSession8,
+        JumpSession9,
+        // Slice 3 — Session lifecycle & sidebar structure (8 actions)
+        NewSession,
+        DeleteSession,
+        ArchiveSession,
+        ReopenClosedSession,
+        ReconnectSession,
+        MoveSessionUp,
+        MoveSessionDown,
+        ToggleGroup,
+        // Slice 3 — Inbox & session triage (6 actions)
+        InboxNext,
+        InboxPrev,
+        ToggleUnreadOnly,
+        MarkSessionUnread,
+        MoveSessionWaiting,
+        RemindSession,
+        UndoWaiting,
+        OpenDone,
+        OpenHibernated,
+        OpenDissolved,
+        ToggleHibernateMode,
+        // Slice 3 — Workspaces & views (16 actions)
+        ToggleFavorite,
+        SnoozeWorkspace,
+        JumpWorkspace1,
+        JumpWorkspace2,
+        JumpWorkspace3,
+        JumpWorkspace4,
+        JumpWorkspace5,
+        JumpWorkspace6,
+        JumpWorkspace7,
+        JumpWorkspace8,
+        JumpWorkspace9,
+        PrevWorkspace,
+        NextWorkspace,
+        WorkspaceViewAll,
+        WorkspaceViewFrequent,
+        WorkspaceViewFavorites,
+        // Slice 3 — System inline rename (1 action)
+        RenameActiveSession,
+        // Slice 4 — Rich Chat View & font zoom (6 actions)
+        CopyLatestCodeBlock,
+        FindInChat,
+        BrowseCommands,
+        FontZoomIn,
+        FontZoomOut,
+        FontZoomReset,
+        // Inbox split cycling (scoped to "Inbox" context)
+        InboxNextSplit,
+        InboxPrevSplit,
+        // Slice 5 — built-in native terminal pane (`Alt+C`)
+        ToggleTerminal,
+        ToggleBrowserPane,
+        FocusBrowserPane,
+        CaptureBrowserPane,
+    ]
+);
+
 impl MultibotView {
     pub(super) fn register_actions(
         &self,

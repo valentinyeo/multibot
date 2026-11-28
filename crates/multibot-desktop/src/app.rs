@@ -1,3 +1,10 @@
+pub(crate) use actions::*;
+use focus::FocusLayoutSignature;
+pub(crate) use outbox::parse_outbox_session_key;
+use shared::backfill_zigshel_workspaces;
+#[cfg(test)]
+#[path = "app_test_support.rs"]
+mod test_support;
 #[path = "app_state.rs"]
 mod view_state;
 use view_state::*;
@@ -13,7 +20,8 @@ mod focus;
 mod history;
 #[path = "app_host_events.rs"]
 mod host_events;
-#[path = "app_legacy_events.rs"]
+#[cfg(test)]
+#[path = "app_legacy_tests.rs"]
 mod legacy_events;
 #[path = "app_outbox.rs"]
 mod outbox;
@@ -96,143 +104,9 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 static NEXT_VIEW_ID: AtomicU64 = AtomicU64::new(1);
 
-actions!(
-    multibot,
-    [
-        // Slice 1 (existing 19 actions)
-        OpenPalette,
-        OpenWorkspaces,
-        OpenInbox,
-        ToggleInbox,
-        ToggleSettings,
-        ToggleSidebar,
-        ToggleFullscreen,
-        NewWindow,
-        OpenShortcuts,
-        CloseOverlay,
-        VoiceDictation,
-        NextSession,
-        PrevSession,
-        JumpSession1,
-        JumpSession2,
-        JumpSession3,
-        JumpSession4,
-        JumpSession5,
-        JumpSession6,
-        JumpSession7,
-        JumpSession8,
-        JumpSession9,
-        // Slice 3 — Session lifecycle & sidebar structure (8 actions)
-        NewSession,
-        DeleteSession,
-        ArchiveSession,
-        ReopenClosedSession,
-        ReconnectSession,
-        MoveSessionUp,
-        MoveSessionDown,
-        ToggleGroup,
-        // Slice 3 — Inbox & session triage (6 actions)
-        InboxNext,
-        InboxPrev,
-        ToggleUnreadOnly,
-        MarkSessionUnread,
-        MoveSessionWaiting,
-        RemindSession,
-        UndoWaiting,
-        OpenDone,
-        OpenHibernated,
-        OpenDissolved,
-        ToggleHibernateMode,
-        // Slice 3 — Workspaces & views (16 actions)
-        ToggleFavorite,
-        SnoozeWorkspace,
-        JumpWorkspace1,
-        JumpWorkspace2,
-        JumpWorkspace3,
-        JumpWorkspace4,
-        JumpWorkspace5,
-        JumpWorkspace6,
-        JumpWorkspace7,
-        JumpWorkspace8,
-        JumpWorkspace9,
-        PrevWorkspace,
-        NextWorkspace,
-        WorkspaceViewAll,
-        WorkspaceViewFrequent,
-        WorkspaceViewFavorites,
-        // Slice 3 — System inline rename (1 action)
-        RenameActiveSession,
-        // Slice 4 — Rich Chat View & font zoom (6 actions)
-        CopyLatestCodeBlock,
-        FindInChat,
-        BrowseCommands,
-        FontZoomIn,
-        FontZoomOut,
-        FontZoomReset,
-        // Inbox split cycling (scoped to "Inbox" context)
-        InboxNextSplit,
-        InboxPrevSplit,
-        // Slice 5 — built-in native terminal pane (`Alt+C`)
-        ToggleTerminal,
-        ToggleBrowserPane,
-        FocusBrowserPane,
-        CaptureBrowserPane,
-    ]
-);
-
 /// Sessions the desktop asks for at connect time. The daemon returns only chats something
 /// still holds open, so this is headroom for a lot of live work, not the payload size.
 const SESSION_LIST_LIMIT: usize = 500;
-
-/// Lossless parser for `ChatOutbox::session_key` (`"{host_len}:{host}|{agent}|{sid_len}:{sid}"`).
-pub(crate) fn parse_outbox_session_key(key: &str) -> Option<(&str, AgentKind, &str)> {
-    let (host_len_str, rest) = key.split_once(':')?;
-    let host_len: usize = host_len_str.parse().ok()?;
-    let host = rest.get(..host_len)?;
-    let after_host = rest.get(host_len..)?.strip_prefix('|')?;
-    let (agent_str, after_agent) = after_host.split_once('|')?;
-    let agent = match agent_str {
-        "claude" => AgentKind::Claude,
-        "antigravity" => AgentKind::Antigravity,
-        "codex" => AgentKind::Codex,
-        "shell" => AgentKind::Shell,
-        "pi" => AgentKind::Pi,
-        "cursor" => AgentKind::Cursor,
-        _ => return None,
-    };
-    let (sid_len_str, sid) = after_agent.split_once(':')?;
-    let sid_len: usize = sid_len_str.parse().ok()?;
-    if sid.len() != sid_len {
-        return None;
-    }
-    Some((host, agent, sid))
-}
-
-/// Compact fingerprint of all conditional UI subtrees that can mount/unmount focusable
-/// elements (including opaque `Button` internal `FocusHandle`s). When this signature changes
-/// between rendered frames while focus is not on a currently-mounted known handle,
-/// `MultibotView::render` restores focus via `focus_active_surface_default`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct FocusLayoutSignature {
-    main_surface: MainSurface,
-    active_modal: ActiveModal,
-    sidebar_mode: SidebarMode,
-    table_modal_open: bool,
-    find_open: bool,
-    update_card_kind: u8,
-    selected_session_id: Option<String>,
-    slash_picker_open: bool,
-    rename_active: bool,
-    sidebar_workspace_draft_active: bool,
-    reply_quote_active: bool,
-    has_pending_attachments: bool,
-    message_action_menu_open: bool,
-    focused_message_idx: Option<usize>,
-    message_count: usize,
-    answered_question_count: usize,
-    gpu_adapter_count: usize,
-    terminal_open: bool,
-}
 
 pub struct MultibotView {
     pub(crate) runtime: Arc<tokio::runtime::Runtime>,
@@ -272,38 +146,6 @@ pub struct MultibotView {
     pub(crate) voice: crate::voice::VoiceState,
     pub(crate) inputs: ViewInputs,
     pub(crate) notice: Option<String>,
-}
-
-fn backfill_zigshel_workspaces(store: &mut WorkspaceStore, dir: &std::path::Path) -> bool {
-    if !dir.exists() {
-        return false;
-    }
-    let mut bundle = import_zigshel_bundle_readonly(Some(dir));
-    if store
-        .session_meta
-        .values()
-        .any(|m| m.workspace_id.is_some())
-    {
-        // Existing installs already imported chats, but older builds misclassified tmux tabs.
-        let is_shell = |key: &str| {
-            multibot_core::workspaces::parse_session_key(key)
-                .is_some_and(|(_, agent, _)| agent == "shell")
-        };
-        bundle.sessions.retain(|s| {
-            is_shell(&s.session_key) && !store.session_titles.contains_key(&s.session_key)
-        });
-        bundle.favorites.retain(|s| {
-            bundle
-                .sessions
-                .iter()
-                .any(|session| session.session_key == s.session_key)
-        });
-        if bundle.sessions.is_empty() {
-            return false;
-        }
-    }
-    let stats = merge_zigshel_bundle(store, &bundle);
-    stats.sessions_assigned > 0 || stats.favorites_added > 0 || stats.workspaces_added > 0
 }
 
 impl MultibotView {

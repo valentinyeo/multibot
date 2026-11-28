@@ -1,5 +1,29 @@
 use super::*;
 
+/// Lossless parser for `ChatOutbox::session_key` (`"{host_len}:{host}|{agent}|{sid_len}:{sid}"`).
+pub(crate) fn parse_outbox_session_key(key: &str) -> Option<(&str, AgentKind, &str)> {
+    let (host_len_str, rest) = key.split_once(':')?;
+    let host_len: usize = host_len_str.parse().ok()?;
+    let host = rest.get(..host_len)?;
+    let after_host = rest.get(host_len..)?.strip_prefix('|')?;
+    let (agent_str, after_agent) = after_host.split_once('|')?;
+    let agent = match agent_str {
+        "claude" => AgentKind::Claude,
+        "antigravity" => AgentKind::Antigravity,
+        "codex" => AgentKind::Codex,
+        "shell" => AgentKind::Shell,
+        "pi" => AgentKind::Pi,
+        "cursor" => AgentKind::Cursor,
+        _ => return None,
+    };
+    let (sid_len_str, sid) = after_agent.split_once(':')?;
+    let sid_len: usize = sid_len_str.parse().ok()?;
+    if sid.len() != sid_len {
+        return None;
+    }
+    Some((host, agent, sid))
+}
+
 impl MultibotView {
     /// Sends an idle session's prompt, or persists it in the shared FIFO while busy or offline.
     pub(crate) fn send_or_queue_prompt(

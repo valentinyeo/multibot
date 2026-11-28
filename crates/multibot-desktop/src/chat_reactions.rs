@@ -235,7 +235,7 @@ pub(crate) struct VisibleMessage<'a> {
 /// hidden reaction-only user message) and folds reactions onto their target messages.
 /// Optimistic `local_reactions` are idempotent with daemon-echoed reaction messages
 /// (they ensure the reaction count is at least 1 and never cancel out a server echo).
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn project_visible_messages<'a>(
     messages: &'a [ChatMessage],
     local_reactions: &HashMap<String, Vec<ReactionEmoji>>,

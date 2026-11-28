@@ -6,6 +6,7 @@ impl MultibotView {
     /// First prunes any stale queued `req_before` entries where the transcript was truncated/rotated
     /// past `req_before` (`file_size < req_before`). Then pops a matching entry (preferring an exact
     /// `lo == req_before` match, falling back to `lo <= req_before`) and returns `true`.
+    #[cfg(test)]
     pub(super) fn consume_shared_older_page_hint(cx: &mut App, server_ev: &ServerEvent) -> bool {
         let ServerEvent::History {
             session_id,

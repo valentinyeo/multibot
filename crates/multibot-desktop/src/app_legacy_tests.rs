@@ -1,7 +1,6 @@
 use super::*;
 
 impl MultibotView {
-    #[allow(dead_code)]
     pub(crate) fn apply_daemon_bridge_event_to_app(
         conn_gen: u64,
         event: UiBridgeEvent,

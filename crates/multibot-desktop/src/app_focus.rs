@@ -1,5 +1,31 @@
 use super::*;
 
+/// Compact fingerprint of all conditional UI subtrees that can mount/unmount focusable
+/// elements (including opaque `Button` internal `FocusHandle`s). When this signature changes
+/// between rendered frames while focus is not on a currently-mounted known handle,
+/// `MultibotView::render` restores focus via `focus_active_surface_default`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FocusLayoutSignature {
+    pub(super) main_surface: MainSurface,
+    pub(super) active_modal: ActiveModal,
+    pub(super) sidebar_mode: SidebarMode,
+    pub(super) table_modal_open: bool,
+    pub(super) find_open: bool,
+    pub(super) update_card_kind: u8,
+    pub(super) selected_session_id: Option<String>,
+    pub(super) slash_picker_open: bool,
+    pub(super) rename_active: bool,
+    pub(super) sidebar_workspace_draft_active: bool,
+    pub(super) reply_quote_active: bool,
+    pub(super) has_pending_attachments: bool,
+    pub(super) message_action_menu_open: bool,
+    pub(super) focused_message_idx: Option<usize>,
+    pub(super) message_count: usize,
+    pub(super) answered_question_count: usize,
+    pub(super) gpu_adapter_count: usize,
+    pub(super) terminal_open: bool,
+}
+
 impl MultibotView {
     /// Computes the current conditional-subtree visibility signature for structural focus recovery.
     pub(super) fn focus_layout_signature(&self) -> FocusLayoutSignature {

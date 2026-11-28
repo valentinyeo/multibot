@@ -1,5 +1,40 @@
 use super::*;
 
+pub(super) fn backfill_zigshel_workspaces(
+    store: &mut WorkspaceStore,
+    dir: &std::path::Path,
+) -> bool {
+    if !dir.exists() {
+        return false;
+    }
+    let mut bundle = import_zigshel_bundle_readonly(Some(dir));
+    if store
+        .session_meta
+        .values()
+        .any(|m| m.workspace_id.is_some())
+    {
+        // Existing installs already imported chats, but older builds misclassified tmux tabs.
+        let is_shell = |key: &str| {
+            multibot_core::workspaces::parse_session_key(key)
+                .is_some_and(|(_, agent, _)| agent == "shell")
+        };
+        bundle.sessions.retain(|s| {
+            is_shell(&s.session_key) && !store.session_titles.contains_key(&s.session_key)
+        });
+        bundle.favorites.retain(|s| {
+            bundle
+                .sessions
+                .iter()
+                .any(|session| session.session_key == s.session_key)
+        });
+        if bundle.sessions.is_empty() {
+            return false;
+        }
+    }
+    let stats = merge_zigshel_bundle(store, &bundle);
+    stats.sessions_assigned > 0 || stats.favorites_added > 0 || stats.workspaces_added > 0
+}
+
 impl MultibotView {
     /// Enables disk persistence for Tier-2 chat cache and offline outbox (production `main.rs`).
     /// Loads the shared App-scoped `ChatOutbox` from disk ONCE so `Ctrl+N` sibling windows share

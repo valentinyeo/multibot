@@ -2,7 +2,6 @@ use super::*;
 
 impl MultibotView {
     /// Records an asynchronous daemon send failure (wired in M6).
-    #[allow(dead_code)]
     pub(crate) fn record_send_failure(
         &mut self,
         msg_id: String,

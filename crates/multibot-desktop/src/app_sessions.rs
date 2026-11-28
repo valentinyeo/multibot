@@ -178,27 +178,6 @@ impl MultibotView {
         ok
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn steer_active_session(&mut self, text: String, cx: &mut Context<Self>) -> bool {
-        let Some(ref sess) = self.selection.selected_session else {
-            return false;
-        };
-        let Some(tx) = self.active_session_tx().cloned() else {
-            return false;
-        };
-        let ok = tx
-            .send(ClientRequest::SteerSession {
-                session_id: sess.id.clone(),
-                agent: sess.agent,
-                cwd: sess.cwd.clone(),
-                text,
-                options: self.composer_options_for(sess),
-            })
-            .is_ok();
-        cx.notify();
-        ok
-    }
-
     pub(crate) fn spawn_new_session(
         &mut self,
         agent: AgentKind,
