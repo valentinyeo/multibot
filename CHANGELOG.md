@@ -7,6 +7,7 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 
+- Show real tmux window titles for server shells and refresh them when renamed, while preserving custom Multibot and legacy names.
 - Resolve available legacy shell names, including host-qualified terminal keys, while keeping Multibot renames.
 - Remember shell full-width mode across restarts; toggle it with Ctrl+Shift+F or Ctrl+K.
 - Keep sidebar developer stats in a tiny indicator; click to expand GPU, memory, CPU and connection details, or press Esc to collapse.

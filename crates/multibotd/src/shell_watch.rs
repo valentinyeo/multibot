@@ -161,6 +161,7 @@ pub fn start(
                             Ok(Some(line)) => {
                                 if line.starts_with("%session-changed ") { attach_retries = 0; }
                                 refresh = line.starts_with("%session-changed ") || line.starts_with("%sessions-changed") || line.starts_with("%session-renamed")
+                                    || line.starts_with("%window-renamed ") || line.starts_with("%unlinked-window-renamed ")
                                     || line.starts_with("%window-pane-changed") || line.starts_with("%session-window-changed");
                             }
                             _ => { lines = None; drop(child.take()); refresh = true; }
