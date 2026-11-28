@@ -7,6 +7,12 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 
+- Keep live shell mouse input responsive, restore attached shells in All, and improve dictation at natural pauses (MBRU-118, MBRU-119, MBRU-120).
+- Quote selected passages inline, reply directly with Enter, react with r, use message actions from Ctrl+K, and keep scrolling anchored during chat updates (MBRU-121, MBRU-122, MBRU-123).
+- Fit image cards to their exact proportions and open screenshots in a dark in-app viewer; prevent Windows crashes when opening external links (MBRU-124, MBRU-125).
+- Keep each chat’s unsent text, quotes, and attachments separate, and allow slash commands and skills anywhere after whitespace (MBRU-127, MBRU-128).
+- Pin live activity above the composer, expand steps upward, and remove premature no-reply notices and repeated activity verbs (MBRU-130).
+
 - Discover enabled Codex plugins such as pstack in the slash and skill picker (MBRU-109).
 - Deduplicate Antigravity sessions that share one native conversation so chats appear once in the sidebar (MBRU-110).
 - Fetch and unfurl remote screenshot and image links inline in chat (MBRU-111).
