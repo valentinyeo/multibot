@@ -6,6 +6,7 @@ ships, move those bullets under its published version; keep older entries here.
 This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
+- Widen Inbox, quiet row borders, hide repeated workspace badges, and show preview text without Markdown formatting (MBRU-143).
 - Format chat URLs, /skills, @bot mentions, inline code, and code blocks with clean, borderless tokens and clickable links (MBRU-126).
 - Unlock model, effort, and permission switching for Antigravity sessions and add GPT-6.1 Sol for Codex (MBRU-139).
 - Add Browser: Sign in to Google in Ctrl+K to open a clean Chrome window on the shared Multibot profile without remote debugging flags (MBRU-140).
