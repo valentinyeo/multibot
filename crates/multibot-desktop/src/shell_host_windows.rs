@@ -890,7 +890,7 @@ impl EmbeddedShellHandle {
                 self.reconcile(parent, false, None, false);
                 return;
             }
-            let resize = self.rect != Some(rect) || !self.visible;
+            let resize = self.rect != Some(rect);
             if resize {
                 SetWindowPos(
                     self.hwnd as HWND,
