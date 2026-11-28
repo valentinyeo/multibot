@@ -142,6 +142,7 @@ pub(crate) struct SidebarState {
     pub dev_stats_expanded: bool,
     pub show_jump_badges: bool,
     pub previous_session_key: Option<String>,
+    pub pending_shell_dissolve: Option<(String, std::time::Instant)>,
     pub rename: Option<InlineRenameState>,
     pub new_workspace_draft: Option<String>,
     pub persist_to_disk: bool,
@@ -160,6 +161,7 @@ impl Default for SidebarState {
             dev_stats_expanded: false,
             show_jump_badges: false,
             previous_session_key: None,
+            pending_shell_dissolve: None,
             rename: None,
             new_workspace_draft: None,
             persist_to_disk: false,
@@ -169,6 +171,20 @@ impl Default for SidebarState {
 }
 
 impl SidebarState {
+    pub(crate) fn confirm_shell_dissolve(&mut self, key: &str, now: std::time::Instant) -> bool {
+        if self
+            .pending_shell_dissolve
+            .take()
+            .is_some_and(|(pending, started)| {
+                pending == key && now.duration_since(started) < std::time::Duration::from_secs(3)
+            })
+        {
+            return true;
+        }
+        self.pending_shell_dissolve = Some((key.to_string(), now));
+        false
+    }
+
     pub(crate) fn is_shown(&self) -> bool {
         !matches!(self.mode, SidebarMode::Hidden)
     }
@@ -396,6 +412,22 @@ impl MultibotView {
         if self.sidebar_state.persist_to_disk {
             let _ = self.sidebar_state.workspace_store.save();
         }
+    }
+
+    pub(crate) fn sidebar_neighbor_after_removal(
+        &self,
+        key: &str,
+        direction: ReorderDirection,
+    ) -> Option<String> {
+        let order = self.active_ctrl_digit_order();
+        let index = order.iter().position(|candidate| candidate == key)?;
+        let above = index.checked_sub(1).and_then(|i| order.get(i));
+        let below = order.get(index + 1);
+        match direction {
+            ReorderDirection::Up => above.or(below),
+            ReorderDirection::Down => below.or(above),
+        }
+        .cloned()
     }
 
     pub(crate) fn open_session_with_tracking(
@@ -1930,6 +1962,19 @@ mod tests {
     }
 
     #[test]
+    fn shell_confirmation_is_single_use_session_scoped_and_expires() {
+        let mut state = SidebarState::default();
+        let now = std::time::Instant::now();
+        assert!(!state.confirm_shell_dissolve("host-a:shell:same-id", now));
+        assert!(!state.confirm_shell_dissolve("host-b:shell:same-id", now));
+        assert!(state.confirm_shell_dissolve("host-b:shell:same-id", now));
+        assert!(!state.confirm_shell_dissolve("host-b:shell:same-id", now));
+        let expired = now + std::time::Duration::from_secs(3);
+        assert!(!state.confirm_shell_dissolve("host-b:shell:same-id", expired));
+        assert!(state.confirm_shell_dissolve("host-b:shell:same-id", expired));
+    }
+
+    #[test]
     fn sidebar_3_state_cycle() {
         let mut state = SidebarState::default();
         assert_eq!(state.mode, SidebarMode::Open);
@@ -2330,6 +2375,207 @@ mod tests {
                     }
                 }
             }
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn done_steps_down_visible_sidebar_without_reordering(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            let keys = view.update(cx, |v, cx| {
+                v.sessions = (0..5)
+                    .map(|i| SessionSummary {
+                        id: format!("done-{i}"),
+                        agent: AgentKind::Claude,
+                        title: format!("Chat {i}"),
+                        updated_at_ms: 10_000 - i,
+                        ..Default::default()
+                    })
+                    .collect();
+                let keys: Vec<_> = v.sessions.iter().map(|s| v.session_key_for(s)).collect();
+                v.select_session(v.sessions[2].clone(), cx);
+                v.focus_sidebar(window, cx);
+                keys
+            });
+            window.render_frame(cx);
+            for (removed, selected, remaining) in [
+                (2, 3, vec![0, 1, 3, 4]),
+                (3, 4, vec![0, 1, 4]),
+                (4, 1, vec![0, 1]),
+                (1, 0, vec![0]),
+            ] {
+                window.press("alt-e", cx);
+                window.render_frame(cx);
+                view.read_with(cx, |v, _| {
+                    assert_eq!(
+                        v.session_key_for(v.selected_session.as_ref().unwrap()),
+                        keys[selected]
+                    );
+                    assert!(
+                        v.sidebar_state
+                            .workspace_store
+                            .waiting_sessions
+                            .contains_key(&keys[removed])
+                    );
+                    assert_eq!(
+                        v.active_ctrl_digit_order(),
+                        remaining
+                            .iter()
+                            .map(|&i| keys[i].clone())
+                            .collect::<Vec<_>>()
+                    );
+                });
+            }
+            window.press("alt-e", cx);
+            window.render_frame(cx);
+            assert!(view.read(cx).selected_session.is_none());
+            assert!(view.read(cx).active_ctrl_digit_order().is_empty());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn dissolve_steps_up_visible_sidebar_and_top_falls_down(cx: &mut TestAppContext) {
+        let (handle, view) = open_view(cx);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        cx.update_window(handle, |_, window, cx| {
+            let keys = view.update(cx, |v, cx| {
+                v.daemon_tx = Some(tx);
+                // Backing storage differs from the displayed order.
+                v.sessions = (0..5)
+                    .rev()
+                    .map(|i| SessionSummary {
+                        id: format!("dissolve-{i}"),
+                        agent: AgentKind::Antigravity,
+                        title: format!("Chat {i}"),
+                        updated_at_ms: 10_000 - i,
+                        ..Default::default()
+                    })
+                    .collect();
+                v.select_session(v.sessions[1].clone(), cx);
+                v.focus_sidebar(window, cx);
+                v.active_ctrl_digit_order()
+            });
+            window.render_frame(cx);
+            for (removed, selected, remaining) in [
+                (3, 2, vec![0, 1, 2, 4]),
+                (2, 1, vec![0, 1, 4]),
+                (1, 0, vec![0, 4]),
+                (0, 4, vec![4]),
+            ] {
+                window.press("ctrl-shift-w", cx);
+                window.render_frame(cx);
+                view.read_with(cx, |v, _| {
+                    assert_eq!(
+                        v.session_key_for(v.selected_session.as_ref().unwrap()),
+                        keys[selected]
+                    );
+                    assert_eq!(
+                        v.sidebar_state.workspace_store.session_lifecycle(
+                            &keys[removed],
+                            &v.find_session_by_key(&keys[removed]).unwrap(),
+                            now_unix_ms()
+                        ),
+                        multibot_core::workspaces::SessionLifecycle::Dissolved
+                    );
+                    assert_eq!(
+                        v.active_ctrl_digit_order(),
+                        remaining
+                            .iter()
+                            .map(|&i| keys[i].clone())
+                            .collect::<Vec<_>>()
+                    );
+                });
+            }
+            window.press("ctrl-shift-w", cx);
+            window.render_frame(cx);
+            assert!(view.read(cx).selected_session.is_none());
+            let mut archived = Vec::new();
+            while let Ok(request) = rx.try_recv() {
+                if let ClientRequest::ArchiveSession {
+                    session_id,
+                    kill_process,
+                    ..
+                } = request
+                {
+                    assert!(kill_process);
+                    archived.push(session_id);
+                }
+            }
+            assert_eq!(
+                archived,
+                [
+                    "dissolve-3",
+                    "dissolve-2",
+                    "dissolve-1",
+                    "dissolve-0",
+                    "dissolve-4"
+                ]
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn shell_dissolve_requires_one_confirmation_for_exact_session_within_three_seconds(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = open_view(cx);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.daemon_tx = Some(tx);
+                v.sessions = (0..2)
+                    .map(|i| SessionSummary {
+                        id: format!("shell-{i}"),
+                        agent: AgentKind::Shell,
+                        title: format!("Server {i}"),
+                        source_path: format!("tmux:shell-{i}"),
+                        updated_at_ms: 10_000 - i,
+                        ..Default::default()
+                    })
+                    .collect();
+                v.select_session(v.sessions[1].clone(), cx);
+                v.focus_sidebar(window, cx);
+            });
+            window.render_frame(cx);
+            while rx.try_recv().is_ok() {}
+            window.press("ctrl-shift-w", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).notice.as_deref(),
+                Some("Press Ctrl+Shift+W again to kill live server shell \"Server 1\".")
+            );
+            assert_eq!(
+                view.read(cx).selected_session.as_ref().unwrap().id,
+                "shell-1"
+            );
+            assert!(rx.try_recv().is_err(), "first press must not archive");
+            view.update(cx, |v, _| {
+                v.sidebar_state.pending_shell_dissolve.as_mut().unwrap().1 =
+                    std::time::Instant::now() - std::time::Duration::from_secs(4);
+            });
+            window.press("ctrl-shift-w", cx);
+            window.render_frame(cx);
+            assert!(rx.try_recv().is_err(), "expired confirmation must rearm");
+            window.press("ctrl-shift-w", cx);
+            window.render_frame(cx);
+            assert!(matches!(rx.try_recv(), Ok(ClientRequest::ArchiveSession {
+                session_id, agent: AgentKind::Shell, source_path, kill_process: true,
+            }) if session_id == "shell-1" && source_path == "tmux:shell-1"));
+            assert_eq!(
+                view.read(cx).selected_session.as_ref().unwrap().id,
+                "shell-0"
+            );
+            assert!(view.read(cx).notice.is_none());
+            while rx.try_recv().is_ok() {}
+            window.press("ctrl-shift-w", cx);
+            window.render_frame(cx);
+            assert!(
+                rx.try_recv().is_err(),
+                "confirmation must not transfer to next shell"
+            );
         })
         .unwrap();
     }

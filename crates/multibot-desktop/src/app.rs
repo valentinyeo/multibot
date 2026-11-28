@@ -4286,6 +4286,7 @@ impl MultibotView {
         session: SessionSummary,
         cx: &mut Context<Self>,
     ) {
+        self.sidebar_state.pending_shell_dissolve = None;
         self.voice.cancel();
         if self.selected_session_host.as_deref().is_some_and(|h| h != host) {
             self.pending_switch_tokens.clear();
@@ -4780,7 +4781,7 @@ impl MultibotView {
     // Workspace-Ordered Session Jumping & Cycling
     // =========================================================================
 
-    fn active_ctrl_digit_order(&self) -> Vec<String> {
+    pub(crate) fn active_ctrl_digit_order(&self) -> Vec<String> {
         let inputs = self.session_inputs();
         let active_key = self
             .selected_session
@@ -9127,6 +9128,65 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn new_antigravity_empty_history_can_send_and_render_first_reply(cx: &mut TestAppContext) {
+        let (handle, view) = open_test_view_with_entity(cx);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let session = make_session("new-agy", AgentKind::Antigravity, "New AGY", false);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.daemon_tx = Some(tx);
+                assert!(v.spawn_new_session(AgentKind::Antigravity, "/repo".into(), None, None, cx));
+                assert!(matches!(rx.try_recv(), Ok(ClientRequest::SpawnSession {
+                    agent: AgentKind::Antigravity, initial_prompt: None, ..
+                })));
+                v.handle_bridge_event(UiBridgeEvent::Server(ServerEvent::SessionSpawned {
+                    session: session.clone(),
+                }), cx);
+                v.handle_bridge_event(UiBridgeEvent::Server(ServerEvent::History {
+                    session_id: session.id.clone(), messages: Vec::new(),
+                    oldest_offset: Some(0), latest_offset: Some(0), has_more: false,
+                    file_size: Some(0), file_mtime_ms: None, probe_sha256: None, todos: Vec::new(),
+                }), cx);
+                assert_eq!(v.selected_session.as_ref().unwrap().id, session.id);
+                assert!(v.messages.is_empty());
+                v.prompt_input.update(cx, |input, cx| {
+                    input.set_value("Hello new AGY", window, cx);
+                    input.focus(window, cx);
+                });
+            });
+            window.render_frame(cx);
+            window.press("enter", cx);
+            window.render_frame(cx);
+            let mut sent = false;
+            while let Ok(request) = rx.try_recv() {
+                if let ClientRequest::SendPrompt { agent, session_id, text, .. } = request {
+                    assert_eq!(agent, AgentKind::Antigravity);
+                    assert_eq!(session_id, session.id);
+                    assert_eq!(text, "Hello new AGY");
+                    sent = true;
+                }
+            }
+            assert!(sent, "first prompt must reach the new AGY session");
+            view.update(cx, |v, cx| {
+                v.handle_bridge_event(UiBridgeEvent::Server(ServerEvent::HistoryAppend {
+                    session_id: session.id.clone(),
+                    messages: vec![ChatMessage {
+                        id: "first-reply".into(), role: MessageRole::Assistant,
+                        text: "First AGY reply".into(), ..Default::default()
+                    }],
+                    latest_offset: Some(300), working: Some(false),
+                    probe_sha256: None, todos: Vec::new(),
+                }), cx);
+                assert!(v.messages.iter().any(|m| m.text == "First AGY reply"));
+                assert!(!v.notice.as_deref().unwrap_or("").contains("read_history_failed"));
+            });
+            window.render_frame(cx);
+            let reply_index = view.read(cx).messages.iter().position(|m| m.id == "first-reply").unwrap();
+            assert!(window.find(format!("msg-bubble-{reply_index}")).visible());
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
     fn server_events_update_sessions_commands_search_and_interrupt(cx: &mut TestAppContext) {
         let (handle, view) = open_test_view_with_entity(cx);
         cx.update_window(handle, |_, _window, cx| {
@@ -9674,9 +9734,10 @@ mod tests {
             window.render_frame(cx);
             {
                 let v = view.read(cx);
-                assert_eq!(v.selected_session.as_ref().unwrap().id, "del2");
-                assert_eq!(v.messages[0].text, "Beta transcript");
-                let key = v.session_key_for(v.selected_session.as_ref().unwrap());
+                assert!(v.selected_session.is_none(), "Done removes the final active chat");
+                assert!(v.messages.is_empty(), "the final chat must not leave a stale transcript");
+                assert!(v.active_switch_token.is_none());
+                let key = v.session_key_for(&s2);
                 assert!(
                     v.sidebar_state
                         .workspace_store

@@ -7,6 +7,9 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 
+- Open new chats without missing-history errors, including Antigravity before its first prompt.
+- Dissolve a server shell with two Ctrl+Shift+W presses within three seconds to close its terminal and stop its remote tmux session.
+- After Alt+E, select the next chat down; after Ctrl+Shift+W, select the chat above, without reordering the sidebar.
 - Show real tmux window titles for server shells and refresh them when renamed, while preserving custom Multibot and legacy names.
 - Resolve available legacy shell names, including host-qualified terminal keys, while keeping Multibot renames.
 - Remember shell full-width mode across restarts; toggle it with Ctrl+Shift+F or Ctrl+K.

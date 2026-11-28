@@ -231,6 +231,10 @@ impl ShellHost {
         let _ = (active, rect);
     }
 
+    pub(crate) fn close_session(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
+
     pub(crate) fn retain_live(&mut self, keys: &[String]) {
         self.entries.retain(|key, _| keys.contains(key));
     }

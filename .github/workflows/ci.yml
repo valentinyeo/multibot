@@ -105,7 +105,7 @@ jobs:
       - name: Install Linux GPUI dev libs
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libfontconfig1-dev libwayland-dev pkg-config libssl-dev
+          sudo apt-get install -y -qq libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libfontconfig1-dev libwayland-dev pkg-config libssl-dev tmux
 
       - uses: dtolnay/rust-toolchain@stable
 

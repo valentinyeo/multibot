@@ -1102,6 +1102,53 @@ impl ProcessManager {
         source_path: String,
         kill_process: bool,
     ) {
+        if agent == AgentKind::Shell && kill_process {
+            let mut command = Command::new("tmux");
+            if let Ok(tmux) = std::env::var("TMUX")
+                && let Some(socket) = tmux.split(',').next().filter(|s| !s.is_empty())
+            {
+                command.args(["-S", socket]);
+            }
+            let result = command
+                .env_remove("TMUX")
+                .args(["kill-session", "-t", &format!("={session_id}")])
+                .stdin(Stdio::null())
+                .output()
+                .await;
+            match result {
+                Ok(output) if output.status.success() => {}
+                Ok(output) => {
+                    let error = String::from_utf8_lossy(&output.stderr);
+                    // A shell can exit between discovery and the dissolve request.
+                    if !error.contains("can't find session")
+                        && !error.contains("no server running")
+                        && !error.contains("No such file or directory")
+                    {
+                        let _ = self.out_tx.send(ServerEvent::Error {
+                            code: "archive_failed".into(),
+                            message: format!("Could not kill server shell {session_id}: {error}"),
+                        });
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let _ = self.out_tx.send(ServerEvent::Error {
+                        code: "archive_failed".into(),
+                        message: format!("Could not kill server shell {session_id}: {err}"),
+                    });
+                    return;
+                }
+            }
+            let mut metadata = MetadataStore::load(&self.home);
+            metadata.sessions.remove(&session_id);
+            if let Err(err) = metadata.save(&self.home) {
+                let _ = self.out_tx.send(ServerEvent::Error {
+                    code: "archive_failed".into(),
+                    message: format!("Failed to remove shell metadata: {err}"),
+                });
+                return;
+            }
+        }
         if kill_process {
             let (pid_opt, cancelled_ids) = {
                 let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -2645,6 +2692,94 @@ mod tests {
             log.display(),
             fs::read_to_string(log).unwrap_or_default()
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn new_agy_session_first_prompt_uses_hosted_path_and_records_conversation() {
+        for initial in [false, true] {
+            let home = temp_home("agy-first-prompt");
+            let (bin, log) = fake_agy(&home);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let mgr = ProcessManager::new(home.clone(), tx);
+            mgr.set_test_bin_override(Some(bin));
+            mgr.spawn_session(
+                AgentKind::Antigravity,
+                home.to_string_lossy().into(),
+                Some("New AGY".into()),
+                initial.then(|| "first message".into()),
+                None,
+            )
+            .await;
+            let ServerEvent::SessionSpawned { session } = rx.recv().await.unwrap() else {
+                panic!("new AGY session must spawn")
+            };
+            let path = Path::new(&session.source_path);
+            assert_eq!(path, hosted_history_path(&home, &session.id));
+            if !initial {
+                assert!(
+                    read_history_page(AgentKind::Antigravity, path, None, None, None, None)
+                        .unwrap()
+                        .messages
+                        .is_empty()
+                );
+                mgr.send_prompt(
+                    &session.id,
+                    AgentKind::Antigravity,
+                    session.cwd.as_deref(),
+                    "first message",
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+            let argv = wait_for_log_line(&log, "ARGV ").await;
+            assert!(
+                !argv.contains("--conversation"),
+                "first prompt must create a conversation"
+            );
+            assert!(
+                wait_for_log_line(&log, "STDIN ")
+                    .await
+                    .contains("first message")
+            );
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let page =
+                        read_history_page(AgentKind::Antigravity, path, None, None, None, None)
+                            .unwrap();
+                    if page.messages.iter().any(|m| m.text == "reply") {
+                        assert_eq!(
+                            page.messages
+                                .iter()
+                                .filter(|m| m.text == "first message")
+                                .count(),
+                            1
+                        );
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                MetadataStore::load(&home)
+                    .get(&session.id)
+                    .unwrap()
+                    .native_session_id
+                    .as_deref(),
+                Some("fake-conv")
+            );
+            mgr.archive_session(
+                session.id,
+                AgentKind::Antigravity,
+                session.source_path,
+                true,
+            )
+            .await;
+            fs::remove_dir_all(home).unwrap();
+        }
     }
 
     /// A follow-up typed while the turn is still running must reach the live `agy` stdin.

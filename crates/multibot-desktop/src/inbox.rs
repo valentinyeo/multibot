@@ -12,7 +12,9 @@ use gpui_kit::{
     prelude::FluentBuilder,
     px,
 };
-use multibot_core::workspaces::{InboxRow, InboxSplit, SessionLifecycle, now_unix_ms};
+use multibot_core::workspaces::{
+    InboxRow, InboxSplit, ReorderDirection, SessionLifecycle, now_unix_ms,
+};
 
 const DOUBLE_G_WINDOW_MS: i64 = 600;
 
@@ -421,6 +423,14 @@ impl MultibotView {
 
     pub(crate) fn mark_done_or_inbox(&mut self, key: &str, cx: &mut Context<Self>) {
         if let Some(session) = self.find_session_by_key(key) {
+            let advance = self.main_surface == MainSurface::Chat
+                && self
+                    .selected_session
+                    .as_ref()
+                    .is_some_and(|s| self.session_key_for(s) == key);
+            let next = advance
+                .then(|| self.sidebar_neighbor_after_removal(key, ReorderDirection::Down))
+                .flatten();
             let store = &mut self.sidebar_state.workspace_store;
             match store.session_lifecycle(key, &session, now_unix_ms()) {
                 SessionLifecycle::Done => {
@@ -436,6 +446,14 @@ impl MultibotView {
                 }
                 SessionLifecycle::Dissolved => {
                     return;
+                }
+            }
+            if advance {
+                if let Some((host, session)) = next.and_then(|key| self.host_for_session_key(&key))
+                {
+                    self.select_session_on_host(host, session, cx);
+                } else {
+                    self.clear_active_session_view();
                 }
             }
             self.cleanup_unmounted_surface_state();
@@ -490,7 +508,8 @@ impl MultibotView {
             return;
         }
         for key in &keys {
-            self.dissolve_session_key(key, cx);
+            // The workspace dialog already confirmed stopping all its agents, including shells.
+            self.dissolve_session_key_confirmed(key, cx);
             if self.find_session_by_key(key).is_none_or(|session| {
                 self.sidebar_state
                     .workspace_store
@@ -522,6 +541,28 @@ impl MultibotView {
     }
 
     pub(crate) fn dissolve_session_key(&mut self, key: &str, cx: &mut Context<Self>) {
+        if let Some(session) = self.find_session_by_key(key)
+            && session.agent == multibot_proto::AgentKind::Shell
+            && !session.archived
+            && !self
+                .sidebar_state
+                .confirm_shell_dissolve(key, std::time::Instant::now())
+        {
+            let title = self
+                .sidebar_state
+                .workspace_store
+                .effective_title(key, &session.title);
+            self.notice = Some(format!(
+                "Press Ctrl+Shift+W again to kill live server shell \"{title}\"."
+            ));
+            cx.notify();
+            return;
+        }
+        self.sidebar_state.pending_shell_dissolve = None;
+        self.dissolve_session_key_confirmed(key, cx);
+    }
+
+    fn dissolve_session_key_confirmed(&mut self, key: &str, cx: &mut Context<Self>) {
         let Some((host, session)) = self.host_for_session_key(key) else {
             return;
         };
@@ -547,6 +588,9 @@ impl MultibotView {
         {
             return;
         }
+        let next = self.sidebar_neighbor_after_removal(key, ReorderDirection::Up);
+        self.notice = None;
+        self.shell_host.close_session(key);
         self.closed_sessions.push((host.clone(), session.clone()));
         self.sidebar_state
             .workspace_store
@@ -557,19 +601,8 @@ impl MultibotView {
             .as_ref()
             .is_some_and(|s| self.session_key_for(s) == key)
         {
-            let next = self
-                .session_inputs()
-                .into_iter()
-                .find(|input| {
-                    self.sidebar_state.workspace_store.session_lifecycle(
-                        &input.key,
-                        input.summary,
-                        now_unix_ms(),
-                    ) == SessionLifecycle::Active
-                })
-                .map(|input| (input.host.to_string(), input.summary.clone()));
-            if let Some((host, next)) = next {
-                self.open_session_on_host(host, next, false, cx);
+            if let Some((host, next)) = next.and_then(|key| self.host_for_session_key(&key)) {
+                self.select_session_on_host(host, next, cx);
             } else {
                 self.clear_active_session_view();
             }

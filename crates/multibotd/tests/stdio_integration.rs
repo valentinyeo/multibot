@@ -692,14 +692,14 @@ async fn multibotd_stdio_huge_base64_and_20mib_non_base64_stay_under_10mb_vmhwm(
 
 #[tokio::test]
 async fn shell_sessions_spawn_open_refresh_and_disappear_without_transcripts() {
-    if !std::process::Command::new("tmux")
-        .arg("-V")
-        .stdout(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-    {
-        return;
-    }
+    assert!(
+        std::process::Command::new("tmux")
+            .arg("-V")
+            .stdout(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success()),
+        "tmux is required for the live shell lifecycle test"
+    );
     struct IsolatedTmux(PathBuf);
     impl Drop for IsolatedTmux {
         fn drop(&mut self) {
@@ -866,17 +866,57 @@ async fn shell_sessions_spawn_open_refresh_and_disappear_without_transcripts() {
     })
     .await
     .unwrap();
-    // Killing our only remaining session must also remove the daemon's metadata fallback.
+    // Dissolving must kill the real remote shell, not merely hide its metadata.
+    input
+        .write_all(
+            encode_line(&ClientRequest::ArchiveSession {
+                session_id: session.id.clone(),
+                agent: AgentKind::Shell,
+                source_path: session.source_path.clone(),
+                kill_process: true,
+            })
+            .unwrap()
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match decode_line::<ServerEvent>(&output.next_line().await.unwrap().unwrap()).unwrap() {
+                ServerEvent::SessionArchived {
+                    session_id,
+                    archived: true,
+                } if session_id == session.id => break,
+                ServerEvent::Error { code, message } => panic!("{code}: {message}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
     assert!(
-        Command::new("tmux")
-            .args(["kill-session", "-t", &format!("={}", session.id)])
+        !Command::new("tmux")
+            .args(["has-session", "-t", &format!("={}", session.id)])
             .env("TMUX_TMPDIR", &home)
             .env_remove("TMUX")
+            .stderr(Stdio::null())
             .status()
             .await
             .unwrap()
-            .success()
+            .success(),
+        "ArchiveSession must terminate the live tmux shell"
     );
+    input
+        .write_all(
+            encode_line(&ClientRequest::ListSessions {
+                limit: Some(20),
+                include_archived: Some(true),
+            })
+            .unwrap()
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let ServerEvent::Sessions { sessions } =
@@ -1145,4 +1185,221 @@ async fn pi_cursor_active_discovery_history_live_updates_stay_under_10mb() {
             .success()
     );
     fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
+async fn new_sessions_read_empty_history_and_antigravity_streams_first_prompt() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = temp_home("new-session");
+    let bin_dir = home.join(".local/bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let agy = bin_dir.join("agy");
+    fs::write(&agy, r##"#!/bin/sh
+[ "$*" = '--input-format stream-json --output-format stream-json --dangerously-skip-permissions --print=' ] || exit 41
+printf '%s\n' "$PWD" > agy-cwd
+printf '{"event":"init","conversation_id":"c5328de3-1234-4567-890a-123456789abc"}\n'
+while IFS= read -r frame; do
+    printf '%s\n' "$frame" >> agy-input
+    printf '{"event":"step_update","step_update":{"step_type":"agent_response","step_index":1,"state":"DONE","text_delta":"First reply"}}\n'
+    printf '{"event":"result","result":{"status":"SUCCESS"}}\n'
+done
+"##).unwrap();
+    fs::set_permissions(&agy, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_multibotd"))
+        .arg("--stdio")
+        .env("HOME", &home)
+        .env(
+            "PATH",
+            format!("{}:/usr/local/bin:/usr/bin:/bin", bin_dir.display()),
+        )
+        .env("TMUX_TMPDIR", &home)
+        .env_remove("TMUX")
+        .env_remove("MULTIPROMPT_STATE_DIR")
+        .env_remove("XDG_STATE_HOME")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
+    async fn send(input: &mut tokio::process::ChildStdin, req: ClientRequest) {
+        input
+            .write_all(encode_line(&req).unwrap().as_bytes())
+            .await
+            .unwrap();
+        input.flush().await.unwrap();
+    }
+    async fn next(
+        output: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    ) -> ServerEvent {
+        let line = tokio::time::timeout(Duration::from_secs(10), output.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        decode_line(&line).unwrap()
+    }
+    for agent in [
+        AgentKind::Claude,
+        AgentKind::Codex,
+        AgentKind::Pi,
+        AgentKind::Cursor,
+        AgentKind::Antigravity,
+    ] {
+        send(
+            &mut input,
+            ClientRequest::SpawnSession {
+                agent,
+                cwd: home.to_string_lossy().into(),
+                title: Some("Empty chat".into()),
+                initial_prompt: None,
+                options: None,
+            },
+        )
+        .await;
+        let ServerEvent::SessionSpawned { session } = next(&mut output).await else {
+            panic!("expected new {agent:?} session")
+        };
+        send(
+            &mut input,
+            ClientRequest::ReadHistory {
+                session_id: session.id.clone(),
+                source_path: session.source_path.clone(),
+                agent,
+                tail: None,
+                before_offset: None,
+                max_bytes: None,
+                known_probe: None,
+            },
+        )
+        .await;
+        match next(&mut output).await {
+            ServerEvent::History {
+                session_id,
+                messages,
+                has_more,
+                ..
+            } => {
+                assert_eq!(session_id, session.id);
+                assert!(messages.is_empty());
+                assert!(!has_more);
+            }
+            other => panic!("new {agent:?} must have empty history, got {other:?}"),
+        }
+        // Even a hosted transcript can be absent before its first write.
+        send(
+            &mut input,
+            ClientRequest::ReadHistory {
+                session_id: session.id.clone(),
+                source_path: home.join("not-written.jsonl").to_string_lossy().into(),
+                agent,
+                tail: None,
+                before_offset: None,
+                max_bytes: None,
+                known_probe: None,
+            },
+        )
+        .await;
+        assert!(matches!(next(&mut output).await, ServerEvent::History {
+            session_id, messages, oldest_offset: Some(0), latest_offset: Some(0),
+            file_size: Some(0), has_more: false, ..
+        } if session_id == session.id && messages.is_empty()));
+        if agent != AgentKind::Antigravity {
+            continue;
+        }
+        send(
+            &mut input,
+            ClientRequest::WatchSession {
+                session_id: session.id.clone(),
+                source_path: session.source_path.clone(),
+                agent,
+            },
+        )
+        .await;
+        assert!(
+            matches!(next(&mut output).await, ServerEvent::History { messages, .. } if messages.is_empty())
+        );
+        send(
+            &mut input,
+            ClientRequest::SendPrompt {
+                session_id: session.id.clone(),
+                agent,
+                cwd: session.cwd.clone(),
+                text: "Hello new AGY".into(),
+                options: None,
+            },
+        )
+        .await;
+        let mut accepted = false;
+        let mut user = false;
+        let mut reply = false;
+        while !accepted || !user || !reply {
+            match next(&mut output).await {
+                ServerEvent::SendAccepted { session_id, .. } => {
+                    assert_eq!(session_id, session.id);
+                    accepted = true;
+                }
+                ServerEvent::HistoryAppend { messages, .. }
+                | ServerEvent::History { messages, .. } => {
+                    user |= messages.iter().any(|m| m.text == "Hello new AGY");
+                    reply |= messages.iter().any(|m| m.text == "First reply");
+                }
+                ServerEvent::Error { code, message } => panic!("{code}: {message}"),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            fs::read_to_string(home.join("agy-cwd")).unwrap().trim(),
+            home.to_str().unwrap()
+        );
+        let wire: serde_json::Value =
+            serde_json::from_str(fs::read_to_string(home.join("agy-input")).unwrap().trim())
+                .unwrap();
+        assert_eq!(wire["message"]["content"], "Hello new AGY");
+        send(
+            &mut input,
+            ClientRequest::ArchiveSession {
+                session_id: session.id,
+                agent,
+                source_path: session.source_path,
+                kill_process: true,
+            },
+        )
+        .await;
+        loop {
+            match next(&mut output).await {
+                ServerEvent::SessionArchived { archived: true, .. } => break,
+                ServerEvent::Error { code, message } => panic!("{code}: {message}"),
+                _ => {}
+            }
+        }
+    }
+    // Errors other than NotFound must remain visible.
+    send(
+        &mut input,
+        ClientRequest::ReadHistory {
+            session_id: "bad-history".into(),
+            source_path: home.to_string_lossy().into(),
+            agent: AgentKind::Claude,
+            tail: None,
+            before_offset: None,
+            max_bytes: None,
+            known_probe: None,
+        },
+    )
+    .await;
+    assert!(
+        matches!(next(&mut output).await, ServerEvent::Error { code, .. } if code == "read_history_failed")
+    );
+    drop(input);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    let _ = fs::remove_dir_all(home);
 }
