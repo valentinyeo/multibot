@@ -353,7 +353,7 @@ impl MultibotView {
                 let msg_visible_text = message_visible_text(msg);
                 let msg_text_up = msg_visible_text.clone();
 
-                let mut body_col = v_flex().w_full().gap_2();
+                let mut body_col = v_flex().w_full().min_w_0().gap_2();
 
                 // Compact 1-line clickable quote header when message quotes an earlier turn.
                 let parsed_quote = parse_quoted_message(&msg_visible_text);
@@ -620,11 +620,13 @@ impl MultibotView {
                 };
 
                 let bubble = if is_user {
-                    div()
+                    v_flex()
                         .id(SharedString::from(format!("msg-bubble-{orig_idx}")))
                         .role(Role::Button)
                         .test_support()
-                        .max_w(px(560.0))
+                        .w_auto()
+                        .min_w_0()
+                        .max_w_full()
                         .px_4()
                         .py_2p5()
                         .rounded(RADIUS_BUBBLE)
@@ -680,11 +682,14 @@ impl MultibotView {
                         )
                         .child(body_col)
                 } else {
-                    div()
+                    v_flex()
                         .id(SharedString::from(format!("msg-bubble-{orig_idx}")))
                         .role(Role::Button)
                         .test_support()
-                        .w_full()
+                        .w_auto()
+                        .min_w_0()
+                        .max_w_full()
+                        .self_start()
                         .px_4()
                         .py_3()
                         .rounded(RADIUS_BUBBLE)
@@ -764,7 +769,7 @@ impl MultibotView {
                 ));
                 let mut msg_wrapper = v_flex()
                     .w_full()
-                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0)))
                     .mx_auto()
                     .flex_shrink_0()
                     .gap_1();
@@ -794,11 +799,14 @@ impl MultibotView {
                             .child(div().flex_1().h(px(1.0)).bg(theme::accent_blue())),
                     );
                 }
-                if is_user {
-                    msg_wrapper = msg_wrapper.child(h_flex().w_full().justify_end().child(bubble));
-                } else {
-                    msg_wrapper = msg_wrapper.child(bubble);
-                }
+                msg_wrapper = msg_wrapper.child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .max_w(px(if is_user { 560.0 } else { 680.0 }))
+                        .when(is_user, |el| el.self_end().justify_end())
+                        .child(bubble),
+                );
 
                 // Compact emoji reaction badges folded onto this target message.
                 if !vis.reactions.is_empty() {
@@ -936,7 +944,7 @@ impl MultibotView {
             let mut activity = v_flex()
                 .id("chat-live-activity-container")
                 .w_full()
-                .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+                .when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0)))
                 .mx_auto()
                 .px_2()
                 .gap_1p5();
@@ -1126,7 +1134,7 @@ impl MultibotView {
                     .id("chat-turn-notice")
                     .test_support()
                     .w_full()
-                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+                    .when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0)))
                     .mx_auto()
                     .px_2()
                     .py_1p5()
@@ -1239,7 +1247,7 @@ impl MultibotView {
                         .when_some(self.render_todo_header_and_drawer(cx), |el, todo_ui| {
                             el.child(todo_ui)
                         })
-                        .when_some(self.render_find_bar(cx), |el, bar| el.child(bar)),
+                        .when_some(self.render_find_bar(960.0, cx), |el, bar| el.child(bar)),
                 )
                 .child(
                     self.render_composer(

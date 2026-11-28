@@ -606,6 +606,7 @@ impl MultibotView {
         };
         let ws_strip = Button::new("workspace-switcher")
             .w_full()
+            .pr(px(7.0))
             .bg(theme::bg_surface())
             .rounded(RADIUS_CHIP)
             .label(active_label.to_string())
@@ -1072,7 +1073,7 @@ impl MultibotView {
                 div()
                     .absolute()
                     .bottom_3()
-                    .left_3()
+                    .left_3p5()
                     .child(self.render_dev_stats_indicator(false, cx)),
             )
             .into_any_element()

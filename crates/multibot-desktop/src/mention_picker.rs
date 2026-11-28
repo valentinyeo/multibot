@@ -7,6 +7,7 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window,
     component::{h_flex, input::InlineToken, v_flex},
     div, px,
+    prelude::FluentBuilder,
 };
 use multibot_core::workspaces::parse_session_key;
 use std::ops::Range;
@@ -490,7 +491,7 @@ impl MultibotView {
                 .id("mention-picker")
                 .test_support()
                 .w_full()
-                .max_w(px(760.0))
+                .when(!self.settings.shell_fullscreen, |el| el.max_w(px(960.0)))
                 .mx_auto()
                 .px_5()
                 .child(
