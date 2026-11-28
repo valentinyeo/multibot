@@ -58,6 +58,17 @@ mod windows {
     }
 
     impl DesktopBrowserPane {
+        fn start_google_signin(&mut self) -> anyhow::Result<native::SigninProcess> {
+            let session = native::SigninProcess::reserve()?;
+            self.model.close_all();
+            self.tabs.clear();
+            self.shown = None;
+            self.focus_on_show = None;
+            self.hibernation = None;
+            self.shortcuts = None;
+            Ok(session)
+        }
+
         fn now_ms(&self) -> u64 {
             self.clock
                 .map_or(0, |clock| clock.elapsed().as_millis() as u64)
@@ -165,7 +176,54 @@ mod windows {
             .map(|session| self.session_key_for(session))
         }
 
+        pub(crate) fn start_browser_google_signin(
+            &mut self,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            let session = match self.browser.start_google_signin() {
+                Ok(session) => session,
+                Err(error) => {
+                    self.notice = Some(error.to_string());
+                    cx.notify();
+                    return;
+                }
+            };
+            self.focus_browser_composer(window, cx);
+            self.notice = Some("Opening Google sign-in. Finish signing in, then close the Chrome window to return to docked browsing.".into());
+            let (tx, rx) = oneshot::channel();
+            let spawn = std::thread::Builder::new()
+                .name("browser-google-signin".into())
+                .spawn(move || {
+                    let _ = tx.send(native::launch_google_signin(session));
+                });
+            if let Err(error) = spawn {
+                self.notice = Some(format!("Could not open Google sign-in: {error}"));
+                cx.notify();
+                return;
+            }
+            cx.spawn(async move |this, cx| {
+                let result = rx.await;
+                let _ = this.update(cx, |view, cx| {
+                    view.notice = Some(match result {
+                        Ok(Ok(())) => "Google sign-in window closed. Press Ctrl+Shift+B to open docked Chrome.".into(),
+                        Ok(Err(error)) => format!("Could not complete Google sign-in: {error}"),
+                        Err(_) => "Google sign-in monitor stopped unexpectedly.".into(),
+                    });
+                    cx.notify();
+                });
+            }).detach();
+            cx.notify();
+        }
+
         pub(crate) fn toggle_browser_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+            if native::signin_active() {
+                self.notice = Some(
+                    "Finish signing in and close the Google sign-in Chrome window first.".into(),
+                );
+                cx.notify();
+                return;
+            }
             let Some(key) = self.browser_session() else {
                 return;
             };
@@ -581,6 +639,15 @@ impl MultibotView {
     ) {
     }
     pub(crate) fn rebind_browsers(&mut self, _host: &str) {}
+
+    pub(crate) fn start_browser_google_signin(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.notice = Some("The docked Chrome sign-in flow requires Windows.".into());
+        cx.notify();
+    }
 
     pub(crate) fn toggle_browser_pane(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.main_surface == crate::state::MainSurface::Chat
