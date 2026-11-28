@@ -6,6 +6,7 @@ mod commands;
 mod shortcuts_modal;
 
 use crate::app::{CloseOverlay, MultibotView};
+use crate::icons::{self, lucide_icon};
 use crate::sidebar::InlineRenameState;
 use crate::state::{ActiveModal, MainSurface};
 use crate::theme::{self, RADIUS_CHIP, RADIUS_MODAL, RADIUS_ROW};
@@ -646,7 +647,9 @@ impl MultibotView {
                                             el.child(
                                                 Button::new(format!("pal-shell-end-{s_idx}"))
                                                     .small()
-                                                    .label("End")
+                                                    .icon(lucide_icon(icons::SQUARE_FILLED, 12.0))
+                                                    .accessibility_label("End shell")
+                                                    .tooltip("End shell")
                                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                                         cx.stop_propagation()
                                                     })

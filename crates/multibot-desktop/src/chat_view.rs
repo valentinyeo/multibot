@@ -848,13 +848,15 @@ impl MultibotView {
         if is_working {
             let dot = |idx: u8| {
                 div()
-                    .text_xs()
+                    .id(format!("chat-busy-dot-{idx}"))
+                    .test_support()
+                    .size(px(16.0))
                     .text_color(if busy_phase == idx {
                         theme::text_primary()
                     } else {
-                        theme::text_muted()
+                        theme::text_secondary()
                     })
-                    .child(lucide_icon(icons::DOT, 12.0))
+                    .child(lucide_icon(icons::DOT, 16.0))
             };
             msg_col = msg_col.child(
                 h_flex()
@@ -865,8 +867,8 @@ impl MultibotView {
                     .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
                     .mx_auto()
                     .px_2()
-                    .py_1()
-                    .gap_1()
+                    .py_2()
+                    .gap_2()
                     .items_center()
                     .child(dot(0))
                     .child(dot(1))

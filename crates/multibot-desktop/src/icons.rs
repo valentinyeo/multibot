@@ -21,6 +21,7 @@ lucide_icons! {
     MORE_HORIZONTAL => r#"<circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /><circle cx="5" cy="12" r="1" />"#,
     MIC => r#"<path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" />"#,
     CHEVRON_DOWN => r#"<path d="m6 9 6 6 6-6" />"#,
+    CHEVRON_UP => r#"<path d="m18 15-6-6-6 6" />"#,
     CHEVRON_RIGHT => r#"<path d="m9 18 6-6-6-6" />"#,
     X => r#"<path d="M18 6 6 18" /><path d="m6 6 12 12" />"#,
     STAR => r#"<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z" />"#,
@@ -48,7 +49,10 @@ lucide_icons! {
     COMMAND => r#"<path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3" />"#,
     SQUARE => r#"<rect width="18" height="18" x="3" y="3" rx="2" />"#,
     STAR_FILLED => r#"<path fill="currentColor" d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z" />"#,
-    DOT => r#"<circle cx="12" cy="12" r="1" fill="currentColor" />"#,
+    SQUARE_FILLED => r#"<rect width="12" height="12" x="6" y="6" rx="2" fill="currentColor" />"#,
+    PENCIL => r#"<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /><path d="m15 5 4 4" />"#,
+    MAXIMIZE_2 => r#"<polyline points="15 3 21 3 21 9" /><polyline points="9 21 3 21 3 15" /><line x1="21" x2="14" y1="3" y2="10" /><line x1="3" x2="10" y1="21" y2="14" />"#,
+    DOT => r#"<circle cx="12" cy="12" r="6" fill="currentColor" />"#,
 }
 
 pub fn lucide_icon(svg: &'static [u8], size_px: f32) -> Icon {
@@ -72,6 +76,10 @@ mod tests {
             ("app", include_str!("app.rs")),
             ("sidebar", include_str!("sidebar.rs")),
             ("chat_view", include_str!("chat_view.rs")),
+            ("chat_composer", include_str!("chat_composer.rs")),
+            ("chat_blocks", include_str!("chat_blocks.rs")),
+            ("chat_interaction", include_str!("chat_interaction.rs")),
+            ("chat_info", include_str!("chat_info.rs")),
             ("inbox", include_str!("inbox.rs")),
             ("palette", include_str!("palette.rs")),
             ("settings", include_str!("settings.rs")),
@@ -112,6 +120,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn busy_dot_is_a_visible_filled_circle() {
+        let svg = std::str::from_utf8(DOT).unwrap();
+        let document = roxmltree::Document::parse(svg).unwrap();
+        let circle = document.root_element().first_element_child().unwrap();
+        assert_eq!(circle.tag_name().name(), "circle");
+        assert_eq!(circle.attribute("fill"), Some("currentColor"));
+        let radius: f32 = circle.attribute("r").unwrap().parse().unwrap();
+        assert!(radius >= 5.0);
     }
 
     #[test]
