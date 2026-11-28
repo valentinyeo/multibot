@@ -255,6 +255,28 @@ impl MultibotView {
                         self.sidebar_state.active_workspace_id =
                             next.unwrap_or_else(|| ALL_WORKSPACES_ID.into());
                     }
+                    let advance = self.main_surface == MainSurface::Chat
+                        && self.selection.selected_session.as_ref().is_some_and(|s| {
+                            self.sidebar_state
+                                .workspace_store
+                                .effective_workspace_id(&self.session_key_for(s))
+                                == ws_id
+                        });
+                    if advance {
+                        let next = self.active_ctrl_digit_order().into_iter().find(|key| {
+                            self.sidebar_state
+                                .workspace_store
+                                .effective_workspace_id(key)
+                                != ws_id
+                        });
+                        if let Some((host, session)) =
+                            next.and_then(|key| self.host_for_session_key(&key))
+                        {
+                            self.select_session_on_host(host, session, cx);
+                        } else {
+                            self.clear_active_session_view(cx);
+                        }
+                    }
                 }
                 Err(error) => {
                     self.notice = Some(error.to_string());

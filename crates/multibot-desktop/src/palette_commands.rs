@@ -1,5 +1,6 @@
 use super::*;
 use crate::chat_view::MessageMenuAction;
+use multibot_core::workspaces::ReorderDirection;
 
 impl MultibotView {
     pub(super) fn start_agent_session(
@@ -237,6 +238,18 @@ impl MultibotView {
                         if session.archived {
                             self.reactivate_session_key(&key, cx);
                         }
+                        let advance = at.is_some()
+                            && self.main_surface == MainSurface::Chat
+                            && self
+                                .selection
+                                .selected_session
+                                .as_ref()
+                                .is_some_and(|s| self.session_key_for(s) == key);
+                        let next = advance
+                            .then(|| {
+                                self.sidebar_neighbor_after_removal(&key, ReorderDirection::Down)
+                            })
+                            .flatten();
                         self.sidebar_state.workspace_store.hibernate_session(
                             &key,
                             &session,
@@ -244,6 +257,16 @@ impl MultibotView {
                             note,
                             self.palette_state.hibernate_wake_on_reply,
                         );
+                        if advance {
+                            if let Some((host, session)) =
+                                next.and_then(|key| self.host_for_session_key(&key))
+                            {
+                                self.select_session_on_host(host, session, cx);
+                            } else {
+                                self.clear_active_session_view(cx);
+                            }
+                        }
+                        self.cleanup_unmounted_surface_state();
                     }
                 }
                 ReminderTarget::Workspace(id) => {

@@ -322,6 +322,164 @@ fn hibernate_autocomplete_enter_uses_resolved_timestamp_without_note(cx: &mut Te
 }
 
 #[gpui_kit::test]
+fn hibernate_active_chat_hides_and_advances_or_clears(cx: &mut TestAppContext) {
+    for count in [1, 2] {
+        for query in ["", "15m"] {
+            let (handle, view) = open_view(cx);
+            let key = cx
+                .update_window(handle, |_, window, cx| {
+                    let key = view.update(cx, |v, cx| {
+                        v.connection.sessions = (0..count)
+                            .map(|i| SessionSummary {
+                                id: format!("hibernate-{i}"),
+                                agent: AgentKind::Claude,
+                                ..Default::default()
+                            })
+                            .collect();
+                        v.select_session(v.connection.sessions[0].clone(), cx);
+                        v.sync_sessions_to_shared(cx);
+                        assert_eq!(v.active_ctrl_digit_order().len(), count);
+                        v.session_key_for(&v.connection.sessions[0])
+                    });
+                    window.render_frame(cx);
+                    window.press("alt-h", cx);
+                    window.render_frame(cx);
+                    if query.is_empty() {
+                        window.click("pal-reminder-0", cx);
+                    } else {
+                        window.input(query, cx);
+                    }
+                    // Autocomplete updates its rows on the next event-loop turn.
+                    key
+                })
+                .unwrap();
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                if !query.is_empty() {
+                    window.press("enter", cx);
+                    window.render_frame(cx);
+                }
+                view.read_with(cx, |v, _| {
+                    assert_eq!(v.active_modal, ActiveModal::None);
+                    assert_eq!(v.active_ctrl_digit_order().len(), count - 1);
+                    assert!(!v.active_ctrl_digit_order().contains(&key));
+                    assert_eq!(
+                        v.selection.selected_session.as_ref().map(|s| s.id.as_str()),
+                        (count == 2).then_some("hibernate-1")
+                    );
+                    let active_key = v
+                        .selection
+                        .selected_session
+                        .as_ref()
+                        .map(|s| v.session_key_for(s));
+                    let layout = v
+                        .sidebar_state
+                        .workspace_store
+                        .compute_sidebar_layout_with_options(
+                            &v.sidebar_state.active_workspace_id,
+                            v.sidebar_state.active_workspace_view,
+                            &v.session_inputs(),
+                            false,
+                            active_key.as_deref(),
+                            now_unix_ms(),
+                        );
+                    assert_eq!(layout.total_visible_sessions(), count - 1);
+                });
+                assert!(window.try_find("lifecycle-peek-banner").is_none());
+            })
+            .unwrap();
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn hibernate_clear_reminder_keeps_active_chat(cx: &mut TestAppContext) {
+    let (handle, view) = open_view(cx);
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            let session = SessionSummary {
+                id: "clear-reminder".into(),
+                agent: AgentKind::Claude,
+                ..Default::default()
+            };
+            let key = v.session_key_for(&session);
+            v.connection.sessions = vec![session.clone()];
+            v.sidebar_state.workspace_store.hibernate_session(
+                &key,
+                &session,
+                Some(now_unix_ms() + 60_000),
+                None,
+                false,
+            );
+            v.select_session(session, cx);
+            v.sync_sessions_to_shared(cx);
+        });
+        window.render_frame(cx);
+        window.press("alt-h", cx);
+        window.render_frame(cx);
+        window.click("pal-reminder-4", cx);
+        window.render_frame(cx);
+        view.read_with(cx, |v, _| {
+            let session = v.selection.selected_session.as_ref().unwrap();
+            assert_eq!(session.id, "clear-reminder");
+            assert_eq!(
+                v.sidebar_state.workspace_store.session_meta[&v.session_key_for(session)]
+                    .remind_at_ms,
+                None
+            );
+            assert_eq!(v.active_ctrl_digit_order().len(), 1);
+        });
+        assert!(window.try_find("lifecycle-peek-banner").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn hibernate_workspace_hides_all_its_chats_and_advances_or_clears(cx: &mut TestAppContext) {
+    for outside in [false, true] {
+        let (handle, view) = open_view(cx);
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                let workspace = v
+                    .sidebar_state
+                    .workspace_store
+                    .create_workspace("Hibernate", None)
+                    .unwrap()
+                    .id;
+                v.connection.sessions = (0..if outside { 3 } else { 2 })
+                    .map(|i| SessionSummary {
+                        id: format!("workspace-hibernate-{i}"),
+                        agent: AgentKind::Claude,
+                        ..Default::default()
+                    })
+                    .collect();
+                for session in &v.connection.sessions[..2] {
+                    let key = v.session_key_for(session);
+                    v.sidebar_state
+                        .workspace_store
+                        .assign_session_workspace(&key, &workspace);
+                }
+                v.select_session(v.connection.sessions[0].clone(), cx);
+                v.sync_sessions_to_shared(cx);
+                v.open_reminder_picker(ReminderTarget::Workspace(workspace), window, cx);
+            });
+            window.render_frame(cx);
+            window.click("pal-reminder-0", cx);
+            window.render_frame(cx);
+            view.read_with(cx, |v, _| {
+                assert_eq!(
+                    v.selection.selected_session.as_ref().map(|s| s.id.as_str()),
+                    outside.then_some("workspace-hibernate-2")
+                );
+                assert_eq!(v.active_ctrl_digit_order().len(), usize::from(outside));
+            });
+            assert!(window.try_find("lifecycle-peek-banner").is_none());
+        })
+        .unwrap();
+    }
+}
+
+#[gpui_kit::test]
 fn hibernate_presets_preview_filter_fallback_and_next_week(cx: &mut TestAppContext) {
     let (handle, view) = open_view(cx);
     cx.update_window(handle, |_, window, cx| {

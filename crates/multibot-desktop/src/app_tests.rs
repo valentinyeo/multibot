@@ -1483,12 +1483,13 @@ fn lifecycle_dissolved_peek_keeps_workspace_and_reactivates_exact_history(cx: &m
 fn reminder_and_snooze_shortcuts_presets_and_inbox_dismiss(cx: &mut TestAppContext) {
     let (handle, view) = open_test_view_with_entity(cx);
     cx.update_window(handle, |_, window, cx| {
-        view.update(cx, |v, cx| {
+        let key = view.update(cx, |v, cx| {
             let session = make_session("reminder", AgentKind::Claude, "Follow up", false);
             v.connection.sessions = vec![session.clone()];
             v.selection.selected_session = Some(session);
             v.sync_sessions_to_shared(cx);
             cx.notify();
+            v.session_key_for(&v.connection.sessions[0])
         });
         window.render_frame(cx);
         window.press("ctrl-h", cx);
@@ -1497,7 +1498,6 @@ fn reminder_and_snooze_shortcuts_presets_and_inbox_dismiss(cx: &mut TestAppConte
         window.click("pal-reminder-0", cx);
         window.render_frame(cx);
         view.read_with(cx, |v, cx| {
-            let key = v.session_key_for(v.selection.selected_session.as_ref().unwrap());
             assert!(
                 v.sidebar_state.workspace_store.session_meta[&key]
                     .remind_at_ms
@@ -1505,6 +1505,10 @@ fn reminder_and_snooze_shortcuts_presets_and_inbox_dismiss(cx: &mut TestAppConte
                     > now_unix_ms()
             );
             assert!(cx.global::<SharedAppStore>().reminder_timer.is_some());
+        });
+        view.update(cx, |v, cx| {
+            assert!(v.selection.selected_session.is_none());
+            v.select_session(v.connection.sessions[0].clone(), cx);
         });
         window.press("alt-h", cx);
         window.render_frame(cx);
@@ -1524,7 +1528,6 @@ fn reminder_and_snooze_shortcuts_presets_and_inbox_dismiss(cx: &mut TestAppConte
                 .is_empty()
         );
         view.update(cx, |v, cx| {
-            let key = v.session_key_for(v.selection.selected_session.as_ref().unwrap());
             let ws = v.sidebar_state.workspace_store.effective_workspace_id(&key);
             v.set_workspace_snooze(&ws, None, cx);
             v.sidebar_state.workspace_store.set_reminder(
@@ -1543,7 +1546,6 @@ fn reminder_and_snooze_shortcuts_presets_and_inbox_dismiss(cx: &mut TestAppConte
         window.click("dismiss-reminder-0", cx);
         window.render_frame(cx);
         view.read_with(cx, |v, _| {
-            let key = v.session_key_for(v.selection.selected_session.as_ref().unwrap());
             assert!(
                 !v.sidebar_state
                     .workspace_store

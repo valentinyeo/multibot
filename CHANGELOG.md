@@ -7,6 +7,7 @@ This file is embedded in Multibot so Changelog works offline.
 
 ## Unreleased
 
+- Hide hibernated chats from the sidebar and active view immediately after choosing a time in Alt+H (MBRU-133).
 - Autocomplete natural language durations and dates with resolved date and time previews in Alt+H Hibernate (MBRU-131).
 - Show each session’s live worker count in the sidebar and chat, with expandable tickets, folders, models, and elapsed time (MBRU-117).
 - Keep live shell mouse input responsive, restore attached shells in All, and improve dictation at natural pauses (MBRU-118, MBRU-119, MBRU-120).
