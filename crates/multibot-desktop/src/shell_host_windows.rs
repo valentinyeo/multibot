@@ -1,6 +1,6 @@
 use super::{
-    ShellLaunchSpec, ShellShortcut, ShellViewportRect, console_paste_chunks, console_wheel_params,
-    shell_shortcut, windows_quote,
+    ShellLaunchSpec, ShellShortcut, ShellViewportRect, compute_console_grid, console_paste_chunks,
+    console_wheel_params, shell_shortcut, windows_quote,
 };
 use anyhow::{Result, bail};
 use std::cell::{Cell, RefCell};
@@ -68,6 +68,7 @@ struct VisibleShell {
     shortcuts: tokio::sync::mpsc::UnboundedSender<gpui_kit::Keystroke>,
     urls: std::sync::mpsc::Sender<ConsoleClick>,
     pastes: std::sync::mpsc::Sender<ConsolePaste>,
+    resizes: std::sync::mpsc::Sender<ConsoleResize>,
     text_input_focused: bool,
     confirming_kill: bool,
 }
@@ -76,6 +77,13 @@ struct ConsolePaste {
     hwnd: usize,
     pid: u32,
     parent: usize,
+}
+
+struct ConsoleResize {
+    pid: u32,
+    hwnd: usize,
+    width: i32,
+    height: i32,
 }
 
 struct ConsoleClick {
@@ -167,6 +175,21 @@ impl NativeHost {
                 UnhookWindowsHookEx(mouse_hook);
                 return Err(error.into());
             }
+            let (resizes, requests) = std::sync::mpsc::channel::<ConsoleResize>();
+            if let Err(error) = std::thread::Builder::new()
+                .name("console-resizes".into())
+                .spawn(move || {
+                    for resize in requests {
+                        if let Err(error) = resize_console(resize) {
+                            eprintln!("Could not resize shell console: {error}");
+                        }
+                    }
+                })
+            {
+                UnhookWindowsHookEx(hook);
+                UnhookWindowsHookEx(mouse_hook);
+                return Err(error.into());
+            }
             let host = Self {
                 parent,
                 job,
@@ -183,6 +206,7 @@ impl NativeHost {
                         shortcuts,
                         urls,
                         pastes: host.pastes.clone(),
+                        resizes,
                         text_input_focused: false,
                         confirming_kill: false,
                     },
@@ -675,6 +699,88 @@ fn read_console_url(click: ConsoleClick) -> Option<String> {
     }
 }
 
+fn resize_console(resize: ConsoleResize) -> Result<()> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::{
+        Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE, RECT},
+        Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING},
+    };
+    if resize.width <= 0 || resize.height <= 0 {
+        return Ok(());
+    }
+    let _guard = CONSOLE_ATTACH.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        let hwnd = resize.hwnd as HWND;
+        if IsWindow(hwnd) == 0 || IsWindowVisible(hwnd) == 0 {
+            return Ok(());
+        }
+        FreeConsole();
+        if AttachConsole(resize.pid) == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let result = (|| {
+            if GetConsoleWindow() != hwnd {
+                return Ok(());
+            }
+            let name: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
+            let output = CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null(),
+                OPEN_EXISTING,
+                0,
+                null_mut(),
+            );
+            if output == INVALID_HANDLE_VALUE {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let _output = OwnedHandle::from_raw_handle(output);
+            let mut rect = RECT::default();
+            let mut font = CONSOLE_FONT_INFO::default();
+            let mut info = CONSOLE_SCREEN_BUFFER_INFOEX::default();
+            info.cbSize = size_of_val(&info) as u32;
+            if GetClientRect(hwnd, &mut rect) == 0
+                || GetCurrentConsoleFont(output, 0, &mut font) == 0
+                || GetConsoleScreenBufferInfoEx(output, &mut info) == 0
+            {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let Some((cols, rows)) = compute_console_grid(
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                i32::from(font.dwFontSize.X),
+                i32::from(font.dwFontSize.Y),
+            ) else {
+                return Ok(());
+            };
+            let visible_rows = i32::from(info.srWindow.Bottom) - i32::from(info.srWindow.Top) + 1;
+            if info.dwSize.X == cols && visible_rows == i32::from(rows) {
+                return Ok(());
+            }
+            let at_bottom = info.srWindow.Bottom >= info.dwSize.Y - 2;
+            info.dwSize.X = cols;
+            info.dwSize.Y = info.dwSize.Y.max(rows);
+            let top = if at_bottom {
+                info.dwSize.Y - rows
+            } else {
+                info.srWindow.Top.clamp(0, info.dwSize.Y - rows)
+            };
+            info.srWindow.Left = 0;
+            info.srWindow.Top = top;
+            // SetConsoleScreenBufferInfoEx takes exclusive edges, unlike its getter.
+            info.srWindow.Right = cols;
+            info.srWindow.Bottom = top + rows;
+            if SetConsoleScreenBufferInfoEx(output, &info) == 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            Ok(())
+        })();
+        FreeConsole();
+        result
+    }
+}
+
 pub(super) struct EmbeddedShellHandle {
     pub(super) process: Arc<Process>,
     pub(super) generation: u64,
@@ -723,7 +829,8 @@ impl EmbeddedShellHandle {
                 self.reconcile(parent, false, None, false);
                 return;
             }
-            if self.rect != Some(rect) || !self.visible {
+            let resize = self.rect != Some(rect) || !self.visible;
+            if resize {
                 SetWindowPos(
                     self.hwnd as HWND,
                     null_mut(),
@@ -745,6 +852,18 @@ impl EmbeddedShellHandle {
                     if let Some(shell) = v.borrow_mut().get_mut(&parent) {
                         shell.hwnd = self.hwnd;
                         shell.pid = self.pid;
+                    }
+                });
+            }
+            if resize {
+                VISIBLE.with(|v| {
+                    if let Some(shell) = v.borrow().get(&parent) {
+                        let _ = shell.resizes.send(ConsoleResize {
+                            pid: self.pid,
+                            hwnd: self.hwnd,
+                            width: rect.width,
+                            height: rect.height,
+                        });
                     }
                 });
             }

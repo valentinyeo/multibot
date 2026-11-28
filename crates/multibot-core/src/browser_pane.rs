@@ -115,11 +115,11 @@ pub fn session_profile(root: &Path, session: &str) -> PathBuf {
     root.join(format!("{:x}", Sha256::digest(session.as_bytes())))
 }
 
-/// Edge first, Chrome second. Search explicit installation roots and avoid PATH/current directory.
+/// Chrome first, Edge second. Search explicit installation roots and avoid PATH/current directory.
 pub fn discover_browser(roots: &[PathBuf], is_file: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     [
-        "Microsoft/Edge/Application/msedge.exe",
         "Google/Chrome/Application/chrome.exe",
+        "Microsoft/Edge/Application/msedge.exe",
     ]
     .into_iter()
     .flat_map(|relative| {
@@ -138,13 +138,15 @@ pub fn launch_args(profile: &Path, url: &str) -> Vec<OsString> {
         profile_arg,
         "--remote-debugging-address=127.0.0.1".into(),
         "--remote-debugging-port=0".into(),
-        format!("--app={url}").into(),
         "--disable-gpu".into(),
         "--disable-gpu-compositing".into(),
         "--disable-accelerated-video-decode".into(),
         "--disable-background-mode".into(),
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
+        "--hide-crash-restore-bubble".into(),
+        "--new-window".into(),
+        url.into(),
     ]
 }
 
@@ -298,19 +300,51 @@ mod tests {
     }
 
     #[test]
-    fn discovery_uses_known_paths_and_falls_back_to_chrome() {
+    fn discovery_prefers_chrome_across_roots_and_falls_back_to_edge() {
         let root = std::env::current_dir().unwrap().join("Program Files");
+        let local = std::env::current_dir().unwrap().join("LocalAppData");
         assert!(discover_browser(&[PathBuf::from(".")], |_| true).is_none());
-        assert!(
-            discover_browser(std::slice::from_ref(&root), |_| true)
-                .unwrap()
-                .ends_with("msedge.exe")
+        assert_eq!(
+            discover_browser(&[root.clone(), local.clone()], |path| {
+                path == root.join("Microsoft/Edge/Application/msedge.exe")
+                    || path == local.join("Google/Chrome/Application/chrome.exe")
+            }),
+            Some(local.join("Google/Chrome/Application/chrome.exe"))
         );
         assert!(
-            discover_browser(&[root], |path| path.ends_with("chrome.exe"))
-                .unwrap()
-                .ends_with("chrome.exe")
+            discover_browser(std::slice::from_ref(&root), |path| path
+                .ends_with("msedge.exe"))
+            .unwrap()
+            .ends_with("msedge.exe")
         );
+        assert!(discover_browser(&[root], |_| false).is_none());
+    }
+
+    #[test]
+    fn launch_uses_a_full_browser_window_with_software_rendering() {
+        for url in [DEFAULT_URL, "https://example.com/path?q=hello%20world"] {
+            let args = launch_args(Path::new("profile"), url);
+            assert_eq!(&args[args.len() - 2..], ["--new-window", url]);
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg.to_string_lossy().starts_with("--app="))
+            );
+            for flag in [
+                "--user-data-dir=profile",
+                "--remote-debugging-address=127.0.0.1",
+                "--remote-debugging-port=0",
+                "--disable-gpu",
+                "--disable-gpu-compositing",
+                "--disable-accelerated-video-decode",
+                "--disable-background-mode",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--hide-crash-restore-bubble",
+            ] {
+                assert!(args.contains(&flag.into()), "missing {flag}");
+            }
+        }
     }
 
     #[test]

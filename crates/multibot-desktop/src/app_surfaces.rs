@@ -235,13 +235,6 @@ impl MultibotView {
 
     pub(super) fn apply_session_full_width(&mut self, full_width: bool) {
         self.settings.shell_fullscreen = full_width;
-        self.sidebar_state.set_mode(if full_width {
-            SidebarMode::Hidden
-        } else if self.settings.sidebar_mode == SidebarMode::Hidden {
-            SidebarMode::Open
-        } else {
-            self.settings.sidebar_mode
-        });
         self.cleanup_unmounted_surface_state();
     }
 

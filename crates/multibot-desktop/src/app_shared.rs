@@ -183,12 +183,7 @@ impl MultibotView {
             let visible_changed = !settings_visible_eq(&self.settings, &next_settings);
             self.settings = next_settings;
             if visible_changed {
-                self.sidebar_state
-                    .set_mode(if self.settings.shell_fullscreen {
-                        SidebarMode::Hidden
-                    } else {
-                        self.settings.sidebar_mode
-                    });
+                self.sidebar_state.set_mode(self.settings.sidebar_mode);
                 self.cleanup_unmounted_surface_state();
                 self.chat_state.font_size_pt = self
                     .settings
