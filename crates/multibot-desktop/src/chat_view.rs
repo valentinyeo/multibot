@@ -1247,7 +1247,7 @@ impl MultibotView {
                         .when_some(self.render_todo_header_and_drawer(cx), |el, todo_ui| {
                             el.child(todo_ui)
                         })
-                        .when_some(self.render_find_bar(cx), |el, bar| el.child(bar)),
+                        .when_some(self.render_find_bar(960.0, cx), |el, bar| el.child(bar)),
                 )
                 .child(
                     self.render_composer(

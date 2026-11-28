@@ -7733,7 +7733,7 @@ fn test_round4_gfm_markdown_pipe_table_expand_click_focuses_modal_and_scrolls(
 
             let bubble = window.find("msg-bubble-0").bounds();
             let expand = window.find(expand_btn_id.clone());
-            assert!(bubble.size.width <= px(width));
+            assert!(bubble.size.width <= px(680.0));
             assert!(expand.visible(), "Expand must remain visible at width {width}");
             assert!(expand.bounds().left() >= bubble.left());
             assert!(expand.bounds().right() <= bubble.right());

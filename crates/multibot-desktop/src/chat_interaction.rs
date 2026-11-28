@@ -1007,7 +1007,11 @@ impl MultibotView {
         )
     }
 
-    pub(crate) fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn render_find_bar(
+        &self,
+        column_max_w: f32,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.chat_state.find_open {
             return None;
         }
@@ -1022,8 +1026,10 @@ impl MultibotView {
         };
         Some(
             div()
+                .id("chat-find-bar-container")
+                .test_support()
                 .w_full()
-                .when(!self.settings.shell_fullscreen, |el| el.max_w(px(760.0)))
+                .when(!self.settings.shell_fullscreen, |el| el.max_w(px(column_max_w)))
                 .mx_auto()
                 .px_4()
                 .pt_1()

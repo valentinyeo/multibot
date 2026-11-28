@@ -4997,6 +4997,84 @@ fn empty_chat_has_uniform_floating_chrome_without_welcome_or_inbox_dot(cx: &mut 
 }
 
 #[gpui_kit::test]
+fn chat_companion_overlays_match_the_column_width(cx: &mut TestAppContext) {
+    let (handle, view) = open_test_chat_window(cx);
+    for (width, fullscreen) in [(1080.0, false), (1440.0, false), (1440.0, true)] {
+        cx.simulate_window_resize(handle, gpui_kit::size(px(width), px(900.0)));
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.settings.shell_fullscreen = fullscreen;
+                v.set_sidebar_mode_synced(multibot_core::SidebarMode::Hidden, cx);
+                let session = SessionSummary {
+                    id: "gridlines-overlays".into(),
+                    title: "Chat overlays".into(),
+                    agent: AgentKind::Claude,
+                    ..Default::default()
+                };
+                v.connection.sessions = vec![session.clone()];
+                v.selection.selected_session = Some(session);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let composer = window.find("chat-composer-pill").bounds();
+            let column_width = if fullscreen {
+                window.find("chat-panel-root").bounds().size.width
+            } else {
+                assert_eq!(composer.size.width, px(960.0));
+                px(960.0)
+            };
+            for (chord, id) in [
+                ("/", "slash-picker"),
+                ("@", "mention-picker"),
+                ("ctrl-f", "chat-find-bar-container"),
+            ] {
+                view.update(cx, |v, cx| {
+                    v.inputs.prompt_input.update(cx, |input, cx| {
+                        input.set_value("", window, cx);
+                        input.focus(window, cx);
+                    });
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                window.press(chord, cx);
+                window.render_frame(cx);
+                let overlay = window.find(id);
+                assert!(overlay.visible(), "{id}");
+                let bounds = overlay.bounds();
+                assert_eq!(bounds.size.width, column_width, "{id}");
+                assert_eq!(bounds.center().x, composer.center().x, "{id}");
+                if fullscreen {
+                    assert!(bounds.size.width > px(960.0), "{id}");
+                } else {
+                    assert_eq!(bounds.left(), composer.left(), "{id}");
+                    assert_eq!(bounds.right(), composer.right(), "{id}");
+                }
+                window.press("escape", cx);
+                window.render_frame(cx);
+            }
+            view.update(cx, |v, cx| {
+                v.selection.selected_session.as_mut().unwrap().agent = AgentKind::Shell;
+                v.chat_state.find_open = true;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let shell = window.find("server-shell-panel").bounds();
+            let find = window.find("chat-find-bar-container").bounds();
+            assert_eq!(find.size.width, shell.size.width);
+            assert_eq!(find.center().x, shell.center().x);
+            if !fullscreen {
+                assert_eq!(find.size.width, px(760.0));
+            }
+            view.update(cx, |v, cx| {
+                v.chat_state.find_open = false;
+                cx.notify();
+            });
+        })
+        .unwrap();
+    }
+}
+
+#[gpui_kit::test]
 fn chat_column_and_bubbles_keep_their_approved_widths(cx: &mut TestAppContext) {
     let (handle, view) = open_test_chat_window(cx);
     for (width, fullscreen) in [
